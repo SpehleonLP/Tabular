@@ -44,7 +44,9 @@ engine, no files.
   condition, never a native one. Folding numeric comparisons in was tried in the first
   version: it then needed to know what a wire is, inputs stopped being opaque, and it had to
   mirror AngelScript's types. Native conditions work only on Tabular's own input types:
-  **hash, flag set, `int64_t` and `double`.** The host converts its values to these.
+  **hash, flag set, `int64_t` and `double`.** The host converts its values to these. A native
+  comparison is one input against a literal (`energy < 100` is allowed as a band or comparison);
+  anything that combines inputs, does arithmetic or calls is a script condition.
 - **Not a Turing machine.** Anything that needs one is a message to script.
 
 ## Structure
@@ -79,6 +81,14 @@ engine, no files.
   command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an
   s-expression, to whoever consumes it, and that consumer interprets it. Tabular does not.
   Bridge steps are such a command.
+
+**Flag matching (owner, 2026-10-12).** For an input flag set `F` and each row's flag set `R`:
+
+1. a row with `R == F` exactly wins;
+2. failing that, the row with the largest `R & F`, compared as an integer, wins. Higher bits
+   outrank all lower bits together, so **the bit order of a flag set is its priority**;
+3. if `R & F` is 0 for every row, the row with `R == 0` wins. **That row must exist:** it is the
+   clear default. Every table needs a well-defined answer to "what happens if nothing matches".
 
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
