@@ -243,6 +243,17 @@ the bare object.
 **Cost:** compile once per distinct (snippet text, object type), cached by hash, shared by
 every instance of the type.
 
+**A wire is an arbitrary read-only lambda (owner, 2026-10-12).** It may loop, query and call,
+as long as every script function it uses is read-only (footprint writes `None`):
+
+    for (item : Query::Visible(me, "Grazer")) { … }   // e.g. a grazer ready to mate
+
+This is where reads of other entities go. The C3 bootstrap fit
+(`2026-10-12-c3-bootstrap-fit.md`, tension 2) found nearly every critter needs them. Wires see
+other objects through the world, never through their private state vectors (§2.4). Because a
+wire is host code behind a getter, none of this widens Tabular: Tabular still receives a value
+by name.
+
 ### 2.4 Visibility
 
 - **Owner-only forcing.** During the step, an object forces only its own wires.
