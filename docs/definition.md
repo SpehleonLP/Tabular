@@ -47,6 +47,11 @@ engine, no files.
   **hash, flag set, `int64_t` and `double`.** The host converts its values to these. A native
   comparison is one input against a literal (`energy < 100` is allowed as a band or comparison);
   anything that combines inputs, does arithmetic or calls is a script condition.
+- **No timers or counters (owner, 2026-10-12).** Tabular has no clock. A delay is a command to
+  the outside, a message to self that arrives later:
+  `(message :who this :from this :what "panic_cooldown" :delay random(0.4, 1.0))`.
+  The table absorbs it when it arrives. Accumulators such as energy are object state the host
+  owns; tables read them as inputs.
 - **Not a Turing machine.** Anything that needs one is a message to script.
 
 ## Structure
@@ -161,7 +166,10 @@ These are open, not missing. Each is decided by editing this file.
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
-- Counters and timers: a table primitive, or script?
+- `random(...)` inside a command. If the consumer evaluates it, the consumer needs Tabular's
+  deterministic random, which reintroduces two random functions. If Tabular draws it before
+  enqueueing (salted per site), the consumer receives a number.
+- A delayed message that arrives after its state has already ended and been re-entered.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
 - The display relations: one relation with several queries, or several relations.
