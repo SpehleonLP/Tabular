@@ -146,6 +146,28 @@ The host supplies:
 
 Closures are `{function, data, release}`. `release` is called when a binding is dropped.
 
+## Entity methods (owner, 2026-10-12)
+
+The grazer translation fit mostly in tables, but not as "90% of objects fit". It was "about
+10% of *each* object does not fit". So tables have to work alongside script inside one object.
+
+A bundle can carry a `--- script ---` section defining **entity methods**, such as
+`Grazer::my_method()`. They are new methods that are not part of the type's definition as far
+as AngelScript is concerned: closures owned by the bundle, which Tabular calls like any other
+closure. An entity method has **read/write access to this entity only**, so entity methods for
+different entities can run in parallel.
+
+Each method must behave in a constrained way, which the main script file does not have to:
+
+- it writes only its own entity;
+- nothing outside the bundle refers to it, so removing it can never require removing anything
+  else;
+- all of a bundle's methods are replaced together on hot reload.
+
+That is the point. If the bundle defines it, "if we remove this, we should also remove that, by
+modus ponens" is not even a question, because a method cannot do the things that create that
+confusion. Anything else goes through a command or a message to script.
+
 ## Budgets
 
 Each cost has a number and a benchmark that fails when the number is broken. The numbers come
@@ -172,6 +194,9 @@ These are open, not missing. Each is decided by editing this file.
   inside a table uses a different generator from `random()` in ordinary script. Likely
   resolved host-side, with access masks choosing the deterministic generator in table context
   (owner: "doable"). Open: how `random(...)` inside a command's s-expression is drawn.
+- Entity methods: may they read other entities (committed state, read-only)? Who invokes
+  them: table rows, a per-step update method, or both? How the constraints are enforced
+  (likely the engine's existing script footprints).
 - A delayed message that arrives after its state has already ended and been re-entered.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
