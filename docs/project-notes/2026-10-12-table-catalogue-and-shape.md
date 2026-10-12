@@ -122,6 +122,10 @@ step. That is fine: the state vector is private and nobody writes the world duri
 different rules in its own step. Bridges (A5) are commands. **Commands have an escape hatch:
 message the real script object.**
 
+**Commands (owner, 2026-10-12).** Commands go into lock-free queues and are consumed by their
+own subsystems. Except for messages, they must commute: different objects emitting commands
+cannot change the result by their order. That is all Tabular says about them.
+
 **Sequences are bridges.** In state A, wanting B, the bridge is C, D, E: play C, then D, then
 E, then start B on loop, so the object is in states C, D, E on the way. "Do this, then do
 that" is already what bridging does, and it obeys the rules: the table writes only to itself.
@@ -229,9 +233,6 @@ Script random should be the same primitive, with one definition provided by the 
   waits 20–50 ticks; each death pose fertilises the room. So a step probably needs a state or
   clip, an exit (clip ended, or N ticks, possibly random), commands on entry, and a bounded
   repeat count. Bounded repetition keeps it decidable.
-- **When commands apply.** Tables emit commands. Are they applied in "update game objects", and
-  do messages to script queue for the script-engine step and take effect in the tables next
-  tick?
 - **Counters and timers.** The grazer's panic, courting and mate-cooldown countdowns and its
   energy all follow "set to N (maybe random), decrement, leave at 0". Table primitive, or
   script?
