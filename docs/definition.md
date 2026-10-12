@@ -55,16 +55,20 @@ engine, no files.
 
     [ keys … ] [ conditions … ] [ weight ] [ values … ] [ suffix … ]
 
-- **Keys:** several allowed. They say which row this is.
-- **Conditions:** whether this row counts. A row may carry several, of different kinds (for
+- **Keys:** several allowed. They say which row this is. **A key is equality**, so keys can be
+  indexed: finding a row's candidates is a lookup, not a scan.
+- **Conditions:** whether this row counts. **Every match that is not equality is a
+  condition** (flags subset, band, edge, script). A row may carry several, of different kinds (for
   example a band, a flag and a script condition). If a row does not count, evaluation falls
   through to the next one.
 - **At most one weight** per row.
 - **Values:** several allowed. A value is a **write**: it is the table's result, written to
   state or output.
 - **Suffix:** N trailing cells that are not declared columns, as in the bridge table's C, D, E.
-  It is what the row does when picked: **commands, which are enqueued, not written.** A
-  command is not a value.
+  It is what the row does when picked: **a command, which is enqueued, not written.** A
+  command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an
+  s-expression, to whoever consumes it, and that consumer interprets it. Tabular does not.
+  Bridge steps are such a command.
 
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
@@ -116,8 +120,10 @@ These are open, not missing. Each is decided by editing this file.
 
 - The condition column kinds, and how many of each one table may have. Whether a row's
   conditions all have to hold.
-- The difference between a key and a condition beyond "which row" versus "does it count":
-  for example, which side flags-subset matching falls on.
+- A pivoted value axis (the phase table sets every flag whose band holds): is each header
+  evaluated as its own one-value table, or does the table pick `all`?
+- Whether a command's consumer compiles its s-expression at bind time (as the host compiles
+  snippets), so a step enqueues a prebuilt record rather than text.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
 - Counters and timers: a table primitive, or script?
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
