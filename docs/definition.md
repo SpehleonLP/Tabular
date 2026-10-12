@@ -93,6 +93,16 @@ engine, no files.
 Ties (two rows with the same largest `R & F`, neither exact) go to the **first in row order, or
 column order if the flags are pivoted**.
 
+**Picking (owner, 2026-10-12).**
+
+- **Ranked fall-through.** Keys select the candidate rows. Flag matching ranks them (rows
+  without flag conditions keep row order). Evaluation takes the best-ranked row whose other
+  conditions hold; if they do not, it falls through to the next-ranked row, down to the
+  default.
+- **Weights draw across every row that counts** (tentative: the owner's "I guess?").
+- **A pivoted flag output ORs together.** The phase table writes every flag whose band holds,
+  combined with OR.
+
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
 flags across the top are the value column, and the cells are bands, i.e. conditions.
@@ -143,8 +153,6 @@ These are open, not missing. Each is decided by editing this file.
 
 - The condition column kinds, and how many of each one table may have. Whether a row's
   conditions all have to hold.
-- A pivoted value axis (the phase table sets every flag whose band holds): is each header
-  evaluated as its own one-value table, or does the table pick `all`?
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
