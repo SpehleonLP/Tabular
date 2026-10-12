@@ -101,25 +101,32 @@ is kept, and none is wanted, because history is a stack.
 ### 2.1 Why tables at all
 
 AngelScript is an update loop or a message response, and nothing in games works like that.
-It is a square peg in a round hole. Nearly all game logic, about 90%, looks like this:
+It is a square peg in a round hole. Nearly all game logic, about 90%, is reading the world,
+running small state machines and writing to yourself. The tick:
 
-    parallel for all non-sleeping objects:   read world + run HFSMs
-    barrier
-    parallel for:                            update script
-    barrier
-    parallel for:                            commands
-    barrier
+    tables run            parallel; parallelizable script snippets run here
+    update game objects
+    run script engine     messages run here
 
-| Step | May read | May write |
-|---|---|---|
-| Read world + HFSMs | the world (committed), its own state vector | its own state vector |
-| Update script | itself | only itself |
-| Commands | — | the world, only where order does not matter (they commute) |
+| Step | May read | May write | Rules |
+|---|---|---|---|
+| Tables | the world (committed), its own state vector | its own state vector; emits commands and messages | Tabular's: bounded, no blocking, owner-only |
+| Update game objects | — | the world | the engine's |
+| Script engine | anything script may | anything script may | AngelScript's: a full Turing machine, message-driven |
 
-The first two steps of the original sketch ("update wires", then "run HFSMs") are **one
-step**, because wires must be lazy (§2.3). That is fine: the state vector is private and
-nobody writes the world during it. Bridges (A5) are commands. **Commands have an escape
-hatch: message the real script object.**
+The owner's first sketch had four steps ("update wires", "run HFSMs", "update script",
+"commands"). Wires must be lazy (§2.3), so reading the world and running the HFSMs became one
+step. That is fine: the state vector is private and nobody writes the world during it.
+
+**Anything that needs a full Turing machine is a message to AngelScript**, which runs under
+different rules in its own step. Bridges (A5) are commands. **Commands have an escape hatch:
+message the real script object.**
+
+**Sequences are bridges.** In state A, wanting B, the bridge is C, D, E: play C, then D, then
+E, then start B on loop, so the object is in states C, D, E on the way. "Do this, then do
+that" is already what bridging does, and it obeys the rules: the table writes only to itself.
+CAOS's blocking sequences (`anim [...] over`, `wait N`, the grazer's nod, chew and death
+poses) become bridges whose steps leave on clip-ended or timer-elapsed edges.
 
 **What it buys: hot reload.** Reloading any one piece never forces a change elsewhere by
 modus ponens. What happens is isolated, so each piece only has to care about itself. This is
@@ -217,6 +224,19 @@ Script random should be the same primitive, with one definition provided by the 
   loads; D1 rows come from contributors at runtime, each owned by `by`.
 
 ## 3. Open questions
+
+- **What a bridge step carries.** Nod repeats head-down/head-up 1–4 times at random; chew
+  waits 20–50 ticks; each death pose fertilises the room. So a step probably needs a state or
+  clip, an exit (clip ended, or N ticks, possibly random), commands on entry, and a bounded
+  repeat count. Bounded repetition keeps it decidable.
+- **When commands apply.** Tables emit commands. Are they applied in "update game objects", and
+  do messages to script queue for the script-engine step and take effect in the tables next
+  tick?
+- **Counters and timers.** The grazer's panic, courting and mate-cooldown countdowns and its
+  energy all follow "set to N (maybe random), decrement, leave at 0". Table primitive, or
+  script?
+- **Growing up is "replace me".** The grazer grows by killing itself and spawning the next age
+  with energy and position carried over. Respawn command, or is age just a state?
 
 - **Messages.** Tables are level-triggered watches, messages are discrete and carry
   arguments. Does a message write a latch into the state vector that tables see next tick, or
