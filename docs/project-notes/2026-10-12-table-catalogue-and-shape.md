@@ -126,6 +126,14 @@ message the real script object.**
 own subsystems. Except for messages, they must commute: different objects emitting commands
 cannot change the result by their order. That is all Tabular says about them.
 
+**Messages into tables (owner, 2026-10-12).** A table can absorb a message when handling it fits
+the table's rules: bounded, no blocking, writes only to self plus commands. The grazer's
+collision, herd-panic, mate-request, activate, picked-up and drop-babies handlers all fit.
+Messages are processed one at a time, in arrival order. Several messages to one object in one
+tick are rare in practice, disjoint messages would have the same problem one step down, and
+script objects already live with it (several handlers can fire in one tick). So no sorting or
+combining rule. Message types no table absorbs go to the object's script.
+
 **Sequences are bridges.** In state A, wanting B, the bridge is C, D, E: play C, then D, then
 E, then start B on loop, so the object is in states C, D, E on the way. "Do this, then do
 that" is already what bridging does, and it obeys the rules: the table writes only to itself.
@@ -239,9 +247,8 @@ Script random should be the same primitive, with one definition provided by the 
 - **Growing up is "replace me".** The grazer grows by killing itself and spawning the next age
   with energy and position carried over. Respawn command, or is age just a state?
 
-- **Messages.** Tables are level-triggered watches, messages are discrete and carry
-  arguments. Does a message write a latch into the state vector that tables see next tick, or
-  do messages stay with script (and the command escape hatch)?
+- **How a table absorbs a message.** Settled that it can and in what order (§2.1). Open: in
+  which step it runs, and how a handler row is written.
 - **Who reads wires besides the owner?** Animation reads them for blend spaces. If the state
   vector is invisible, is animation part of the owning object (reading after the barrier)
   rather than "another system"?
