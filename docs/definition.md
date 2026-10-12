@@ -90,6 +90,9 @@ engine, no files.
 3. if `R & F` is 0 for every row, the row with `R == 0` wins. **That row must exist:** it is the
    clear default. Every table needs a well-defined answer to "what happens if nothing matches".
 
+Ties (two rows with the same largest `R & F`, neither exact) go to the **first in row order, or
+column order if the flags are pivoted**.
+
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
 flags across the top are the value column, and the cells are bands, i.e. conditions.
