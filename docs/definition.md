@@ -43,7 +43,8 @@ engine, no files.
 - **Not a mirror of the host's types.** A comparison like `energy < 100` is a script
   condition, never a native one. Folding numeric comparisons in was tried in the first
   version: it then needed to know what a wire is, inputs stopped being opaque, and it had to
-  mirror AngelScript's types. Native conditions work only on Tabular's own few input types.
+  mirror AngelScript's types. Native conditions work only on Tabular's own input types:
+  **hash, flag set, `int64_t` and `double`.** The host converts its values to these.
 - **Not a Turing machine.** Anything that needs one is a message to script.
 
 ## Structure
@@ -68,7 +69,11 @@ engine, no files.
   through to the next one.
 - **At most one weight** per row.
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
-  Writes always go to the *next* vector, which is swapped in at the end of the step.
+  Writes always go to the *next* vector, which is swapped in at the end of the step. **A value
+  cell holds no math:** a literal or a name, never an expression.
+- **Within a step, tables read in DAG order.** A table may read a value another table wrote
+  earlier in the same step, so a chain (phase → lookup → bridge) settles in one step. State
+  kept across steps becomes visible at the swap.
 - **Suffix:** N trailing cells that are not declared columns, as in the bridge table's C, D, E.
   It is what the row does when picked: **a command, which is enqueued, not written.** A
   command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an
