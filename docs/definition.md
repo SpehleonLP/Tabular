@@ -51,6 +51,16 @@ engine, no files.
 | Relations | rows, key columns, match operators, pick policies; queries |
 | Machines | a state vector, transition tables, entry tables, bridges, edges |
 
+**A row (owner, 2026-10-12).**
+
+    [ condition columns … ] [ weight ] [ suffix … ]
+
+- **Condition columns** are declared in the table's header. A row may carry several, of
+  different kinds: for example a band, a flag and a script condition in one row.
+- **At most one weight** per row.
+- **A suffix**: N trailing cells that are not declared columns. It is the list of what the
+  row does when it is picked, as in the bridge table's C, D, E.
+
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
 tables); every step; when a relation's rows change.
 
@@ -95,7 +105,9 @@ from measurement before code that depends on them lands.
 
 These are open, not missing. Each is decided by editing this file.
 
-- What each column type is, and how many of each one table may have.
+- The condition column kinds, and how many of each one table may have. Whether a row's
+  conditions all have to hold.
+- What a suffix item can be, and whether a row's result is always its suffix.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
 - Counters and timers: a table primitive, or script?
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
