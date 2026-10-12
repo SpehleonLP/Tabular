@@ -36,7 +36,9 @@ engine, no files.
 
 - **Not a language.** Conditions and other snippets are opaque text, compiled by the host into
   closures Tabular calls. Tabular never parses, types or links the host's language.
-- **Not a scheduler.** It does not decide which instances step, when or on which thread.
+- **Not a scheduler.** It does not decide which instances step, when or on which thread, and
+  it does not decide whether a table needs to run again. Delays (timers) resolve outside it
+  too.
 - **Not file IO.** It receives text or builder calls, never paths.
 - **Not the owner of wires, the bundle file or hot reload policy.** Those belong to the
   subsystem that has Tabular. Tabular cannot tell a wire from any other named input.
@@ -166,9 +168,10 @@ These are open, not missing. Each is decided by editing this file.
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
-- `random(...)` inside a command. If the consumer evaluates it, the consumer needs Tabular's
-  deterministic random, which reintroduces two random functions. If Tabular draws it before
-  enqueueing (salted per site), the consumer receives a number.
+- Random across the boundary. The oddity to remove: `random()` called from a script snippet
+  inside a table uses a different generator from `random()` in ordinary script. Likely
+  resolved host-side, with access masks choosing the deterministic generator in table context
+  (owner: "doable"). Open: how `random(...)` inside a command's s-expression is drawn.
 - A delayed message that arrives after its state has already ended and been re-entered.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
