@@ -69,7 +69,7 @@ engine, no files.
   any number of the others. A row may carry several, of different kinds (for
   example a band, a flag and a script condition). If a row does not count, evaluation falls
   through to the next one.
-- **At most one weight** per row.
+- **At most one weight** per row, and only in a table with no conditions (see Picking).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
   Writes always go to the *next* vector, which is swapped in at the end of the step. **A value
   cell holds no math:** a literal or a name, never an expression.
@@ -99,7 +99,12 @@ column order if the flags are pivoted**.
   without flag conditions keep row order). Evaluation takes the best-ranked row whose other
   conditions hold; if they do not, it falls through to the next-ranked row, down to the
   default.
-- **Weights draw across every row that counts** (tentative: the owner's "I guess?").
+- **A weighted table has keys, a weight and outputs, and no conditions** (owner, 2026-10-12).
+  It is a transform with a probability: keys (any number, equality) choose which
+  distribution applies, and the draw is across the selected rows. So a weight reads as its
+  probability, and nothing is tested before drawing. When a roll needs a condition, an
+  earlier table in the DAG computes a key for it. This restriction can be lifted later
+  without breaking files; adding it later could not.
 - **A pivoted flag output ORs together.** The phase table writes every flag whose band holds,
   combined with OR.
 
