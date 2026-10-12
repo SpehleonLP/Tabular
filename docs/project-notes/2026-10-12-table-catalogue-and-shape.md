@@ -148,17 +148,30 @@ from somewhere**.
 
 ### 2.2 What Tabular is
 
-**Tabular is the HFSM.** It also owns the wires, because animation needs them and script has
-no sensible place for them, and it orchestrates the steps. The barriers make the parallel
-steps deterministic.
+**The file is a bundle; Tabular is one of its owners (owner, 2026-10-12).** The old
+`.tabular` file had a yaml header followed by csv subfiles separated by `---` markers, and that
+container worked; the delimiter is not the problem. But the yaml header held more than table
+metadata: it also held the wires. The wires are not related to the tables. They were there
+because, for the engine, one subsystem owns {wires, Tabular, hot reload} as one blob, even
+though Tabular does not own the other two. The file is that subsystem's unit of hot reload,
+and its sections belong to different owners.
 
-| Tabular owns | The host owns |
+The test for what is Tabular: **can it be defined, run and tested without a world** (no
+objects, threads or script engine)?
+
+| Tabular | The larger subsystem that has it |
 |---|---|
-| the structure of the `.tabular` file | compiling snippets, in its own language |
-| tables, the state vector, wires as named slots | object types and their fields |
-| lazy wire memos and getters | the parallel-for (Tabular takes one; it owns no thread pool) |
-| edges, deterministic random | the world, command execution, messaging |
-| orchestrating the steps | |
+| tables and relations: keys, match operators, pick policies | the bundle file and its container; which section goes to which owner |
+| a builder API at the core; parsing a table section is a front end that calls it | wires: names, lazy memos, owner-only forcing |
+| Definition (per section), Binding (per definition × object type), Instance (per object) | hot reload: when it happens, swapping and migrating |
+| a step function that touches only its own instance and emits opaque records | objects, the tick, `parallel_for`, barriers |
+| deterministic random from a seed it is given | command queues, message routing, the script engine, stable ids |
+
+Tabular reads its inputs (wires, fields, anything else) through names the host's symbol table
+resolves, so **it cannot tell a wire from a field and does not know wires are lazy**. Earlier
+in this note Tabular "owned the wires" and "orchestrated the steps". Both moved to the
+larger subsystem. Tabular guarantees that its step is safe to run in parallel; something else
+runs it.
 
 ### 2.3 Snippets are opaque; resolution is the host's
 
@@ -236,6 +249,12 @@ Script random should be the same primitive, with one definition provided by the 
   loads; D1 rows come from contributors at runtime, each owned by `by`.
 
 ## 3. Open questions
+
+- **Who owns the state vector and the machines?** If Tabular is relations and queries, are the
+  HFSMs (state, transitions, bridges, edges, timers) Tabular built on its own relations, or part
+  of the larger subsystem?
+- **What is the larger subsystem called?** It owns the bundle, the wires and hot reload; it
+  needs a name in `CONTEXT.md`.
 
 - **What a bridge step carries.** Nod repeats head-down/head-up 1–4 times at random; chew
   waits 20–50 ticks; each death pose fertilises the room. So a step probably needs a state or
