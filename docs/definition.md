@@ -40,6 +40,10 @@ engine, no files.
 - **Not file IO.** It receives text or builder calls, never paths.
 - **Not the owner of wires, the bundle file or hot reload policy.** Those belong to the
   subsystem that has Tabular. Tabular cannot tell a wire from any other named input.
+- **Not a mirror of the host's types.** A comparison like `energy < 100` is a script
+  condition, never a native one. Folding numeric comparisons in was tried in the first
+  version: it then needed to know what a wire is, inputs stopped being opaque, and it had to
+  mirror AngelScript's types. Native conditions work only on Tabular's own few input types.
 - **Not a Turing machine.** Anything that needs one is a message to script.
 
 ## Structure
@@ -58,12 +62,13 @@ engine, no files.
 - **Keys:** several allowed. They say which row this is. **A key is equality**, so keys can be
   indexed: finding a row's candidates is a lookup, not a scan.
 - **Conditions:** whether this row counts. **Every match that is not equality is a
-  condition** (flags subset, band, edge, script). A row may carry several, of different kinds (for
+  condition** (flags subset, band, edge, script). **At most one script condition per row;**
+  any number of the others. A row may carry several, of different kinds (for
   example a band, a flag and a script condition). If a row does not count, evaluation falls
   through to the next one.
 - **At most one weight** per row.
-- **Values:** several allowed. A value is a **write**: it is the table's result, written to
-  state or output.
+- **Values:** several allowed. A value is a **write** to the instance's own state vector.
+  Writes always go to the *next* vector, which is swapped in at the end of the step.
 - **Suffix:** N trailing cells that are not declared columns, as in the bridge table's C, D, E.
   It is what the row does when picked: **a command, which is enqueued, not written.** A
   command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an

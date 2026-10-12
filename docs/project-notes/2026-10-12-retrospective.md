@@ -109,6 +109,12 @@ and binding, the expensive step, can never be done offline. Its price was:
 The mesh cook (CBOR to a custom binary, about 1000 ms to 70 ms) is not a precedent. Meshes
 are megabytes, and their binary layout *is* the GPU layout. Tables have neither property.
 
+### 6a. Native numeric conditions were the slippery slope
+
+Folding comparisons like `energy < 100` into Tabular looked cheap and decidable. One thing
+led to another: Tabular then needed to know what a wire is, inputs were no longer opaque, and
+it had to mirror AngelScript's types. In the restart they are script conditions.
+
 ### 7. Generic versus specific
 
 The arc set out to make "one shape for all behaviour tables" (§1) that served animation
