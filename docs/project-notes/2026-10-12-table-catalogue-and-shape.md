@@ -25,9 +25,26 @@ implies polymorphism.
 brain table (B1), with a probability where the brain has a condition. That implies brain
 tables should be able to carry probabilities too.
 
-**A1 + A2 form a small machine of their own.** It is a stateless database that resolves
-names, fairly disjoint from the rest of animation. Tables that were meant to form one
-machine did not. Static data relations and per-tick decisions are different categories.
+**One machine that does not diagram as one (owner, 2026-10-12).** Animation is one machine in
+that it does one thing, but a diagram of how its tables connect has a gap. Variant and clip are
+used when *setting* the current state; the rest compute the *next* state and any bridging to
+get there:
+
+              every tick                          on entering a state
+     ┌─────────────────────────────┐        ┌──────────────────────────┐
+     │ phase(clip, t) → flags      │        │                          │
+     │ lookup(name, flags) → next  │──next─▶│ variant(name) → name'    │
+     │ bridge(from, to) → C, D, E  │ state  │ clip(name', kind) → addr │
+     └─────────────────────────────┘        └──────────────────────────┘
+              ▲                                          │
+              └──────────── the playing clip's address ──┘
+
+- **Deciding** (A3, A4, A5) works in logical state names.
+- **Resolving** (A2, A1) turns a logical name into a concrete clip, once, when that state or
+  bridge step is entered. It is the **entry action** of every animation state.
+- The two meet only at a transition. The forward edge is an "on enter" event, not a per-tick
+  wire; the edge back (phase reading the playing clip) is ordinary state. That is why A1 + A2
+  felt like a small, disjoint lookup database.
 
 **A3, Phase.** Sets flags that say where we are in the animation (strike, swing). Sparse
 pivot. The flags across the top implicitly define an enum.
@@ -262,8 +279,17 @@ Script random should be the same primitive, with one definition provided by the 
   weight.
 - **Vocabularies** (enums, flag sets) declared once, visibly, by the host. Tables bind to
   them by name, and the dependency points from tables to script.
-- **Static versus per-tick:** A1/A2 can resolve at bind time (except the random draw);
-  A3–A5 and B1 run every tick; D1 changes when rows are inserted or retracted.
+- **Triggers: when a table runs.**
+
+  | Trigger | Tables |
+  |---|---|
+  | at bind or instance creation | A1, partly: `kind` is fixed per object, so (name, kind) → clip can resolve once per instance |
+  | on entering a state (entry tables) | A2, A1; the random draw happens here, seeded at the entry tick |
+  | every tick | A3, A4, A5, B1 |
+  | when rows change | D1 |
+
+  A machine is per-tick tables that pick transitions plus **entry tables** that resolve what a
+  state means when it is entered.
 - **Authored versus runtime rows:** A* and B1 rows come from a file and are fixed when it
   loads; D1 rows come from contributors at runtime, each owned by `by`.
 
