@@ -96,6 +96,15 @@ hot reload and crash recovery. Fallback needs no rule of its own: the less speci
 never stopped matching. "Back out" goes to the most specific rows still live, so no history
 is kept, and none is wanted, because history is a stack.
 
+**What they answer (owner, 2026-10-12):** which window to display right now; docking, one
+fullscreen display, or several; what mode the pointer is in; whether the camera follows a
+character; and more. All of it needs an answer at every moment.
+
+**It works by RAII.** The crafting system adds a row; when the global state matches, crafting
+gets control. Crucially, it removes itself when it crashes, so even in a mode with no actual GUI
+elements nothing ends up in a non-state, frozen, because the state comes from an outer join.
+**The tables fundamentally always pick a row. They are outer-join oriented.**
+
 ## 2. The emerging shape
 
 ### 2.1 Why tables at all
@@ -167,6 +176,10 @@ objects, threads or script engine)?
 | a step function that touches only its own instance and emits opaque records | objects, the tick, `parallel_for`, barriers |
 | deterministic random from a seed it is given | command queues, message routing, the script engine, stable ids |
 
+**Two layers (owner agreed, 2026-10-12):** relations and queries at the bottom; machines (state
+vector, transitions, bridges, edges, timers) built on them, still in Tabular. A machine's
+transitions are a relation queried with a pick policy, plus a state vector.
+
 Tabular reads its inputs (wires, fields, anything else) through names the host's symbol table
 resolves, so **it cannot tell a wire from a field and does not know wires are lazy**. Earlier
 in this note Tabular "owned the wires" and "orchestrated the steps". Both moved to the
@@ -235,6 +248,12 @@ Script random should be the same primitive, with one definition provided by the 
 
 ### 2.6 Building blocks seen so far
 
+- **Totality: a query always picks a row (owner, 2026-10-12).** Tables are outer-join
+  oriented. This is what keeps the display tables from freezing in a non-state, and it is what
+  fallback (A4), fall-through (B1) and the dense clip table (A1) already do. Over finite key
+  domains (enums, flags) totality is checkable when the table is built, because tables stay
+  decidable. For rows guarded by opaque snippets it cannot be checked, so such a table needs a
+  final unconditional row (or an explicit "hold"). Candidate for the core definition.
 - **Relations** with N key columns. Pivoted or long form is presentation, chosen per table
   by density, never a different kind of table.
 - **Match operators:** eq, flags subset, band (a range of time), edges (crossings).
@@ -250,9 +269,6 @@ Script random should be the same primitive, with one definition provided by the 
 
 ## 3. Open questions
 
-- **Who owns the state vector and the machines?** If Tabular is relations and queries, are the
-  HFSMs (state, transitions, bridges, edges, timers) Tabular built on its own relations, or part
-  of the larger subsystem?
 - **What is the larger subsystem called?** It owns the bundle, the wires and hot reload; it
   needs a name in `CONTEXT.md`.
 
