@@ -78,8 +78,11 @@ engine, no files.
   through to the next one.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
-  Writes always go to the *next* vector, which is swapped in at the end of the step. **A value
-  cell holds no math:** a literal or a name, never an expression.
+  Writes always go to the *next* vector, which is swapped in at the end of the step. **What
+  is forbidden is computing a state from a state** (owner, 2026-10-12): a machine row like
+  `state, state'` = `a, a+1` makes the state space arithmetic instead of an enumerated set.
+  A next state always names a member. Arithmetic on data, such as `energy + 50`, is not what
+  the rule was avoiding, and may be allowed (tentative).
 - **Within a step, tables read in DAG order.** A table may read a value another table wrote
   earlier in the same step, so a chain (phase → lookup → bridge) settles in one step. State
   kept across steps becomes visible at the swap.
