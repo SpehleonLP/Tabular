@@ -53,13 +53,22 @@ engine, no files.
 
 **A row (owner, 2026-10-12).**
 
-    [ condition columns … ] [ weight ] [ suffix … ]
+    [ keys … ] [ conditions … ] [ weight ] [ values … ] [ suffix … ]
 
-- **Condition columns** are declared in the table's header. A row may carry several, of
-  different kinds: for example a band, a flag and a script condition in one row.
+- **Keys:** several allowed. They say which row this is.
+- **Conditions:** whether this row counts. A row may carry several, of different kinds (for
+  example a band, a flag and a script condition). If a row does not count, evaluation falls
+  through to the next one.
 - **At most one weight** per row.
-- **A suffix**: N trailing cells that are not declared columns. It is the list of what the
-  row does when it is picked, as in the bridge table's C, D, E.
+- **Values:** several allowed. A value is a **write**: it is the table's result, written to
+  state or output.
+- **Suffix:** N trailing cells that are not declared columns, as in the bridge table's C, D, E.
+  It is what the row does when picked: **commands, which are enqueued, not written.** A
+  command is not a value.
+
+**Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
+headers, with values in the cells. The phase table pivots the *output* into the headers: the
+flags across the top are the value column, and the cells are bands, i.e. conditions.
 
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
 tables); every step; when a relation's rows change.
@@ -107,7 +116,8 @@ These are open, not missing. Each is decided by editing this file.
 
 - The condition column kinds, and how many of each one table may have. Whether a row's
   conditions all have to hold.
-- What a suffix item can be, and whether a row's result is always its suffix.
+- The difference between a key and a condition beyond "which row" versus "does it count":
+  for example, which side flags-subset matching falls on.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
 - Counters and timers: a table primitive, or script?
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
