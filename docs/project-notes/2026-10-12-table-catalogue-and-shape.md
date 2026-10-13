@@ -328,7 +328,7 @@ Script random should be the same primitive, with one definition provided by the 
 - **What is the larger subsystem called?** It owns the bundle, the wires and hot reload; it
   needs a name in `CONTEXT.md`.
 
-- **How a host-compiled snippet sees wires (open, owner undecided between 2 and 3).** A
+- **How a host-compiled snippet sees wires (owner leaning to option 2, 2026-10-12).** A
   condition that is not one input against a literal, such as `energy - 50 < hp*2`, is wrapped
   implicitly (`function() { return energy - 50 < hp*2; }`) and compiled as a method against the
   object's type. `energy` is a member and resolves; `hp` is a wire and the method cannot see it.
@@ -350,6 +350,24 @@ Script random should be the same primitive, with one definition provided by the 
   run-time script exception naming a hash rather than a name, and `string` gained an implicit
   conversion to `Hash`. Whichever option is chosen, the observation is that it moved resolution
   from compile time to run time; options 2 and 3 both resolve at compile time with a type.
+
+  **Both 2 and 3 have a loop between the AST and the compiler** (owner): knowing which names are
+  wires needs the compiler's scopes, and compiling needs to know the wires and their types,
+  which (wires being snippets) come from compiling them.
+
+  **Why option 2 (owner).** A closure is `{fn, data, release}`, a hand-rolled `std::function`,
+  so it can contain whatever the wirer needs. The snippet compiles as
+  `bool cond(double hp) { … }`; the wirer's thunk captures the object and the wire slots,
+  forces those wires and passes them as arguments. Tabular sees an opaque closure, AngelScript
+  sees a method with parameters, and the fork is unchanged. On the loop:
+  - The lexer scan over-approximates safely: a name wrongly taken for a wire costs an unused
+    parameter and a wasted force, never different behaviour, provided a wire name colliding
+    with a member is a bind error and a local shadowing a parameter is a compile error.
+  - The scan yields the wire-to-wire graph before anything compiles, so compile order is
+    topological, cycles are reported first, and a wire's type can come from its compiled
+    snippet without being declared.
+  - Remaining cost: referenced wires are forced before the call, so a short-circuit no longer
+    skips them. Wires are memoised; an author who cares splits the test across conditions.
 
 - **What a bridge step carries.** Nod repeats head-down/head-up 1–4 times at random; chew
   waits 20–50 ticks; each death pose fertilises the room. So a step probably needs a state or

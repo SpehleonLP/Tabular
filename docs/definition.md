@@ -211,6 +211,6 @@ These are open, not missing. Each is decided by editing this file.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
 - The display relations: one relation with several queries, or several relations.
-- How a host-compiled snippet sees wires: parameters (rewrite free wire names) or an
-  unresolved-identifier hook in the AngelScript fork. See the shape note §3.
+- How a host-compiled snippet sees wires. Leaning (owner): free wire names become parameters,
+  and the wirer's closure captures and forces them. See the shape note §3.
 - Which use the first version serves.
