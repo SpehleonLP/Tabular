@@ -283,3 +283,87 @@ The high critter outliers are the ones with mate and nest claiming, replace-me g
 The delay gate and logic gate fit the same pattern. Their truth table (logic gate: in1 present, in2 present, mode) is the cleanest small table in the batch.
 
 **Files for follow-up:** none were written. Source CAOS file names are given in the sections above.
+## 8. Re-census under the wire rules (2026-10-12, later the same day)
+
+After this report the owner decided that a wire is an arbitrary read-only lambda that provably
+halts, may read other entities' world-visible state, and holds a value type or a handle (never
+a script type). Tabular reads only the `int64_t`/`double` wires, and a row's one script
+condition may be any halting read-only expression with wires passed in as parameters. (See the
+shape note §2.3 and §3.) A second Sonnet workflow (run `wf_279b9dd0-cd6`, eight readers) gave
+each reader its batch's classification and misfits from the first pass. Each one re-read the
+code counted as `entity_script` or `script_engine` and reported which lines move under these
+rules and which do not. File totals were held fixed.
+
+**Headline (behaviour lines, 48,051, infrastructure excluded):**
+
+| Category | Before | After | Change |
+|---|---|---|---|
+| table | 23.3% | 24.8% | +1.5 |
+| wire | 13.6% | 18.5% | +4.9 |
+| command | 30.7% | 31.3% | +0.6 |
+| entity_script | 12.5% | 9.9% | −2.6 |
+| script_engine | 19.9% | 15.5% | −4.4 |
+| **not fitting (entity + engine)** | **32.4%** | **25.4%** | **−7.0** |
+
+Where the 3,441 moved lines went: script_engine → wire 1,507, entity_script → wire 884,
+entity_script → table 390, script_engine → table 339, script_engine → command 269, other 52.
+The table gain is the cascade: once a scan is a wire, the decision built on it is a ranked row.
+
+Of the first pass's 263 misfits, readers marked 93 dissolved and 166 still blocked.
+
+**Per object (median share not fitting, files with at least 80 behaviour lines):**
+
+| Group | Before | After | Notes |
+|---|---|---|---|
+| critters (37) | 24% | 14% | grazer 24→7, snail 35→5, kingfisher 15→3, bacteria 22→7, balloon bug 41→18. The high end stays high: dragonfly 44, woodpigeon 41, beetle 36, Uglee 31, nudibranch 29. |
+| creature systems (7) | 24% | 15% | creatureDecisions 19→5 |
+| plants (13) | 25% | 17% | grass 53 (room uptake clamp) |
+| machines (37) | 25% | 19% | gates and detectors reach 0; egg layer, gene pod, Creator and replicator stay around 50 |
+| doors and lifts (10) | 40% | 36% | blocked on teleport-everything-touching and room-graph edits |
+| GUI (14) | 58% | 58% | unchanged, as intended (keyboard handler 40→9 is the exception) |
+
+So the wire rules mostly help the critters, which was the target: the typical critter goes
+from "about a quarter doesn't fit" to "about a seventh". What remains in the high-end critters
+is writes and claims, not reads.
+
+**Where the wire rules themselves strain** (clustered from all eight readers, most cited first):
+
+1. **A wire cannot return a set.** "For each match, message or act" is the deciding gap in
+   every batch: door and airlock occupants, the volcano kick, alarms, radio broadcast, the
+   recycler's passengers, herd panic. Readers wanted a fan-out command that holds a query, which
+   its consumer expands, with receivers filtering for themselves.
+2. **Sticky targets.** CAOS keeps a chosen food, mate or nest in `ov16`–`ov19` across ticks.
+   Tabular state cannot hold a handle, so a wire re-picks "nearest" each step and the target can
+   flip mid-approach, which changes behaviour. Keeping it needs a handle field on the host object
+   written by an entity method.
+3. **Handles cannot feed a table directly.** Each handle wire grows companions (`food_seen`,
+   `target_alive`, `target_dx`), and those must come from the same scan in the same step or
+   they disagree. Readers asked for per-step memoisation, wires with several outputs, wires
+   with arguments (`nearest_of(class)`), and one convention for null or tombstone as an int.
+4. **Option 2's eager forcing has a real cost.** Wires passed as parameters are forced every
+   step, so a satiated grazer still runs its full food scan. Nested queries are finite but
+   O(n²). Either laziness comes back or this belongs in the budgets.
+5. **Committed versus current state.** Wires read entities that are updating in parallel, so the
+   definition needs a snapshot rule (committed state at step start). With that, read-then-claim
+   patterns become deterministic but are still races: two fish find the same food, both message
+   it, both gain energy. Exactly-once is still unsolved.
+6. **Published versus private.** Once the other entity is itself table-driven, the fields others
+   read (partner's nest, a lift button's lit state, the env-control level) are its private
+   Tabular state, which wires may not read. Something has to publish chosen state as
+   world-visible.
+7. **Random inside wires and conditions.** Hunger against `rand(100,200)`, rejection-sampled
+   directions and random prey fallbacks want a deterministic draw in a read-only context. The
+   definition's random-across-the-boundary question now covers wires too.
+8. **Halting is syntactic.** `loop untl obst or counter >= N` and `loop rand untl nonzero` are
+   bounded in fact but rejected as written; translations rewrite them into counted `for`
+   loops. The checker must recognise those shapes.
+9. **Query order.** "First match" and "last sighted" depend on scan order, and `esee` versus
+   `totl` differ in range and line of sight. Queries need a defined order (nearest, then
+   stable id) and an explicit radius and visibility.
+10. **Smaller points:**
+    - A message to a handle presumes the receiver has a handler. Creatures, the camera and
+      rocks have no table to absorb it.
+    - Message arguments (`_p1_`, `_p2_`) are not yet named as inputs.
+    - The one-script-condition limit now hides an AND inside script text.
+    - Read-only is not sufficient on its own: `visi` is read-only and halts, but it is camera
+      coupling.
