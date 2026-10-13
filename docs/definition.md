@@ -13,6 +13,15 @@ and to resolve what a state means when it is entered.
 Tabular can be defined, run and tested **without a world**: no objects, no threads, no script
 engine, no files.
 
+**Why it exists: the hot-reload line (owner, 2026-10-12).** The main script engine can already
+express all of this. It is the full Turing machine, with `wait` and `lock` (cooperative, no
+preemption). What it does not do is cooperate with hot reload, because too much is going on:
+suspended scripts, references between modules, and constructors that are methods, so
+construction and behaviour share one reload unit. (CAOS kept install scripts separate from the
+event scripts that were replaced on live agents.) The goal is to **hot reload a `.tabular` file
+without thinking much**, so as much behaviour as possible goes into it. The restrictions below
+are the price of that line.
+
 ## What it promises
 
 1. **Totality.** Every query picks a row. Tables are outer-join oriented: the less specific
@@ -156,27 +165,44 @@ The host supplies:
 
 Closures are `{function, data, release}`. `release` is called when a binding is dropped.
 
-## Entity methods (owner, 2026-10-12)
+## Entity methods (owner, 2026-10-12; read-world form proposed)
 
 The grazer translation fit mostly in tables, but not as "90% of objects fit". It was "about
 10% of *each* object does not fit". So tables have to work alongside script inside one object.
+The C3 bootstrap census (`docs/project-notes/2026-10-12-c3-bootstrap-fit.md`, §8) located most of
+that 10%: **read from self, write to self** (accumulators, counters that run while a condition
+holds) and **read from world, write to private** (a sticky target, several values from one scan,
+a scan done only when needed). Neither is a command, and before this section neither had a place.
 
 A bundle can carry a `--- script ---` section defining **entity methods**, such as
 `Grazer::my_method()`. They are new methods that are not part of the type's definition as far
-as AngelScript is concerned: closures owned by the bundle, which Tabular calls like any other
-closure. An entity method has **read/write access to this entity only**, so entity methods for
-different entities can run in parallel.
+as AngelScript is concerned: closures owned by the bundle. Entity methods for different
+entities can run in parallel.
 
 Each method must behave in a constrained way, which the main script file does not have to:
 
-- it writes only its own entity;
+- it writes only its own entity's private fields (host-object fields, which may hold handles
+  and values; not Tabular state, so the state-from-state rule does not apply, just as it does
+  not apply to energy);
+- it reads its own entity, wires and committed world state (proposed; footprint reads `World`,
+  writes `Instance`);
+- **it never suspends** (owner): no `wait`, no `lock`, no state carried on a script stack
+  between steps. It runs to completion and must provably halt, like any snippet. Behaviour
+  that needs to suspend, or anything else outside these rules, leaves restricted land by a
+  message to the main script engine;
 - nothing outside the bundle refers to it, so removing it can never require removing anything
   else;
 - all of a bundle's methods are replaced together on hot reload.
 
 That is the point. If the bundle defines it, "if we remove this, we should also remove that, by
 modus ponens" is not even a question, because a method cannot do the things that create that
-confusion. Anything else goes through a command or a message to script.
+confusion.
+
+**A loop that spanned ticks in CAOS** becomes state plus rows plus a method: the body runs once
+per step, the exit condition is a row, and where the loop had got to is machine state. If it
+genuinely needs `wait`, it is a coroutine in the main script engine, reached by a message.
+CAOS loops with no `wait` relied on preemption to make progress; without preemption they must
+take one of these two forms.
 
 ## Budgets
 
@@ -204,9 +230,14 @@ These are open, not missing. Each is decided by editing this file.
   inside a table uses a different generator from `random()` in ordinary script. Likely
   resolved host-side, with access masks choosing the deterministic generator in table context
   (owner: "doable"). Open: how `random(...)` inside a command's s-expression is drawn.
-- Entity methods: may they read other entities (committed state, read-only)? Who invokes
-  them: table rows, a per-step update method, or both? How the constraints are enforced
-  (likely the engine's existing script footprints).
+- Entity methods: confirm the read-world form. How they are scheduled: as step nodes in the
+  DAG on the same triggers as tables (every step, on entry, on a message), rather than being
+  called from rows. How the constraints are enforced (likely the engine's existing script
+  footprints).
+- The snapshot rule: wires and entity methods read other entities' **committed** state as of
+  the start of the step (needed for parallel steps; census §8 strain 5).
+- Construction versus behaviour in a bundle: initial values and creation-time work separate
+  from the methods that reload, as CAOS separated install scripts from event scripts.
 - A delayed message that arrives after its state has already ended and been re-entered.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
