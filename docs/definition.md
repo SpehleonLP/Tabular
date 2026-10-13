@@ -236,6 +236,9 @@ These are open, not missing. Each is decided by editing this file.
   footprints).
 - The snapshot rule: wires and entity methods read other entities' **committed** state as of
   the start of the step (needed for parallel steps; census §8 strain 5).
+- Private writes (owner, not fully thought out): if a write is known to go to a field no one
+  else can see, it can count as no write for concurrency purposes, since no other reader can
+  observe it. The footprint system does not track private versus visible writes today.
 - Construction versus behaviour in a bundle: initial values and creation-time work separate
   from the methods that reload, as CAOS separated install scripts from event scripts.
 - A delayed message that arrives after its state has already ended and been re-entered.
