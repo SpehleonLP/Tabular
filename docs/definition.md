@@ -143,6 +143,10 @@ The host supplies:
 
 - **compile(snippet, kind, symbols) → closure or error.** Tabular's symbol table answers name
   lookups for the names it owns (state). A name both sides know is an error.
+  **compile rejects any snippet it cannot prove halts** (owner, 2026-10-12): loops over finite
+  query results or bounded counts are allowed; anything Rice's theorem applies to is not. A
+  read-only snippet (a condition, or a wire behind an input) may call only read-only functions.
+  This is how decidability survives opaque host code: the host promises it by refusing.
 - **Input resolution** for every name a table reads that Tabular does not own.
 - **Sinks** for emitted commands and messages.
 - **A seed** per instance and step.

@@ -248,6 +248,17 @@ as long as every script function it uses is read-only (footprint writes `None`):
 
     for (item : Query::Visible(me, "Grazer")) { … }   // e.g. a grazer ready to mate
 
+**It may loop, but Rice's theorem must not apply (owner, 2026-10-12).** Any function the
+compiler cannot prove halts is rejected: a loop over a query's finite result or a bounded count
+is fine; `while`, recursion and anything unbounded is not. If it is not certain to halt, it is
+rejected.
+
+Passing a predicate lambda to the query (`Query::Visible(me, "Grazer", pred)`) would make
+halting trivial, because the loop would live in native code. It is not the preferred shape for
+two reasons. First, the lambda is more opaque during analysis. Second, it amortizes worse:
+getting in and out of the script engine is the heaviest part of such a loop, and a predicate
+pays that cost once per item where an inline loop pays it once per wire.
+
 This is where reads of other entities go. The C3 bootstrap fit
 (`2026-10-12-c3-bootstrap-fit.md`, tension 2) found nearly every critter needs them. Wires see
 other objects through the world, never through their private state vectors (§2.4). Because a
