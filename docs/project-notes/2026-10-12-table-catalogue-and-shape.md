@@ -259,6 +259,14 @@ two reasons. First, the lambda is more opaque during analysis. Second, it amorti
 getting in and out of the script engine is the heaviest part of such a loop, and a predicate
 pays that cost once per item where an inline loop pays it once per wire.
 
+**What a wire may hold (owner, 2026-10-12).** Wires are not part of Tabular; Tabular is one
+reader of them. A wire may hold a **value type or a handle**, never a script type, because
+script types are hard to reason about. `GameObject` references are already handles: when the
+object is deleted, the holder keeps a tombstone. Tabular can use only the wires whose type is
+one of its own (`int64_t`, `double`). The rest, such as a handle to the grazer ready to mate,
+are for other readers: a command's consumer resolves `partner` in `(message partner
+"conceive")` itself, and the animation system reads its own wires.
+
 This is where reads of other entities go. The C3 bootstrap fit
 (`2026-10-12-c3-bootstrap-fit.md`, tension 2) found nearly every critter needs them. Wires see
 other objects through the world, never through their private state vectors (§2.4). Because a

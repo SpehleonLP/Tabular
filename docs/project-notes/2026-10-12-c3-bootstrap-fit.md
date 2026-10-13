@@ -172,7 +172,7 @@ The high critter outliers are the ones with mate and nest claiming, replace-me g
 - Strains the rules: exactly-once consumption, claims, and conserved pools need a reply or arbiter that the model does not have. Direct kill plus gain is the commonest instance. Whether commutativity is a property of the command kind or of the pair of emitters is also unclear (the readers differ). Population-cap spawns do not commute either.
 
 **2. Reads of another entity's state.**
-- **Resolved (owner, 2026-10-12):** wires are arbitrary lambdas that call only read-only script functions, e.g. `for (item : Query::Visible(me, "Grazer"))` giving a grazer ready to mate. See the shape note §2.3. The handle question below stays open.
+- **Resolved (owner, 2026-10-12):** wires are arbitrary lambdas that call only read-only script functions, e.g. `for (item : Query::Visible(me, "Grazer"))` giving a grazer ready to mate. See the shape note §2.3. Handles: wires may hold value types or handles (GameObject references keep a tombstone when the object dies), never script types; Tabular reads only the `int64_t`/`double` ones, and a command consumer resolves handle names itself.
 - Cluster C, in nearly every critter and machine. It decides the open question in the definition: several readers answered 'yes, they need it' for at least four files and for essentially every critter.
 - The model needs published attributes or entity-argument wires (`chem(creature, 48)`, `partner.nest`).
 - Object handles are stored in state across ticks (`ov16/ov17/ov18/ov19`, `ov01` supporter) and go null when the referent dies. The model has no handle type (hash, flags, int64, double only), and two readers suggest handles as int64 stable ids.
