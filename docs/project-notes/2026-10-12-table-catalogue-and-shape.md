@@ -328,6 +328,29 @@ Script random should be the same primitive, with one definition provided by the 
 - **What is the larger subsystem called?** It owns the bundle, the wires and hot reload; it
   needs a name in `CONTEXT.md`.
 
+- **How a host-compiled snippet sees wires (open, owner undecided between 2 and 3).** A
+  condition that is not one input against a literal, such as `energy - 50 < hp*2`, is wrapped
+  implicitly (`function() { return energy - 50 < hp*2; }`) and compiled as a method against the
+  object's type. `energy` is a member and resolves; `hp` is a wire and the method cannot see it.
+  1. *A backing field on the script object per wire, linked at bind.* Rejected-leaning: many
+     locals become heap state on every instance, values must be copied in each tick (no
+     laziness, possible staleness), and the class has to mirror the bundle. That is the record
+     mirroring the first version's slice 3 reversed.
+  2. *Free wire names rewritten into parameters* (`bool cond(double hp) { … }`). A lexer scan
+     of identifiers against the bundle's declared wire names finds them; no fork change. Every
+     referenced wire is forced before the call, so a short-circuit no longer skips it.
+  3. *An unresolved-identifier hook in the AngelScript fork.* The compiler asks the symbol table
+     passed to `compile` for a type and slot, and emits `get_wire(ctx, slot)` at the point of
+     use. Lazy and exact, but a compiler patch.
+
+  **The first version's attempt at this problem got weird.** Its "hashed member access"
+  (landed spec `2026-10-09-tabular-state-and-rules-design.md` §5) compiled a name that was not a
+  property into a `CityHash32` step, and whether the name existed was known only at
+  evaluation. So everything read that way had one type (`Hash`), a missing name became a
+  run-time script exception naming a hash rather than a name, and `string` gained an implicit
+  conversion to `Hash`. Whichever option is chosen, the observation is that it moved resolution
+  from compile time to run time; options 2 and 3 both resolve at compile time with a type.
+
 - **What a bridge step carries.** Nod repeats head-down/head-up 1–4 times at random; chew
   waits 20–50 ticks; each death pose fertilises the room. So a step probably needs a state or
   clip, an exit (clip ended, or N ticks, possibly random), commands on entry, and a bounded

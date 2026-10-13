@@ -46,7 +46,10 @@ engine, no files.
   condition, never a native one. Folding numeric comparisons in was tried in the first
   version: it then needed to know what a wire is, inputs stopped being opaque, and it had to
   mirror AngelScript's types. Native conditions work only on Tabular's own input types:
-  **hash, flag set, `int64_t` and `double`.** The host converts its values to these. A native
+  **hash, flag set, `int64_t` and `double`.** The host converts its values to these. A flag
+  set (AngelScript `uint32`) and a hash (`CityHash32`) are carried as `int64_t` and differ only
+  in how a condition reads them (subset versus equality), so a wire of either needs no extra
+  type. A native
   comparison is one input against a literal (`energy < 100` is allowed as a band or comparison);
   anything that combines inputs, does arithmetic or calls is a script condition.
 - **No timers or counters (owner, 2026-10-12).** Tabular has no clock. A delay is a command to
@@ -208,4 +211,6 @@ These are open, not missing. Each is decided by editing this file.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
 - The display relations: one relation with several queries, or several relations.
+- How a host-compiled snippet sees wires: parameters (rewrite free wire names) or an
+  unresolved-identifier hook in the AngelScript fork. See the shape note §3.
 - Which use the first version serves.
