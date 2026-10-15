@@ -159,6 +159,10 @@ The host supplies:
   query results or bounded counts are allowed; anything Rice's theorem applies to is not. A
   read-only snippet (a condition, or a wire behind an input) may call only read-only functions.
   This is how decidability survives opaque host code: the host promises it by refusing.
+  **Functions that take a script callback are out of bounds** (owner, 2026-10-15), including
+  Query's `where`, `random`, `count`, `find`, `closest`, `min`, `max` and `sortBy`. As declared
+  they run arbitrary script. To allow them, a function's footprint would have to depend on the
+  function passed to it. That is the script engine's problem, not Tabular's.
 - **Input resolution** for every name a table reads that Tabular does not own.
 - **Sinks** for emitted commands and messages.
 - **A seed** per instance and step.
