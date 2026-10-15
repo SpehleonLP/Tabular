@@ -22,6 +22,11 @@ event scripts that were replaced on live agents.) The goal is to **hot reload a 
 without thinking much**, so as much behaviour as possible goes into it. The restrictions below
 are the price of that line.
 
+**Reload order (owner, 2026-10-15).** The host's whole-world reload comes first: save state, rebuild
+the modules, restore objects by field name without running constructors. Tabular is a compartment
+carved from that, a part that can reload on its own because its constraints make that safe. It
+does not have to make reload safe by itself, because the whole-world reload is always the fallback.
+
 **The rule every other line answers to (owner, 2026-10-15).** The engine's assumptions and a
 scripting library's assumptions are opposed. A scripting library assumes code owns data: one
 heap, references anywhere, closures, callbacks, constructors that are methods, state kept on a
@@ -85,7 +90,7 @@ the feature is wrong, not the rule.
 | Layer | Contents |
 |---|---|
 | Relations | rows, key columns, match operators, pick policies; queries |
-| Machines | a state vector, transition tables, entry tables, bridges, edges |
+| Machines | a state vector, transition tables, entry tables, bridges, state-function and function-chain tables, edges |
 
 **A row (owner, 2026-10-12).**
 
@@ -176,47 +181,43 @@ The host supplies:
 - **Input resolution** for every name a table reads that Tabular does not own.
 - **Sinks** for emitted commands and messages.
 - **A seed** per instance and step.
+- **Running state functions:** start a named function for an instance, report when it returns,
+  and abort it.
 
 Closures are `{function, data, release}`. `release` is called when a binding is dropped.
 
-## Entity methods (owner, 2026-10-12; read-world form proposed)
+## State functions (owner, 2026-10-15)
 
 The grazer translation fit mostly in tables, but not as "90% of objects fit". It was "about
-10% of *each* object does not fit". So tables have to work alongside script inside one object.
-The C3 bootstrap census (`docs/project-notes/2026-10-12-c3-bootstrap-fit.md`, §8) located most of
-that 10%: **read from self, write to self** (accumulators, counters that run while a condition
-holds) and **read from world, write to private** (a sticky target, several values from one scan,
-a scan done only when needed). Neither is a command, and before this section neither had a place.
+10% of *each* object does not fit". The C3 bootstrap census
+(`docs/project-notes/2026-10-12-c3-bootstrap-fit.md`, §8) located most of that 10%: **read from
+self, write to self** (accumulators, a head nod repeated 1-4 times, sequences that wait) and
+**read from world, write to private** (a sticky target, a scan done only when needed). Both
+become state functions: in the second case a wire does the world read, and the function writes
+the result into its own entity.
 
-A bundle can carry a `--- script ---` section defining **entity methods**, such as
-`Grazer::my_method()`. They are new methods that are not part of the type's definition as far
-as AngelScript is concerned: closures owned by the bundle. Entity methods for different
-entities can run in parallel.
+**A state function is an ordinary script function in the host's script, named by a table.**
+Tabular holds only its name, resolved at bind like any other name it does not own. It is not
+part of the bundle, and nothing about it is compiled by Tabular. Two tables refer to them:
 
-Each method must behave in a constrained way, which the main script file does not have to:
+- **The state-function table** maps a state to the function that runs while the machine is in
+  it, as the clip table maps a state to a clip. Entering the state starts the function. While
+  it runs, the machine holds the state. When it returns, the machine steps again, and its
+  transition rows can read that it finished.
+- **The function-chain table** maps a move from one function to another onto the chain of
+  functions that runs between them, as the bridge table does for clips. It is the hierarchical
+  machine's transitions between functions.
 
-- it writes only its own entity's private fields (host-object fields, which may hold handles
-  and values; not Tabular state, so the state-from-state rule does not apply, just as it does
-  not apply to energy);
-- it reads its own entity, wires and committed world state (proposed; footprint reads `World`,
-  writes `Instance`);
-- **it never suspends** (owner): no `wait`, no `lock`, no state carried on a script stack
-  between steps. It runs to completion and must provably halt, like any snippet. Behaviour
-  that needs to suspend, or anything else outside these rules, leaves restricted land by a
-  message to the main script engine;
-- nothing outside the bundle refers to it, so removing it can never require removing anything
-  else;
-- all of a bundle's methods are replaced together on hot reload.
+A state function **may suspend** (`wait`, `lock`): waiting is often its point. Halting is
+required only of code that runs inside a step (conditions, wires) and of commutative writes. In
+exchange it **reads and writes only its own entity**, which the host checks as an asserted
+footprint on the function. Anything it needs from the world comes through wires, read fresh, so
+it never acts on a view that went stale while it waited.
 
-That is the point. If the bundle defines it, "if we remove this, we should also remove that, by
-modus ponens" is not even a question, because a method cannot do the things that create that
-confusion.
-
-**A loop that spanned ticks in CAOS** becomes state plus rows plus a method: the body runs once
-per step, the exit condition is a row, and where the loop had got to is machine state. If it
-genuinely needs `wait`, it is a coroutine in the main script engine, reached by a message.
-CAOS loops with no `wait` relied on preemption to make progress; without preemption they must
-take one of these two forms.
+**Reload.** The functions belong to the host's script and reload with it. When a binding is
+dropped or rebuilt, a running state function is aborted and its state is entered again, so it
+restarts with the current code. Whatever it had already done stays done. A function for which
+that matters must be safe to restart, or its state's entry rows must decide what happens.
 
 ## Budgets
 
@@ -239,22 +240,14 @@ These are open, not missing. Each is decided by editing this file.
   conditions all have to hold.
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
-- What a bridge step carries (state or clip, exit, commands on entry, bounded repeat).
+- What a bridge step carries (state or clip, exit, commands on entry, bounded repeat), and
+  whether a function-chain step carries the same.
 - Random across the boundary. The oddity to remove: `random()` called from a script snippet
   inside a table uses a different generator from `random()` in ordinary script. Likely
   resolved host-side, with access masks choosing the deterministic generator in table context
   (owner: "doable"). Open: how `random(...)` inside a command's s-expression is drawn.
-- Entity methods: confirm the read-world form. How they are scheduled: as step nodes in the
-  DAG on the same triggers as tables (every step, on entry, on a message), rather than being
-  called from rows. How the constraints are enforced (likely the engine's existing script
-  footprints).
-- The snapshot rule: wires and entity methods read other entities' **committed** state as of
+- The snapshot rule: wires read other entities' **committed** state as of
   the start of the step (needed for parallel steps; census §8 strain 5).
-- Private writes (owner, not fully thought out): if a write is known to go to a field no one
-  else can see, it can count as no write for concurrency purposes, since no other reader can
-  observe it. The footprint system does not track private versus visible writes today.
-- Construction versus behaviour in a bundle: initial values and creation-time work separate
-  from the methods that reload, as CAOS separated install scripts from event scripts.
 - A delayed message that arrives after its state has already ended and been re-entered.
 - How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
   arrival order.)
