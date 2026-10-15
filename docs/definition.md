@@ -22,6 +22,16 @@ event scripts that were replaced on live agents.) The goal is to **hot reload a 
 without thinking much**, so as much behaviour as possible goes into it. The restrictions below
 are the price of that line.
 
+**The rule every other line answers to (owner, 2026-10-15).** The engine's assumptions and a
+scripting library's assumptions are opposed. A scripting library assumes code owns data: one
+heap, references anywhere, closures, callbacks, constructors that are methods, state kept on a
+suspended stack. The engine assumes it owns the data and the code can be replaced, so code
+must hold no state, nothing may refer into it, and what it touches must be known. So
+**everything that crosses the boundary is in the engine's terms**: values (`int64_t`, `double`,
+hashes, handles as tombstones), records (commands, messages) and names the host resolves. It is
+never a reference, a callback or script state. When a feature needs something else to cross,
+the feature is wrong, not the rule.
+
 ## What it promises
 
 1. **Totality.** Every query picks a row. Tables are outer-join oriented: the less specific
