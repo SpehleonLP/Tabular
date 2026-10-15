@@ -232,6 +232,19 @@ from measurement before code that depends on them lands.
 | step | per instance per tick | TBD per row evaluated |
 | relation insert, retract, query | per change or query | TBD |
 
+## First version (owner, 2026-10-15)
+
+**Plain data tables: the Relations layer alone, with no machines.** For example:
+
+    spawn_points(owner, package, section, where)
+
+Every row carries the **owner** that contributed it, so reloading a contributor is "retract
+every row it owns, insert the new ones". That is the install script done as data: what an
+install placed is recorded as rows, so it can be found again and replaced, which a constructor
+could not offer. What happens to objects already spawned from a retracted row is the reload
+policy of the subsystem that owns the relation, not Tabular's. Tabular reports that the rows
+changed.
+
 ## Undecided
 
 These are open, not missing. Each is decided by editing this file.
@@ -254,4 +267,5 @@ These are open, not missing. Each is decided by editing this file.
 - The display relations: one relation with several queries, or several relations.
 - How a host-compiled snippet sees wires. Leaning (owner): free wire names become parameters,
   and the wirer's closure captures and forces them. See the shape note §3.
-- Which use the first version serves.
+- Relation column types beyond the four native ones: a position (a `Location` is a Section
+  plus a `vec2`), and whether a string column exists at all or is always a hash.
