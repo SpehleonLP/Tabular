@@ -161,8 +161,8 @@ tables); every step; when a relation's rows change.
 | Instance | object | state vector, edge history |
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them |
 
-**Surface.** A builder API is the core. Parsing a table section is a front end that calls the
-builder. Public headers live in `include/`; everything else is private.
+**Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
+front ends that produce those commands. Public headers live in `include/`; everything else is private.
 
 ## The host interface
 
@@ -244,6 +244,17 @@ install placed is recorded as rows, so it can be found again and replaced, which
 could not offer. What happens to objects already spawned from a retracted row is the reload
 policy of the subsystem that owns the relation, not Tabular's. Tabular reports that the rows
 changed.
+
+**Order of work (owner, 2026-10-15).**
+
+1. **Table definitions are command-pattern structs.** Creating a table, declaring its columns,
+   inserting and retracting rows are each a flat command record handed to the builder. The core
+   is complete and testable with no parser.
+2. **YAML front end:** a table definition written in YAML becomes those commands. It uses the
+   existing `Spehleon/lib/Yaml` wrapper over libyaml.
+3. **CSV front end:** rows loaded from CSV text into a defined table, which is then read-only.
+   The YAML definition supplies the column types the CSV cells are read as.
+4. **Machines** built from tables.
 
 ## Undecided
 
