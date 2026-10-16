@@ -35,8 +35,8 @@ Sources, cited in brackets:
 - [ ] RAII owner handles that retract their rows when dropped (crash and unload recovery) [def Lifetimes; cat D1 §1.3]
 - [ ] Report that a relation's rows changed, so the owning subsystem can apply its reload policy and dependent queries wake [def First version, Triggers; arc §6.2]
 - [ ] Refuse hash 0 and same-file hash collisions, naming both names [sr §3.1]
-- [ ] `vec4` column: four floats (never vec2/vec3; unused components ignored). A position is a string column naming the Section plus a `vec4` column; no `Location` type [def Column types, owner 2026-10-16]
-- [ ] String column holding a `counted_string` (the first non-8-byte cell: storage and readers change) [def Column types, owner 2026-10-16]
+- [ ] `vec2` column: two floats, one cell; the only vector type. Bands are `vec2`; a position is a string column naming the Section plus one or two `vec2` columns; no `Location` type [def Column types, owner 2026-10-16]
+- [ ] String column holding an interned `counted_string`, in its own per-table slot array like commands [def Column types, owner 2026-10-16]
 
 ## 2. Front ends
 

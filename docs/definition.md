@@ -166,10 +166,10 @@ tables); every step; when a relation's rows change.
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them |
 
 **Column types beyond the four native ones (owner, 2026-10-16).** A string column holds a
-`counted_string`. A `vec4` column holds four floats; only `vec4` exists, never `vec2` or
-`vec3`, and unused components are ignored (`w` always, `z` in a 2D area), for consistency.
-There is no position or `Location` type: a position is a string column naming the Section
-plus a `vec4` column. A handle is a `uint64_t` stored in an `int64_t` column: punning, not a type.
+`counted_string`. A `vec2` column holds two floats, one 8-byte cell like every other value;
+it is the only vector type (no `vec3` or `vec4`). A band `a..b` is a `vec2`. There is no
+position or `Location` type: a 2D position is a string column naming the Section plus a
+`vec2` column, and a 3D one adds a second `vec2` or a `double`. A handle is a `uint64_t` stored in an `int64_t` column: punning, not a type.
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
