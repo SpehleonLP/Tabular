@@ -3,6 +3,7 @@
 
 #include "Errors/errorcontext.h"
 #include "Support/counted_ptr.hpp"
+#include "Support/counted_string.h"
 #include "Support/shared_array.hpp"
 #include <expected/include/tl/expected.hpp>
 
@@ -24,7 +25,8 @@ namespace tabular
 //
 // Condition and Command columns hold no value. A condition is a closure the
 // host compiled, called with the object being tested. A command is an
-// s-expression handed to its consumer, never interpreted here.
+// s-expression handed to its consumer, never interpreted here. A String column
+// holds an interned counted_string in a slot array of its own.
 enum class column_type : uint8_t
 {
 	Hash,
@@ -34,6 +36,7 @@ enum class column_type : uint8_t
 	Condition,
 	Command,
 	Vec2,
+	String,
 };
 
 // One value in a row. The column's type says which member is live.
@@ -134,6 +137,19 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tab
 // retract_owner followed by its insert_rows again: what an install placed is
 // recorded as rows, so it can be found and replaced.
 
+// A string cell to write: a view, or a counted_string the caller already
+// holds. Either way the store interns it, so equal text is one handle, and a
+// handle already interned in the default table is kept as it is. Valid only
+// during the call, like every command view.
+struct string_in
+{
+	string_in() = default;
+	string_in(std::string_view text_in) : text(text_in) {}
+	string_in(counted_string const& s) : text(s) {}
+
+	std::string_view text;
+};
+
 struct insert_row
 {
 	uint32_t                          table = 0;
@@ -141,6 +157,7 @@ struct insert_row
 	std::span<cell const>             values;       // one per value column, in column order
 	std::span<closure const>          conditions;   // one per Condition column, in column order
 	std::span<std::string_view const> commands;     // one per Command column, in column order
+	std::span<string_in const>        strings;      // one per String column, in column order
 };
 
 // Removes the owner's rows from every table, because one contributor (a
@@ -172,6 +189,7 @@ struct load_rows
 	std::span<std::string_view const> commands;   // count * Command columns
 	load_refusal*                     refusal = nullptr;   // filled on a refusal, if given
 	std::span<closure const>          conditions; // count * Condition columns
+	std::span<string_in const>        strings;    // count * String columns
 };
 
 // Rows [first, last), in row order.
@@ -200,6 +218,8 @@ public:
 	tl::expected<cell, ErrorContext>                Value(size_t row, uint32_t column) const;
 	tl::expected<std::string_view, ErrorContext>    CommandAt(size_t row, uint32_t column) const;
 	tl::expected<bool, ErrorContext>                Holds(size_t row, uint32_t column, void const* this_in) const;
+	tl::expected<counted_string, ErrorContext>      StringAt(size_t row, uint32_t column) const;
+	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t column, std::string_view text) const;
 	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t column, cell value) const;
 	tl::expected<row_range, ErrorContext>           FindOrdered(std::span<cell const> prefix) const;
 
@@ -251,11 +271,12 @@ public:
 	size_t   RowCount(uint32_t table) const;
 	uint64_t OwnerOf(uint32_t table, size_t row) const;
 
-	// A value column's cell. Condition and Command columns are read with
-	// Holds and CommandAt instead.
+	// A value column's cell. Condition, Command and String columns are read
+	// with Holds, CommandAt and StringAt instead.
 	tl::expected<cell, ErrorContext>             Value(uint32_t table, size_t row, uint32_t column) const;
 	tl::expected<bool, ErrorContext>             Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const;
 	tl::expected<std::string_view, ErrorContext> CommandAt(uint32_t table, size_t row, uint32_t column) const;
+	tl::expected<counted_string, ErrorContext>   StringAt(uint32_t table, size_t row, uint32_t column) const;
 
 	// Changes whenever the table's rows change, and only then. A consumer
 	// compares it with the value it last saw to learn that it must re-read.
@@ -264,6 +285,9 @@ public:
 	// Rows whose key column equals value, in row order. Only key columns can
 	// be searched; a lookup, not a scan.
 	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t table, uint32_t column, cell value) const;
+
+	// Rows whose String key column holds text, in row order.
+	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t table, uint32_t column, std::string_view text) const;
 
 	// Rows whose leading order columns equal prefix, by binary search. The
 	// prefix may be shorter than the order; an empty one matches every row.

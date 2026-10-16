@@ -107,11 +107,19 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 
 	// Each column's position among the columns of its kind, as the store numbers them.
 	std::vector<uint32_t> slot(def.columns.size());
-	uint32_t valueCount   = 0;
-	uint32_t commandCount = 0;
+	uint32_t valueCount                         = 0;
+	uint32_t commandCount                       = 0;
+	uint32_t stringCount                        = 0;
+	[[maybe_unused]] uint32_t conditionCount    = 0;
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
-		slot[c] = def.columns[c].type == column_type::Command ? commandCount++ : valueCount++;
+		switch (def.columns[c].type)
+		{
+		case column_type::Command:   slot[c] = commandCount++;   break;
+		case column_type::String:    slot[c] = stringCount++;    break;
+		case column_type::Condition: slot[c] = conditionCount++; break;
+		default:                     slot[c] = valueCount++;     break;
+		}
 	}
 
 	// A BOM is the editor's, not the first column's name. Unicode is left as
@@ -161,6 +169,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	size_t const                  count = file.rows() - 1;
 	std::vector<cell>             values(count * valueCount);
 	std::vector<std::string_view> commands(count * commandCount);
+	std::vector<string_in>        strings(count * stringCount);
 	for (size_t r = 0; r < count; ++r)
 	{
 		uint32_t line = file.line_of_row(r + 1);
@@ -178,6 +187,15 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				commands[r * commandCount + slot[columnOf[h]]] = text;
 				continue;
 			}
+			if (column.type == column_type::String)
+			{
+				if (text.empty())
+				{
+					return tl::make_unexpected(ErrorContext("column '", column.name, "' is empty").with(label(line)));
+				}
+				strings[r * stringCount + slot[columnOf[h]]] = text;
+				continue;
+			}
 			auto value = ReadCell(column, text);
 			if (!value)
 			{
@@ -188,7 +206,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	}
 
 	load_refusal refusal;
-	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal});
+	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal, {}, strings});
 	if (!loaded)
 	{
 		ErrorContext error = std::move(loaded.error());

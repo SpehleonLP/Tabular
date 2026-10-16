@@ -227,3 +227,27 @@ TEST(RowsCsv, Vec2AcceptsSignsAndExponentsAndRefusesInnerSpaces)
 	relation_store spaced = VecStore();
 	EXPECT_TRUE(Mentions(LoadMarks(spaced, "id,at\n1,1 .. 2\n"), "'at'"));
 }
+
+TEST(RowsCsv, AStringCellIsItsTrimmedText)
+{
+	auto s = SchemaFromYaml(
+		"tables:\n  - name: places\n    read_only: true\n    columns:\n"
+		"      - {name: name, type: string, key: true}\n      - {name: id, type: int}\n", "places.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "id,name\n1,  north meadow \n", "places.csv"});
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "north meadow");
+	EXPECT_EQ(*store.Find(0, 0, std::string_view("north meadow")), std::vector<size_t>{0});
+}
+
+TEST(RowsCsv, AnEmptyStringCellIsRefused)
+{
+	auto s = SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
+		"      - {name: name, type: string}\n      - {name: id, type: int}\n", "places.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n,1\n", "places.csv"});
+	std::string error = loaded ? std::string() : loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "'name'")) << error;
+}

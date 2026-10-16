@@ -25,6 +25,7 @@ char const* TypeName(column_type type)
 	case column_type::Condition: return "condition";
 	case column_type::Command:   return "command";
 	case column_type::Vec2:      return "vec2";
+	case column_type::String:    return "string";
 	}
 	return "unknown type";
 }
@@ -34,6 +35,13 @@ char const* TypeName(column_type type)
 bool ComparesByEquality(column_type type)
 {
 	return type == column_type::Hash || type == column_type::Flags || type == column_type::Int;
+}
+
+// A key needs equality only. Interned strings have it, so a string can be a
+// key; it has no order worth sorting by, so it cannot be in one.
+bool CanBeKey(column_type type)
+{
+	return ComparesByEquality(type) || type == column_type::String;
 }
 
 tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_table const& c)
@@ -57,7 +65,7 @@ tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_tabl
 				return tl::make_unexpected(ErrorContext("table '", c.name, "' has column '", in.name, "' twice"));
 			}
 		}
-		if (in.key && !ComparesByEquality(in.type))
+		if (in.key && !CanBeKey(in.type))
 		{
 			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' is a ",
 				TypeName(in.type), " and cannot be a key"));
@@ -190,7 +198,7 @@ namespace
 
 bool IsValueColumn(column_type type)
 {
-	return type != column_type::Condition && type != column_type::Command;
+	return type != column_type::Condition && type != column_type::Command && type != column_type::String;
 }
 
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
@@ -268,6 +276,27 @@ held_condition Hold(closure const& c)
 	return UncountedWrap(static_cast<HeldCondition const*>(new HeldCondition(c)));
 }
 
+counted_string Intern(string_in s)
+{
+	return counted_string::MakeShared(s.text);
+}
+
+// Rows at or after row moved down one.
+template<typename Map>
+void ShiftRows(Map& index, uint32_t row)
+{
+	for (auto& entry : index)
+	{
+		for (uint32_t& r : entry.second)
+		{
+			if (r >= row)
+			{
+				++r;
+			}
+		}
+	}
+}
+
 // Negative, zero or positive as the row sorts before, with or after key, over
 // the first key.size() order slots. Order columns are integers, so every
 // compared cell is one.
@@ -320,29 +349,36 @@ struct table_rows
 	std::vector<cell>        cells;      // value columns, row-major
 	std::vector<held_condition> conditions; // Condition columns, row-major
 	std::vector<std::string> commands;   // Command columns, row-major
+	std::vector<counted_string> strings; // String columns, row-major, interned
 	std::vector<uint64_t>    owners;     // one per row
 	uint64_t                 generation = 0;
 
 	uint32_t              valueCount     = 0;
 	uint32_t              conditionCount = 0;
 	uint32_t              commandCount   = 0;
+	uint32_t              stringCount    = 0;
 	std::vector<uint32_t> slot;          // per column: its position among columns of its kind
 	std::vector<uint32_t> orderSlots;    // the order's columns, as value slots
 
 	// Per column, value -> rows in row order; filled for key columns only.
 	std::vector<std::unordered_map<int64_t, std::vector<uint32_t>>> index;
+	// The same for String key columns, keyed by text. The views point into the
+	// handles in strings, whose bytes do not move.
+	std::vector<std::unordered_map<std::string_view, std::vector<uint32_t>>> stringIndex;
 
 	// No rows, laid out for def.
 	explicit table_rows(table_def const& def)
 	{
 		slot.resize(def.columns.size());
 		index.resize(def.columns.size());
+		stringIndex.resize(def.columns.size());
 		for (uint32_t c = 0; c < def.columns.size(); ++c)
 		{
 			switch (def.columns[c].type)
 			{
 			case column_type::Condition: slot[c] = conditionCount++; break;
 			case column_type::Command:   slot[c] = commandCount++;   break;
+			case column_type::String:    slot[c] = stringCount++;    break;
 			default:                     slot[c] = valueCount++;     break;
 			}
 		}
@@ -360,13 +396,21 @@ struct table_rows
 		for (uint32_t c = 0; c < def.columns.size(); ++c)
 		{
 			index[c].clear();
+			stringIndex[c].clear();
 			if (!def.columns[c].key)
 			{
 				continue;
 			}
 			for (size_t r = 0; r < rowCount; ++r)
 			{
-				index[c][cells[r * valueCount + slot[c]].i].push_back(static_cast<uint32_t>(r));
+				if (def.columns[c].type == column_type::String)
+				{
+					stringIndex[c][std::string_view(strings[r * stringCount + slot[c]])].push_back(static_cast<uint32_t>(r));
+				}
+				else
+				{
+					index[c][cells[r * valueCount + slot[c]].i].push_back(static_cast<uint32_t>(r));
+				}
 			}
 		}
 	}
@@ -491,6 +535,11 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 		return refuse(ErrorContext("insert into '", def.name, "' has ", command.commands.size(),
 			" commands, but the table has ", rows.commandCount, " command columns"));
 	}
+	if (command.strings.size() != rows.stringCount)
+	{
+		return refuse(ErrorContext("insert into '", def.name, "' has ", command.strings.size(),
+			" strings, but the table has ", rows.stringCount, " string columns"));
+	}
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		column_def const& column = def.columns[c];
@@ -538,6 +587,14 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 		std::make_move_iterator(held.begin()), std::make_move_iterator(held.end()));
 	rows.commands.insert(rows.commands.begin() + pos * rows.commandCount,
 		command.commands.begin(), command.commands.end());
+	std::vector<counted_string> interned;
+	interned.reserve(command.strings.size());
+	for (string_in s : command.strings)
+	{
+		interned.push_back(Intern(s));
+	}
+	rows.strings.insert(rows.strings.begin() + pos * rows.stringCount,
+		std::make_move_iterator(interned.begin()), std::make_move_iterator(interned.end()));
 	rows.owners.insert(rows.owners.begin() + pos, command.owner);
 
 	auto row = static_cast<uint32_t>(pos);
@@ -551,19 +608,13 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 		// nothing, and is the common case: every unordered insert.
 		if (pos != count)
 		{
-			for (auto& entry : rows.index[c])
-			{
-				for (uint32_t& r : entry.second)
-				{
-					if (r >= row)
-					{
-						++r;
-					}
-				}
-			}
+			ShiftRows(rows.index[c], row);
+			ShiftRows(rows.stringIndex[c], row);
 		}
 		// Each list stays in row order, which is the order Find returns.
-		auto& list = rows.index[c][command.values[rows.slot[c]].i];
+		auto& list = def.columns[c].type == column_type::String
+			? rows.stringIndex[c][std::string_view(rows.strings[pos * rows.stringCount + rows.slot[c]])]
+			: rows.index[c][command.values[rows.slot[c]].i];
 		list.insert(std::lower_bound(list.begin(), list.end(), row), row);
 	}
 	++rows.generation;
@@ -602,6 +653,9 @@ void relation_store::Retract(retract_owner const& command)
 				std::move(rows.commands.begin() + r * rows.commandCount,
 					rows.commands.begin() + (r + 1) * rows.commandCount,
 					rows.commands.begin() + kept * rows.commandCount);
+				std::move(rows.strings.begin() + r * rows.stringCount,
+					rows.strings.begin() + (r + 1) * rows.stringCount,
+					rows.strings.begin() + kept * rows.stringCount);
 				rows.owners[kept] = rows.owners[r];
 			}
 			++kept;
@@ -616,6 +670,7 @@ void relation_store::Retract(retract_owner const& command)
 		rows.cells.resize(kept * rows.valueCount);
 		rows.conditions.resize(kept * rows.conditionCount);
 		rows.commands.resize(kept * rows.commandCount);
+		rows.strings.resize(kept * rows.stringCount);
 		// A retract happens on reload, not per frame, so rebuilding the key
 		// indexes is cheaper to get right than patching shifted row numbers.
 		rows.RebuildIndex(defs[t]);
@@ -665,6 +720,11 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	{
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
 			command.conditions.size(), " conditions, but the table has ", current.conditionCount, " condition columns"));
+	}
+	if (!spans(command.strings.size(), current.stringCount))
+	{
+		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
+			command.strings.size(), " strings, but the table has ", current.stringCount, " string columns"));
 	}
 	for (size_t i = 0; i < command.conditions.size(); ++i)
 	{
@@ -777,6 +837,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	next.cells.reserve(order.size() * next.valueCount);
 	next.commands.reserve(order.size() * next.commandCount);
 	next.conditions.reserve(order.size() * next.conditionCount);
+	next.strings.reserve(order.size() * next.stringCount);
 	next.owners.reserve(order.size());
 	for (source s : order)
 	{
@@ -797,6 +858,11 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			{
 				next.commands.push_back(current.commands[s.row * next.commandCount + k]);
 			}
+		}
+		for (uint32_t k = 0; k < next.stringCount; ++k)
+		{
+			next.strings.push_back(s.loaded ? Intern(command.strings[s.row * next.stringCount + k])
+			                                : current.strings[s.row * next.stringCount + k]);
 		}
 		next.owners.push_back(ownerOf(s));
 	}
@@ -886,6 +952,40 @@ tl::expected<bool, ErrorContext> ReadHolds(table_def const& def, table_rows cons
 	return holds;
 }
 
+tl::expected<counted_string, ErrorContext> ReadString(table_def const& def, table_rows const& rows, size_t row, uint32_t column)
+{
+	column_type const wanted  = column_type::String;
+	auto              checked = CheckAddress(def, rows.RowCount(), row, column, &wanted, "string");
+	if (!checked)
+	{
+		return tl::make_unexpected(std::move(checked.error()));
+	}
+	return rows.strings[row * rows.stringCount + rows.slot[column]];
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> FindText(table_def const& def, table_rows const& rows, uint32_t column,
+	std::string_view text)
+{
+	if (column >= def.columns.size())
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
+	}
+	column_def const& c = def.columns[column];
+	if (c.type != column_type::String || !c.key)
+	{
+		return tl::make_unexpected(ErrorContext("column '", c.name, "' of '", def.name,
+			"' is not a string key, so it cannot be looked up by text"));
+	}
+	std::vector<size_t> out;
+	auto const& index = rows.stringIndex[column];
+	auto        found = index.find(text);
+	if (found != index.end())
+	{
+		out.assign(found->second.begin(), found->second.end());
+	}
+	return out;
+}
+
 tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, table_rows const& rows, uint32_t column, cell value)
 {
 	if (column >= def.columns.size())
@@ -896,6 +996,11 @@ tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, ta
 	{
 		return tl::make_unexpected(ErrorContext("column '", def.columns[column].name, "' of '", def.name,
 			"' is not a key, so it cannot be looked up"));
+	}
+	if (def.columns[column].type == column_type::String)
+	{
+		return tl::make_unexpected(ErrorContext("column '", def.columns[column].name, "' of '", def.name,
+			"' is a string; look it up by text"));
 	}
 	auto fits = Check32(def.columns[column], def, value.i);
 	if (!fits)
@@ -973,6 +1078,34 @@ tl::expected<cell, ErrorContext> relation_store::Value(uint32_t table, size_t ro
 		return tl::make_unexpected(ErrorContext("no table ", table));
 	}
 	return ReadValue(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+}
+
+tl::expected<counted_string, ErrorContext> TableVersion::StringAt(size_t row, uint32_t column) const
+{
+	return ReadString(_data->def, _data->rows, row, column);
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> TableVersion::Find(uint32_t column, std::string_view text) const
+{
+	return FindText(_data->def, _data->rows, column, text);
+}
+
+tl::expected<counted_string, ErrorContext> relation_store::StringAt(uint32_t table, size_t row, uint32_t column) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return ReadString(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, std::string_view text) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return FindText(_storage->definition.tables()[table], _storage->RowsOf(table), column, text);
 }
 
 tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const
