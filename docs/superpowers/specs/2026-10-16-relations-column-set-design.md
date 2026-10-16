@@ -36,7 +36,7 @@ CSV; lexical ordering of strings; strings or `vec2` as keys of an order; anythin
 
 `vec2` is two floats, exactly 8 bytes, so it is a value column like `int` or `double`. The `cell`
 union gains `float v[2]` (not `glm::vec2`, whose constructors would make the union non-trivial)
-and a `cell::Vector(float x, float y)` maker; readers that hand a `vec2` out return `glm::vec2`.
+and a `cell::Vector(float x, float y)` maker; readers hand it out as a `cell`, read through `v`.
 `cell` stays trivially copyable and `static_assert(sizeof(cell) == 8)` holds.
 
 ### Strings are a slot kind of their own
@@ -111,8 +111,7 @@ key included, fails the definition.
   a table with condition columns and no function is refused before any cell is read. The function
   returns an error rather than a bare closure because errors are returned, not logged, and a bare
   closure has no way to say a cell did not compile.
-- **Ownership across a failure.** Closures built for earlier cells are held in the same holders
-  from the moment they are returned, so a parse error later in the file releases them.
+- **Ownership across a failure.** Closures built for earlier cells are held by a guard that releases them on any early return; `Load` adopts them all once called.
 
 ## Error handling
 

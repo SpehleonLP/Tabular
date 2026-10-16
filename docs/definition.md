@@ -273,13 +273,17 @@ changed.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
    an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
    must parse whole, and an empty cell is refused. A condition cell is handed, as text, to a
-   function the caller passes to the loader, `std::function<condition(std::string_view)>`,
-   which returns the compiled condition; that is the whole of Tabular's part in compiling
+   function the caller passes to the loader (`csv_rows::condition`, returning
+   `tl::expected<closure, ErrorContext>`), which returns the compiled condition; that is the whole of Tabular's part in compiling
    conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
    version). CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
    clash the line it clashes with.
+   **Column set** (built: string, `vec2` and condition columns, in `tabular/relation.h`): a string
+   cell is an interned `counted_string` (a caller may pass one it holds, or a view), and a string
+   key column is found by text; a `vec2` is two floats, written `a..b` in CSV; read-only tables
+   hold conditions, each released once when the last version holding its row lets go.
 4. **Machines** built from tables.
 
 **Two kinds of table (owner, 2026-10-15).**
