@@ -247,13 +247,22 @@ changed.
 
 **Order of work (owner, 2026-10-15).**
 
-1. **Table definitions are command-pattern structs.** Creating a table, declaring its columns,
-   inserting and retracting rows are each a flat command record handed to the builder. The core
-   is complete and testable with no parser.
-2. **YAML front end:** a table definition written in YAML becomes those commands. It uses the
-   existing `Spehleon/lib/Yaml` wrapper over libyaml.
-3. **CSV front end:** rows loaded from CSV text into a defined table, which is then read-only.
-   The YAML definition supplies the column types the CSV cells are read as.
+1. **Table definitions are command-pattern structs** (built: `tabular/relation.h`). Creating a
+   table, declaring its columns, inserting and retracting rows are each a flat command record
+   handed to the builder. The core is complete and testable with no parser.
+2. **YAML front end** (built: `tabular/schema_yaml.h`): a table definition written in YAML
+   becomes those commands, through the `Spehleon/lib/Yaml` markup walker. A `tables:` sequence;
+   each table has `name`, `columns` (`{name, type, key}`, type one of hash, flags, int, double,
+   condition, command), an optional `order_by: {columns: [names], unique}` and an optional
+   `read_only`. Any diagnostic fails the definition, an unknown key included, because a
+   misspelled `unique` silently ignored is a table that is not unique.
+3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
+   table. The header names the columns in any order, every non-condition column exactly once.
+   A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
+   an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
+   must parse whole, and an empty cell is refused. CSV cannot fill a condition column (how the
+   host compiles cell text into a condition is undecided), and has no quoting, so a command
+   cell cannot hold a comma.
 4. **Machines** built from tables.
 
 **Two kinds of table (owner, 2026-10-15).**
