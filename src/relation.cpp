@@ -190,10 +190,29 @@ bool IsValueColumn(column_type type)
 	return type != column_type::Condition && type != column_type::Command;
 }
 
-// A flag set is AngelScript uint32; anything outside it could not round-trip.
-bool FitsFlags(int64_t v)
+// A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
+// carried as int64_t, widened without sign. Anything outside [0, 2^32) is
+// either not one of them or a sign-extended copy, which would be a different
+// key that never matches the zero-extended one.
+bool Is32BitColumn(column_type type)
+{
+	return type == column_type::Hash || type == column_type::Flags;
+}
+
+bool Fits32(int64_t v)
 {
 	return v >= 0 && v <= INT64_C(0xFFFFFFFF);
+}
+
+tl::expected<void, ErrorContext> Check32(column_def const& column, table_def const& def, int64_t v)
+{
+	if (Is32BitColumn(column.type) && !Fits32(v))
+	{
+		return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name, "' is a ",
+			column.type == column_type::Hash ? "hash" : "flag set",
+			" and holds a 32-bit value widened without sign; got ", v));
+	}
+	return {};
 }
 
 void Release(closure const& c)
@@ -393,10 +412,13 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		column_def const& column = def.columns[c];
-		if (column.type == column_type::Flags && !FitsFlags(command.values[rows.slot[c]].i))
+		if (IsValueColumn(column.type))
 		{
-			return refuse(ErrorContext("column '", column.name, "' of '", def.name,
-				"' is a flag set and holds a uint32; got ", command.values[rows.slot[c]].i));
+			auto fits = Check32(column, def, command.values[rows.slot[c]].i);
+			if (!fits)
+			{
+				return refuse(std::move(fits.error()));
+			}
 		}
 		if (column.type == column_type::Condition && command.conditions[rows.slot[c]].function == nullptr)
 		{
@@ -437,14 +459,18 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 		{
 			continue;
 		}
-		// Rows after the insertion point moved down one.
-		for (auto& entry : rows.index[c])
+		// Rows after the insertion point moved down one. An append moves
+		// nothing, and is the common case: every unordered insert.
+		if (pos != count)
 		{
-			for (uint32_t& r : entry.second)
+			for (auto& entry : rows.index[c])
 			{
-				if (r >= row)
+				for (uint32_t& r : entry.second)
 				{
-					++r;
+					if (r >= row)
+					{
+						++r;
+					}
 				}
 			}
 		}
@@ -558,7 +584,8 @@ tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t ro
 	closure const& c     = rows.closures[row * rows.conditionCount + rows.slot[column]];
 	ErrorContext   error;
 	bool           holds = c.function(c.data, this_in, &error);
-	if (!error.message.empty())
+	// An error may arrive as context alone, from a closure wrapping another's.
+	if (!error.empty())
 	{
 		return tl::make_unexpected(std::move(error));
 	}
@@ -595,6 +622,11 @@ tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t ta
 		return tl::make_unexpected(ErrorContext("column '", def.columns[column].name, "' of '", def.name,
 			"' is not a key, so it cannot be looked up"));
 	}
+	auto fits = Check32(def.columns[column], def, value.i);
+	if (!fits)
+	{
+		return tl::make_unexpected(std::move(fits.error()));
+	}
 
 	std::vector<size_t> out;
 	auto const& index = _storage->tables[table].index[column];
@@ -623,6 +655,14 @@ tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table
 	{
 		return tl::make_unexpected(ErrorContext("a prefix of ", prefix.size(), " values for table '", def.name,
 			"', whose order has ", rows.orderSlots.size(), " columns"));
+	}
+	for (size_t k = 0; k < prefix.size(); ++k)
+	{
+		auto fits = Check32(def.columns[def.order[static_cast<uint32_t>(k)]], def, prefix[k].i);
+		if (!fits)
+		{
+			return tl::make_unexpected(std::move(fits.error()));
+		}
 	}
 	size_t count = rows.owners.size();
 	return row_range{

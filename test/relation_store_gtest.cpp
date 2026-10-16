@@ -214,6 +214,21 @@ TEST(RelationStore, FlagsOutOfRangeIsRefused)
 	EXPECT_EQ(store.RowCount(1), 2u);
 }
 
+TEST(RelationStore, HashOutOfRangeIsRefused)
+{
+	relation_store store = MakeStore();
+	// A CityHash32 widened by zero extension is the only form; a sign-extended
+	// copy of the same hash would be a different key that never matches it.
+	EXPECT_TRUE(store.Insert(spawn_row(1, INT64_C(0xFFFFFFFF), 0, 0, 0).row).has_value());
+
+	auto signExtended = store.Insert(spawn_row(1, INT64_C(-2147483648), 0, 0, 0).row);
+	ASSERT_FALSE(signExtended.has_value());
+	EXPECT_TRUE(Mentions(signExtended.error().message, "'package'")) << signExtended.error().message;
+
+	EXPECT_FALSE(store.Insert(spawn_row(1, INT64_C(0x100000000), 0, 0, 0).row).has_value());
+	EXPECT_EQ(store.RowCount(0), 1u);
+}
+
 TEST(RelationStore, ValueOfABadAddressIsRefused)
 {
 	relation_store store = MakeStore();
@@ -331,7 +346,7 @@ namespace
 
 // A condition's captured state: the threshold it compares with, and a count
 // of releases, so a test can see each closure released exactly once.
-struct probe
+struct Probe
 {
 	int64_t threshold = 0;
 	int*    released  = nullptr;
@@ -341,7 +356,7 @@ struct probe
 // negative this_in is an error the closure reports.
 bool AtLeast(void* data, void const* this_in, ErrorContext* error_out)
 {
-	auto const* p     = static_cast<probe const*>(data);
+	auto const* p     = static_cast<Probe const*>(data);
 	int64_t     value = *static_cast<int64_t const*>(this_in);
 	if (value < 0)
 	{
@@ -353,14 +368,14 @@ bool AtLeast(void* data, void const* this_in, ErrorContext* error_out)
 
 void ReleaseProbe(void* data)
 {
-	auto* p = static_cast<probe*>(data);
+	auto* p = static_cast<Probe*>(data);
 	++*p->released;
 	delete p;
 }
 
 closure MakeProbe(int64_t threshold, int* released)
 {
-	return closure{&AtLeast, new probe{threshold, released}, &ReleaseProbe};
+	return closure{&AtLeast, new Probe{threshold, released}, &ReleaseProbe};
 }
 
 // rules(priority: int, when: condition, then: command), ordered by priority, unique.
@@ -415,6 +430,29 @@ TEST(RelationStore, ConditionErrorIsReturned)
 	auto r = store.Holds(0, 0, 1, &negative);
 	ASSERT_FALSE(r.has_value());
 	EXPECT_TRUE(Mentions(r.error().message, "negative input -2")) << r.error().message;
+}
+
+namespace
+{
+
+// Reports its error only as context, as a closure that wraps another's error does.
+bool FailsWithContextOnly(void*, void const*, ErrorContext* error_out)
+{
+	*error_out = ErrorContext().with("while testing the row");
+	return true;
+}
+
+}
+
+TEST(RelationStore, ConditionErrorCarriedOnlyAsContextIsReturned)
+{
+	relation_store store = MakeRules();
+	ASSERT_TRUE(InsertRule(store, 1, 10, closure{&FailsWithContextOnly, nullptr, nullptr}, "(a)").has_value());
+	int64_t zero = 0;
+	auto r = store.Holds(0, 0, 1, &zero);
+	ASSERT_FALSE(r.has_value());
+	ASSERT_EQ(r.error().context.size(), 1u);
+	EXPECT_EQ(r.error().context[0], "while testing the row");
 }
 
 TEST(RelationStore, CommandTextIsCopied)

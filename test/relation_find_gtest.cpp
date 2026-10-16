@@ -126,16 +126,16 @@ TEST(RelationFind, ExtremeValuesLookUpAndRetract)
 {
 	relation_store store = SpawnPoints();
 	int64_t const highBitHash = INT64_C(0x80000000);   // a CityHash32 with bit 31 set
-	int64_t const negative    = -5;
-	ASSERT_TRUE(Spawn(store, UINT64_MAX, highBitHash, negative, 0, 0).has_value());
+	int64_t const maxHash     = INT64_C(0xFFFFFFFF);
+	ASSERT_TRUE(Spawn(store, UINT64_MAX, highBitHash, maxHash, 0, 0).has_value());
 	ASSERT_TRUE(Spawn(store, 1, 7, 7, 0, 0).has_value());
 
 	auto byHash = store.Find(0, 0, cell::Integer(highBitHash));
 	ASSERT_TRUE(byHash.has_value());
 	EXPECT_EQ(*byHash, (std::vector<size_t>{0}));
-	auto byNegative = store.Find(0, 1, cell::Integer(negative));
-	ASSERT_TRUE(byNegative.has_value());
-	EXPECT_EQ(*byNegative, (std::vector<size_t>{0}));
+	auto byMax = store.Find(0, 1, cell::Integer(maxHash));
+	ASSERT_TRUE(byMax.has_value());
+	EXPECT_EQ(*byMax, (std::vector<size_t>{0}));
 	EXPECT_EQ(store.OwnerOf(0, 0), UINT64_MAX);
 
 	store.Retract(retract_owner{UINT64_MAX});
@@ -143,6 +143,42 @@ TEST(RelationFind, ExtremeValuesLookUpAndRetract)
 	auto gone = store.Find(0, 0, cell::Integer(highBitHash));
 	ASSERT_TRUE(gone.has_value());
 	EXPECT_TRUE(gone->empty());
+}
+
+TEST(RelationFind, NegativeIntKeysLookUp)
+{
+	static add_column const columns[] = {{"offset", column_type::Int, true}};
+	create_table const table{"offsets", columns};
+	auto s = BuildSchema(std::span<create_table const>(&table, 1));
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	relation_store store(std::move(*s));
+	for (int64_t v : {INT64_MIN, int64_t(-5), int64_t(5)})
+	{
+		cell const values[] = {cell::Integer(v)};
+		ASSERT_TRUE(store.Insert(insert_row{0, 1, values, {}, {}}).has_value());
+	}
+	auto found = store.Find(0, 0, cell::Integer(-5));
+	ASSERT_TRUE(found.has_value()) << found.error().message;
+	EXPECT_EQ(*found, (std::vector<size_t>{1}));
+	auto lowest = store.Find(0, 0, cell::Integer(INT64_MIN));
+	ASSERT_TRUE(lowest.has_value());
+	EXPECT_EQ(*lowest, (std::vector<size_t>{0}));
+}
+
+TEST(RelationFind, OutOfRangeHashLookupIsRefused)
+{
+	relation_store store = OrderedSpawnPoints();
+	ASSERT_TRUE(Spawn(store, 1, INT64_C(0x80000000), 500, 0, 0).has_value());
+
+	// The sign-extended spelling of the stored hash: refused, not a silent miss.
+	auto byKey = store.Find(0, 0, cell::Integer(INT64_C(-2147483648)));
+	ASSERT_FALSE(byKey.has_value());
+	EXPECT_TRUE(Mentions(byKey.error().message, "'package'")) << byKey.error().message;
+
+	cell const prefix[] = {cell::Integer(-1)};
+	auto byOrder = store.FindOrdered(0, prefix);
+	ASSERT_FALSE(byOrder.has_value());
+	EXPECT_TRUE(Mentions(byOrder.error().message, "'section'")) << byOrder.error().message;
 }
 
 TEST(RelationFind, KeyLookupIsRightAfterAnInsertInTheMiddle)
