@@ -181,9 +181,11 @@ TEST(RelationLoad, BadLoadsAreRefused)
 	add_column const rules[] = {{"when", column_type::Condition, false}};
 	create_table const table{"rules", rules, nullptr, true};
 	relation_store withCondition(std::move(*BuildSchema(std::span<create_table const>(&table, 1))));
-	auto conditions = withCondition.Load(load_rows{0, 1, 0, {}, {}});
+	// A condition table loads now, but a row must bring its condition.
+	EXPECT_TRUE(withCondition.Load(load_rows{0, 1, 0, {}, {}}).has_value());
+	auto conditions = withCondition.Load(load_rows{0, 1, 1, {}, {}});
 	ASSERT_FALSE(conditions.has_value());
-	EXPECT_TRUE(Mentions(conditions.error().message, "'when'")) << conditions.error().message;
+	EXPECT_TRUE(Mentions(conditions.error().message, "condition")) << conditions.error().message;
 }
 
 TEST(RelationLoad, AHeldVersionIsNeverModified)

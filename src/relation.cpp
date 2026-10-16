@@ -3,6 +3,8 @@
 #include "Support/strings.h"
 
 #include <algorithm>
+#include <atomic>
+#include <iterator>
 #include <unordered_map>
 #include <utility>
 
@@ -215,7 +217,7 @@ tl::expected<void, ErrorContext> Check32(column_def const& column, table_def con
 	return {};
 }
 
-void Release(closure const& c)
+void ReleaseClosure(closure const& c)
 {
 	if (c.release)
 	{
@@ -227,8 +229,42 @@ void ReleaseAll(std::span<closure const> closures)
 {
 	for (closure const& c : closures)
 	{
-		Release(c);
+		ReleaseClosure(c);
 	}
+}
+
+// A condition shared by every holder of its row. A survivor of a reload sits
+// in the old version and the new one, and release must still run exactly
+// once: when the last of them lets go.
+class HeldCondition
+{
+public:
+	explicit HeldCondition(closure const& c) : _closure(c) {}
+	~HeldCondition() { ReleaseClosure(_closure); }
+	HeldCondition(HeldCondition const&)            = delete;
+	HeldCondition& operator=(HeldCondition const&) = delete;
+
+	closure const& get() const { return _closure; }
+
+	void AddRef() const { _refs.fetch_add(1, std::memory_order_relaxed); }
+	void Release() const
+	{
+		if (_refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		{
+			delete this;
+		}
+	}
+
+private:
+	closure                  _closure;
+	mutable std::atomic<int> _refs{1};
+};
+
+using held_condition = counted_ptr<HeldCondition const>;
+
+held_condition Hold(closure const& c)
+{
+	return UncountedWrap(static_cast<HeldCondition const*>(new HeldCondition(c)));
 }
 
 // Negative, zero or positive as the row sorts before, with or after key, over
@@ -281,7 +317,7 @@ size_t OrderBound(std::span<cell const> cells, size_t rowCount, size_t stride,
 struct table_rows
 {
 	std::vector<cell>        cells;      // value columns, row-major
-	std::vector<closure>     closures;   // Condition columns, row-major
+	std::vector<held_condition> conditions; // Condition columns, row-major
 	std::vector<std::string> commands;   // Command columns, row-major
 	std::vector<uint64_t>    owners;     // one per row
 	uint64_t                 generation = 0;
@@ -372,14 +408,6 @@ struct relation_store::Storage
 	table_rows const& RowsOf(uint32_t table) const
 	{
 		return versions[table] ? versions[table]->_data->rows : tables[table];
-	}
-
-	~Storage()
-	{
-		for (table_rows const& rows : tables)
-		{
-			ReleaseAll(rows.closures);
-		}
 	}
 };
 
@@ -499,8 +527,14 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	}
 
 	rows.cells.insert(rows.cells.begin() + pos * rows.valueCount, command.values.begin(), command.values.end());
-	rows.closures.insert(rows.closures.begin() + pos * rows.conditionCount,
-		command.conditions.begin(), command.conditions.end());
+	std::vector<held_condition> held;
+	held.reserve(command.conditions.size());
+	for (closure const& c : command.conditions)
+	{
+		held.push_back(Hold(c));
+	}
+	rows.conditions.insert(rows.conditions.begin() + pos * rows.conditionCount,
+		std::make_move_iterator(held.begin()), std::make_move_iterator(held.end()));
 	rows.commands.insert(rows.commands.begin() + pos * rows.commandCount,
 		command.commands.begin(), command.commands.end());
 	rows.owners.insert(rows.owners.begin() + pos, command.owner);
@@ -542,14 +576,11 @@ void relation_store::Retract(retract_owner const& command)
 	{
 		if (_storage->versions[t])
 		{
-			// A table with a condition column cannot be loaded, so it has no
-			// rows to remove. Any other gets the version without the owner's
-			// rows, put in place like any load; removing rows cannot clash.
-			if (_storage->versions[t]->_data->rows.conditionCount == 0)
-			{
-				auto removed = Load(load_rows{t, command.owner, 0, {}, {}});
-				(void)removed;
-			}
+			// The version without the owner's rows, put in place like any load.
+			// Removing rows cannot clash or carry a bad cell, so this load is
+			// never refused, and there is nothing to report.
+			auto removed = Load(load_rows{t, command.owner, 0, {}, {}});
+			(void)removed;
 			continue;
 		}
 		auto&  rows = _storage->tables[t];
@@ -558,15 +589,15 @@ void relation_store::Retract(retract_owner const& command)
 		{
 			if (rows.owners[r] == command.owner)
 			{
-				ReleaseAll(std::span<closure const>(rows.closures).subspan(r * rows.conditionCount, rows.conditionCount));
 				continue;
 			}
 			if (kept != r)
 			{
 				std::copy_n(rows.cells.begin() + r * rows.valueCount, rows.valueCount,
 					rows.cells.begin() + kept * rows.valueCount);
-				std::copy_n(rows.closures.begin() + r * rows.conditionCount, rows.conditionCount,
-					rows.closures.begin() + kept * rows.conditionCount);
+				std::move(rows.conditions.begin() + r * rows.conditionCount,
+					rows.conditions.begin() + (r + 1) * rows.conditionCount,
+					rows.conditions.begin() + kept * rows.conditionCount);
 				std::move(rows.commands.begin() + r * rows.commandCount,
 					rows.commands.begin() + (r + 1) * rows.commandCount,
 					rows.commands.begin() + kept * rows.commandCount);
@@ -582,7 +613,7 @@ void relation_store::Retract(retract_owner const& command)
 		}
 		rows.owners.resize(kept);
 		rows.cells.resize(kept * rows.valueCount);
-		rows.closures.resize(kept * rows.conditionCount);
+		rows.conditions.resize(kept * rows.conditionCount);
 		rows.commands.resize(kept * rows.commandCount);
 		// A retract happens on reload, not per frame, so rebuilding the key
 		// indexes is cheaper to get right than patching shifted row numbers.
@@ -593,6 +624,15 @@ void relation_store::Retract(retract_owner const& command)
 
 tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 {
+	// Every closure the load carries is ours from here on: a refusal releases
+	// them when held goes out of scope, and a success moves them into rows.
+	std::vector<held_condition> held;
+	held.reserve(command.conditions.size());
+	for (closure const& c : command.conditions)
+	{
+		held.push_back(Hold(c));
+	}
+
 	auto defs = _storage->definition.tables();
 	if (command.table >= defs.size())
 	{
@@ -604,17 +644,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' is not read-only; its rows come from Insert"));
 	}
 	table_rows const& current = _storage->versions[command.table]->_data->rows;
-	if (current.conditionCount != 0)
-	{
-		for (column_def const& column : def.columns)
-		{
-			if (column.type == column_type::Condition)
-			{
-				return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
-					"', and a load carries no conditions"));
-			}
-		}
-	}
 	// Divided, not multiplied: a count large enough to wrap the product would
 	// pass a size check against empty spans and read past them.
 	auto spans = [&](size_t size, uint32_t width)
@@ -630,6 +659,24 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	{
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
 			command.commands.size(), " commands, but the table has ", current.commandCount, " command columns"));
+	}
+	if (!spans(command.conditions.size(), current.conditionCount))
+	{
+		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
+			command.conditions.size(), " conditions, but the table has ", current.conditionCount, " condition columns"));
+	}
+	for (size_t i = 0; i < command.conditions.size(); ++i)
+	{
+		if (command.conditions[i].function == nullptr)
+		{
+			size_t const r = i / current.conditionCount;
+			if (command.refusal)
+			{
+				command.refusal->row = r;
+			}
+			return tl::make_unexpected(ErrorContext("load into '", def.name, "' got a condition with no function")
+				.with("row ", r));
+		}
 	}
 	for (size_t r = 0; r < command.count; ++r)
 	{
@@ -728,11 +775,17 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	table_rows next(def);
 	next.cells.reserve(order.size() * next.valueCount);
 	next.commands.reserve(order.size() * next.commandCount);
+	next.conditions.reserve(order.size() * next.conditionCount);
 	next.owners.reserve(order.size());
 	for (source s : order)
 	{
 		std::span<cell const> from = cellsOf(s);
 		next.cells.insert(next.cells.end(), from.begin(), from.end());
+		for (uint32_t k = 0; k < next.conditionCount; ++k)
+		{
+			next.conditions.push_back(s.loaded ? held[s.row * next.conditionCount + k]
+			                                   : current.conditions[s.row * next.conditionCount + k]);
+		}
 		for (uint32_t k = 0; k < next.commandCount; ++k)
 		{
 			if (s.loaded)
@@ -810,6 +863,26 @@ tl::expected<std::string_view, ErrorContext> ReadCommand(table_def const& def, t
 		return tl::make_unexpected(std::move(checked.error()));
 	}
 	return std::string_view(rows.commands[row * rows.commandCount + rows.slot[column]]);
+}
+
+tl::expected<bool, ErrorContext> ReadHolds(table_def const& def, table_rows const& rows, size_t row, uint32_t column,
+	void const* this_in)
+{
+	column_type const wanted  = column_type::Condition;
+	auto              checked = CheckAddress(def, rows.RowCount(), row, column, &wanted, "condition");
+	if (!checked)
+	{
+		return tl::make_unexpected(std::move(checked.error()));
+	}
+	closure const& c     = rows.conditions[row * rows.conditionCount + rows.slot[column]]->get();
+	ErrorContext   error;
+	bool           holds = c.function(c.data, this_in, &error);
+	// An error may arrive as context alone, from a closure wrapping another's.
+	if (!error.empty())
+	{
+		return tl::make_unexpected(std::move(error));
+	}
+	return holds;
 }
 
 tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, table_rows const& rows, uint32_t column, cell value)
@@ -907,23 +980,12 @@ tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t ro
 	{
 		return tl::make_unexpected(ErrorContext("no table ", table));
 	}
-	table_def const&  def     = _storage->definition.tables()[table];
-	table_rows const& rows    = _storage->RowsOf(table);
-	column_type const wanted  = column_type::Condition;
-	auto              checked = CheckAddress(def, rows.RowCount(), row, column, &wanted, "condition");
-	if (!checked)
-	{
-		return tl::make_unexpected(std::move(checked.error()));
-	}
-	closure const& c     = rows.closures[row * rows.conditionCount + rows.slot[column]];
-	ErrorContext   error;
-	bool           holds = c.function(c.data, this_in, &error);
-	// An error may arrive as context alone, from a closure wrapping another's.
-	if (!error.empty())
-	{
-		return tl::make_unexpected(std::move(error));
-	}
-	return holds;
+	return ReadHolds(_storage->definition.tables()[table], _storage->RowsOf(table), row, column, this_in);
+}
+
+tl::expected<bool, ErrorContext> TableVersion::Holds(size_t row, uint32_t column, void const* this_in) const
+{
+	return ReadHolds(_data->def, _data->rows, row, column, this_in);
 }
 
 tl::expected<std::string_view, ErrorContext> relation_store::CommandAt(uint32_t table, size_t row, uint32_t column) const

@@ -47,7 +47,7 @@ static_assert(sizeof(cell) == 8);
 
 // A condition the host compiled. function returns whether the row counts for
 // this_in; when it cannot answer it fills error_out. release frees data and is
-// called once, when the row is retracted, refused or destroyed.
+// called once, when no table version or writable table holds the row any longer, or when the row is refused.
 struct closure
 {
 	bool (*function)(void* data, void const* this_in, ErrorContext* error_out) = nullptr;
@@ -156,9 +156,9 @@ struct load_refusal
 };
 
 // Replaces every row the owner has in one read-only table with count new
-// rows: a file reloaded is one load. Values and commands are row-major, one
-// row's value columns (or Command columns) after another. A table with a
-// Condition column cannot be loaded.
+// rows: a file reloaded is one load. Values, conditions and commands are
+// row-major, one row's columns of that kind after another. Load adopts every
+// closure it is given, succeed or fail: a refused load releases them.
 struct load_rows
 {
 	uint32_t                          table  = 0;
@@ -167,6 +167,7 @@ struct load_rows
 	std::span<cell const>             values;     // count * value columns
 	std::span<std::string_view const> commands;   // count * Command columns
 	load_refusal*                     refusal = nullptr;   // filled on a refusal, if given
+	std::span<closure const>          conditions; // count * Condition columns
 };
 
 // Rows [first, last), in row order.
@@ -194,6 +195,7 @@ public:
 
 	tl::expected<cell, ErrorContext>                Value(size_t row, uint32_t column) const;
 	tl::expected<std::string_view, ErrorContext>    CommandAt(size_t row, uint32_t column) const;
+	tl::expected<bool, ErrorContext>                Holds(size_t row, uint32_t column, void const* this_in) const;
 	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t column, cell value) const;
 	tl::expected<row_range, ErrorContext>           FindOrdered(std::span<cell const> prefix) const;
 

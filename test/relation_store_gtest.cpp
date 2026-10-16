@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "tabular/relation.h"
+#include "probe_closure.h"
 
 #include <cstdint>
 #include <string>
@@ -7,6 +8,7 @@
 #include <vector>
 
 using namespace tabular;
+using namespace tabular_test;
 
 // The message mentions the text: errors must name what they refuse.
 static bool Mentions(std::string const& message, std::string_view text)
@@ -343,40 +345,6 @@ TEST(RelationStore, RetractKeepsAnOrderedTableSorted)
 
 namespace
 {
-
-// A condition's captured state: the threshold it compares with, and a count
-// of releases, so a test can see each closure released exactly once.
-struct Probe
-{
-	int64_t threshold = 0;
-	int*    released  = nullptr;
-};
-
-// this_in is an int64_t; the row counts when it reaches the threshold. A
-// negative this_in is an error the closure reports.
-bool AtLeast(void* data, void const* this_in, ErrorContext* error_out)
-{
-	auto const* p     = static_cast<Probe const*>(data);
-	int64_t     value = *static_cast<int64_t const*>(this_in);
-	if (value < 0)
-	{
-		*error_out = ErrorContext("negative input ", value);
-		return false;
-	}
-	return value >= p->threshold;
-}
-
-void ReleaseProbe(void* data)
-{
-	auto* p = static_cast<Probe*>(data);
-	++*p->released;
-	delete p;
-}
-
-closure MakeProbe(int64_t threshold, int* released)
-{
-	return closure{&AtLeast, new Probe{threshold, released}, &ReleaseProbe};
-}
 
 // rules(priority: int, when: condition, then: command), ordered by priority, unique.
 relation_store MakeRules()
