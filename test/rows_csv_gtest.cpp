@@ -146,3 +146,28 @@ TEST(RowsCsv, TablesWithConditionsAreRefused)
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().format(), "'when'")) << loaded.error().format();
 }
+
+TEST(RowsCsv, AUniqueClashNamesBothLines)
+{
+	relation_store store = Store();
+	std::string error = Load(store, "package,section,mask,x,on_spawn\nmeadow,3,0,0,()\nmoor,1,0,0,()\nmeadow,3,0,0,()\n");
+	EXPECT_TRUE(Mentions(error, "spawn.csv:4")) << error;
+	EXPECT_TRUE(Mentions(error, "line 2")) << error;
+}
+
+TEST(RowsCsv, AByteOrderMarkIsNotPartOfTheHeader)
+{
+	relation_store store = Store();
+	ASSERT_EQ(Load(store, "\xEF\xBB\xBFpackage,section,mask,x,on_spawn\na,1,0,0,()\n"), "");
+	EXPECT_EQ(store.RowCount(0), 1u);
+}
+
+TEST(RowsCsv, AHashIsOfTheBytesAsWrittenLikeNameHash)
+{
+	// "ﬁeld" with the U+FB01 ligature: Unicode normalisation would turn it into
+	// "field" and hash a different name from the one a script's literal hashes.
+	relation_store store = Store();
+	std::string_view const name = "\xEF\xAC\x81" "eld";
+	ASSERT_EQ(Load(store, "package,section,mask,x,on_spawn\n" + std::string(name) + ",1,0,0,()\n"), "");
+	EXPECT_EQ(store.Value(0, 0, 0)->i, Hash(name));
+}

@@ -615,15 +615,21 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			}
 		}
 	}
-	if (command.values.size() != command.count * current.valueCount)
+	// Divided, not multiplied: a count large enough to wrap the product would
+	// pass a size check against empty spans and read past them.
+	auto spans = [&](size_t size, uint32_t width)
+	{
+		return width == 0 ? size == 0 : size % width == 0 && size / width == command.count;
+	};
+	if (!spans(command.values.size(), current.valueCount))
 	{
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
-			command.values.size(), " values, but needs ", command.count * current.valueCount));
+			command.values.size(), " values, but the table has ", current.valueCount, " value columns"));
 	}
-	if (command.commands.size() != command.count * current.commandCount)
+	if (!spans(command.commands.size(), current.commandCount))
 	{
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
-			command.commands.size(), " commands, but needs ", command.count * current.commandCount));
+			command.commands.size(), " commands, but the table has ", current.commandCount, " command columns"));
 	}
 	for (size_t r = 0; r < command.count; ++r)
 	{
@@ -634,6 +640,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				auto fits = Check32(def.columns[c], def, command.values[r * current.valueCount + current.slot[c]].i);
 				if (!fits)
 				{
+					if (command.refusal)
+					{
+						command.refusal->row = r;
+					}
 					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
 				}
 			}
@@ -693,8 +703,22 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			{
 				if (keyCompare(order[i - 1], order[i]) == 0)
 				{
+					// Survivors are unique among themselves and sort first, so the
+					// later of a clashing pair is always a loaded row.
+					source const earlier = order[i - 1];
+					source const later   = order[i];
+					if (command.refusal)
+					{
+						command.refusal->row     = later.row;
+						command.refusal->earlier = earlier.loaded ? earlier.row : SIZE_MAX;
+					}
+					std::string key;
+					for (uint32_t s : current.orderSlots)
+					{
+						key = cc(key, key.empty() ? "" : ", ", cellsOf(later)[s].i);
+					}
 					return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
-						ownerOf(order[i - 1]), " already has a row with the key of a row from owner ", ownerOf(order[i])));
+						ownerOf(earlier), " already has a row with key (", key, ") of loaded row ", later.row));
 				}
 			}
 		}

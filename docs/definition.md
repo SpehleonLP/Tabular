@@ -262,7 +262,10 @@ changed.
    an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
    must parse whole, and an empty cell is refused. CSV cannot fill a condition column (how the
    host compiles cell text into a condition is undecided), and has no quoting, so a command
-   cell cannot hold a comma.
+   cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
+   leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
+   script literal of the same name hashes. A refused load names the line, and for a unique
+   clash the line it clashes with.
 4. **Machines** built from tables.
 
 **Two kinds of table (owner, 2026-10-15).**

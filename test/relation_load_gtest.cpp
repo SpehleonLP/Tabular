@@ -226,3 +226,28 @@ TEST(RelationLoad, RetractStillRemovesLoadedRows)
 	store.Retract(retract_owner{1});
 	EXPECT_EQ(store.RowCount(0), 0u);
 }
+
+TEST(RelationLoad, ACountThatOverflowsTheSizeCheckIsRefused)
+{
+	// Two value columns and no others: count * 2 wraps to 0, which an unguarded
+	// size check would take for a match with empty spans.
+	add_column const columns[] = {{"a", column_type::Int, false}, {"b", column_type::Int, false}};
+	create_table const table{"pairs", columns, nullptr, true};
+	relation_store store(std::move(*BuildSchema(std::span<create_table const>(&table, 1))));
+	auto loaded = store.Load(load_rows{0, 1, size_t(1) << 63, {}, {}});
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(store.RowCount(0), 0u);
+}
+
+TEST(RelationLoad, AUniqueClashReportsTheLoadRows)
+{
+	relation_store store = Store(true, true);
+	std::vector<cell> v;
+	std::vector<std::string_view> c;
+	load_refusal refusal;
+	load_rows rows = Rows(1, v, c, {{1, 1, 0.0, ""}, {2, 2, 0.0, ""}, {1, 1, 0.0, ""}});
+	rows.refusal   = &refusal;
+	ASSERT_FALSE(store.Load(rows).has_value());
+	EXPECT_EQ(refusal.row, 2u);
+	EXPECT_EQ(refusal.earlier, 0u);
+}

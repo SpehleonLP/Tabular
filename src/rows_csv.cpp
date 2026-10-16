@@ -103,7 +103,16 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		slot[c] = def.columns[c].type == column_type::Command ? commandCount++ : valueCount++;
 	}
 
-	CSV::File file(command.text, CSV::Options{}, command.first_line);
+	// A BOM is the editor's, not the first column's name. Unicode is left as
+	// written: a Hash column must hash the bytes a script literal hashes.
+	std::string_view text = command.text;
+	if (text.starts_with("\xEF\xBB\xBF"))
+	{
+		text.remove_prefix(3);
+	}
+	CSV::Options options;
+	options.normalizeUnicode = false;
+	CSV::File file(text, options, command.first_line);
 	if (file.rows() == 0)
 	{
 		return tl::make_unexpected(ErrorContext("no header row naming the columns of '", def.name, "'")
@@ -167,10 +176,20 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		}
 	}
 
-	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands});
+	load_refusal refusal;
+	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal});
 	if (!loaded)
 	{
-		return tl::make_unexpected(std::move(loaded.error()).with(std::string(command.label)));
+		ErrorContext error = std::move(loaded.error());
+		if (refusal.earlier < count)
+		{
+			error = std::move(error).with("same key as line ", file.line_of_row(refusal.earlier + 1));
+		}
+		if (refusal.row < count)
+		{
+			return tl::make_unexpected(std::move(error).with(label(file.line_of_row(refusal.row + 1))));
+		}
+		return tl::make_unexpected(std::move(error).with(std::string(command.label)));
 	}
 	return {};
 }
