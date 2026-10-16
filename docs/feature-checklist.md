@@ -42,7 +42,7 @@ Sources, cited in brackets:
 
 - [x] YAML table definitions; any diagnostic fails, unknown keys included [def order 2]
 - [x] CSV rows into read-only tables; header names columns; refusals name the line and the clashing line; BOM dropped; no Unicode normalisation [def order 3]
-- [x] CSV filling condition columns: the loader takes `std::function<condition(std::string_view)>` and calls it per cell; read-only `Load` must then accept condition columns (it refuses them today) [def order 3, owner 2026-10-16]
+- [x] CSV filling condition columns: `csv_rows::condition`, a `std::function<tl::expected<closure, ErrorContext>(std::string_view)>`, is called per cell; read-only `Load` accepts condition columns [def order 3, owner 2026-10-16]
 - [ ] CSV quoting, or a rest-of-line last column, so a command cell can hold a comma [def order 3; sr §6.1 `restInLastColumn`]
 - [ ] Pivoted tables: any axis pivots into the headers (clip table pivots a key; phase table pivots the output, cells are bands) [def Pivot; cat §2.6; arc §5.2; cook §2.2]
 - [ ] Flag domain from pivot headers: first column None = 0, each next column the next bit, `A|B` combos OR earlier columns [cook §2.2; arc §5.2]

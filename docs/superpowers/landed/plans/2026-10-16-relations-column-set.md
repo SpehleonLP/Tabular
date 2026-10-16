@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, `tl::expected`, `ErrorContext`, `counted_ptr` / `counted_string` (Spehleon/lib/Support), the Spehleon YAML walker, `CSV::File`, GoogleTest compiled into the Engine binary.
 
-**Spec:** `Spehleon/Tabular/docs/superpowers/specs/2026-10-16-relations-column-set-design.md`. The contract is `Spehleon/Tabular/docs/definition.md`.
+**Spec:** `Spehleon/Tabular/docs/superpowers/landed/specs/2026-10-16-relations-column-set-design.md`. The contract is `Spehleon/Tabular/docs/definition.md`.
 
 ## Global Constraints
 
@@ -1481,7 +1481,7 @@ cd $WT && git add Spehleon && git commit -m "Bump Spehleon: CSV condition cells"
 ### Task 5: Documents, and the whole suite
 
 **Files:**
-- Modify: `Spehleon/Tabular/docs/definition.md`, `Spehleon/Tabular/docs/feature-checklist.md`, `Spehleon/Tabular/docs/superpowers/specs/2026-10-16-relations-column-set-design.md`
+- Modify: `Spehleon/Tabular/docs/definition.md`, `Spehleon/Tabular/docs/feature-checklist.md`, `Spehleon/Tabular/docs/superpowers/landed/specs/2026-10-16-relations-column-set-design.md`
 
 - [ ] **Step 1: `definition.md`**
 

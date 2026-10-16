@@ -100,7 +100,10 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 		size_t const dots = text.find("..");
 		float        x    = 0;
 		float        y    = 0;
-		if (dots == std::string_view::npos || !ParseWhole(text.substr(0, dots), x) || !ParseWhole(text.substr(dots + 2), y))
+		// Three dots in a row would let "1...2" read as 1 and .2; which pair separates is
+		// ambiguous, so it is refused rather than guessed.
+		if (dots == std::string_view::npos || text.find("...") != std::string_view::npos
+			|| !ParseWhole(text.substr(0, dots), x) || !ParseWhole(text.substr(dots + 2), y))
 		{
 			return tl::make_unexpected(ErrorContext("column '", column.name, "' is a vec2, written a..b; got '", text, "'"));
 		}

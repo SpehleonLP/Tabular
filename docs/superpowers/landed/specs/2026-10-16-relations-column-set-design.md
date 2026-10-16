@@ -1,6 +1,6 @@
 # Relations: the column set
 
-**Status:** approved design (owner, 2026-10-16). Next: an implementation plan.
+**Status:** landed 2026-10-16 (approved by the owner the same day).
 
 **Contract:** `Spehleon/Tabular/docs/definition.md`. This slice builds its "Column types beyond the
 four native ones" paragraph and the condition sentence of "Order of work" item 3.
@@ -61,9 +61,10 @@ copy and destruction, and copying a survivor into a new version is an ordinary c
   separately and only the default table's handles may be compared by identity.
 - **Interning makes identity equality.** Interned strings with the same content share one handle,
   so two string cells are equal exactly when their handles are. A string column may therefore be a
-  **key**: the equality index keys on the handle, and `Find(table, column, std::string_view)` (an
-  overload, on the store and as `Find(column, std::string_view)` on `TableVersion`) interns the
-  probe and looks it up.
+  **key**. As built, the index keys on the content (a `string_view` into the held handle's bytes,
+  which never move while a row holds them), so `Find(table, column, std::string_view)` (an
+  overload, on the store and as `Find(column, std::string_view)` on `TableVersion`) looks the probe
+  up without interning it and a lookup never grows the intern table.
 - **Not in an order.** `BuildSchema` refuses a string column in `order_by`: handle order is
   arbitrary, and lexical order is not needed yet.
 - **Reads.** `StringAt(table, row, column) -> tl::expected<counted_string, ErrorContext>` on the

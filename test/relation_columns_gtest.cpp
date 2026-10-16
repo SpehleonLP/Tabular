@@ -40,7 +40,7 @@ TEST(RelationColumns, Vec2RoundTripsThroughLoad)
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	relation_store store(std::move(*s));
 	cell const values[] = {cell::Integer(1), cell::Vector(0.25f, 0.5f)};
-	ASSERT_TRUE(store.Load(load_rows{0, 1, 1, values, {}}).has_value());
+	ASSERT_TRUE(store.Load(load_rows{.table = 0, .owner = 1, .count = 1, .values = values}).has_value());
 	auto at = store.Value(0, 0, 1);
 	ASSERT_TRUE(at.has_value());
 	EXPECT_EQ(at->v[0], 0.25f);
@@ -152,6 +152,18 @@ TEST(RelationColumns, EmptyStringIsStoredAndFound)
 	ASSERT_TRUE(InsertPlace(store, 1, std::string_view(""), 1).has_value());
 	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "");
 	EXPECT_EQ(*store.Find(0, 0, std::string_view("")), std::vector<size_t>{0});
+}
+
+// CSV cells are views into the file, so a cell is a prefix of everything after it: storing
+// one must keep its own length even when a longer string starting with it is interned.
+TEST(RelationColumns, AStringViewIntoALongerBufferKeepsItsLength)
+{
+	std::string const buffer = "relation-columns-prefix-probe_and_more";
+	auto whole = counted_string::MakeShared(buffer);
+	relation_store store = Places(false);
+	ASSERT_TRUE(InsertPlace(store, 1, std::string_view(buffer).substr(0, 29), 1).has_value());
+	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "relation-columns-prefix-probe");
+	EXPECT_EQ(*store.Find(0, 0, std::string_view("relation-columns-prefix-probe")), std::vector<size_t>{0});
 }
 
 TEST(RelationColumns, AStringIsNotInAnOrderAndNotAValue)

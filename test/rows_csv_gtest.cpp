@@ -213,7 +213,7 @@ TEST(RowsCsv, Vec2IsWrittenAsARange)
 
 TEST(RowsCsv, MalformedVec2IsRefusedNamingTheColumn)
 {
-	for (std::string_view bad : {"1..", "..2", "1..2..3", "1;2", "a..b"})
+	for (std::string_view bad : {"1..", "..2", "1..2..3", "1;2", "a..b", "1...2", "1.0...2"})
 	{
 		relation_store store = VecStore();
 		std::string error = LoadMarks(store, std::string("id,at\n1,") + std::string(bad) + "\n");
