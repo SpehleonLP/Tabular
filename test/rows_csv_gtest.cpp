@@ -2,11 +2,14 @@
 #include "tabular/rows_csv.h"
 #include "tabular/schema_yaml.h"
 #include "cityhash/src/city.h"
+#include "probe_closure.h"
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace tabular;
+using namespace tabular_test;
 
 static bool Mentions(std::string const& message, std::string_view text)
 {
@@ -145,6 +148,7 @@ TEST(RowsCsv, TablesWithConditionsAreRefused)
 	auto loaded = LoadCsv(store, csv_rows{1, 1, "when\nx\n", "rules.csv"});
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().format(), "'when'")) << loaded.error().format();
+	EXPECT_TRUE(Mentions(loaded.error().format(), "condition function")) << loaded.error().format();
 }
 
 TEST(RowsCsv, AUniqueClashNamesBothLines)
@@ -250,4 +254,92 @@ TEST(RowsCsv, AnEmptyStringCellIsRefused)
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n,1\n", "places.csv"});
 	std::string error = loaded ? std::string() : loaded.error().format();
 	EXPECT_TRUE(Mentions(error, "'name'")) << error;
+}
+
+namespace
+{
+
+constexpr std::string_view kRuleSchema = R"(
+tables:
+  - name: rules
+    read_only: true
+    columns:
+      - {name: priority, type: int}
+      - {name: when, type: condition}
+)";
+
+relation_store RuleStore()
+{
+	auto s = SchemaFromYaml(kRuleSchema, "rules.yaml");
+	EXPECT_TRUE(s.has_value()) << s.error().format();
+	return relation_store(std::move(*s));
+}
+
+}
+
+TEST(RowsCsv, ConditionCellsGoThroughTheFunction)
+{
+	int released = 0;
+	std::vector<std::string> seen;
+	{
+		relation_store store = RuleStore();
+		csv_rows rows{0, 1, "priority,when\n1, hp < 5 \n2,always\n", "rules.csv"};
+		rows.condition = [&](std::string_view text) -> tl::expected<closure, ErrorContext>
+		{
+			seen.emplace_back(text);
+			return MakeProbe(static_cast<int64_t>(seen.size()) * 10, &released);
+		};
+		auto loaded = LoadCsv(store, rows);
+		ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+		int64_t fifteen = 15;
+		EXPECT_TRUE(*store.Holds(0, 0, 1, &fifteen));
+		EXPECT_FALSE(*store.Holds(0, 1, 1, &fifteen));
+	}
+	EXPECT_EQ(seen, (std::vector<std::string>{"hp < 5", "always"}));
+	EXPECT_EQ(released, 2);
+}
+
+TEST(RowsCsv, AFailingConditionNamesTheLineAndReleasesEarlierCells)
+{
+	int released = 0;
+	relation_store store = RuleStore();
+	csv_rows rows{0, 1, "priority,when\n1,fine\n2,broken\n", "rules.csv"};
+	rows.condition = [&](std::string_view text) -> tl::expected<closure, ErrorContext>
+	{
+		if (text == "broken")
+		{
+			return tl::make_unexpected(ErrorContext("does not compile"));
+		}
+		return MakeProbe(1, &released);
+	};
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "rules.csv:3")) << error;
+	EXPECT_TRUE(Mentions(error, "does not compile")) << error;
+	EXPECT_EQ(released, 1);
+	EXPECT_EQ(store.RowCount(0), 0u);
+}
+
+TEST(RowsCsv, AConditionTableWithNoFunctionIsRefused)
+{
+	relation_store store = RuleStore();
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "priority,when\n1,fine\n", "rules.csv"});
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "condition function")) << loaded.error().format();
+}
+
+TEST(RowsCsv, ANullConditionNamesItsLine)
+{
+	int released = 0;
+	relation_store store = RuleStore();
+	csv_rows rows{0, 1, "priority,when\n1,fine\n2,empty\n", "rules.csv"};
+	rows.condition = [&](std::string_view text) -> tl::expected<closure, ErrorContext>
+	{
+		return text == "empty" ? closure{} : MakeProbe(1, &released);
+	};
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "rules.csv:3")) << loaded.error().format();
+	EXPECT_EQ(released, 1);
 }

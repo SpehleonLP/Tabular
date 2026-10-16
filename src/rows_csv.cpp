@@ -30,6 +30,32 @@ bool ParseWhole(std::string_view text, T& out, int base = 10)
 	return r.ec == std::errc() && r.ptr == end;
 }
 
+// Closures built for the cells read so far. Load adopts them all, refused or
+// not; until it is called they are ours, so an early return releases them.
+struct pending_conditions
+{
+	std::vector<closure> list;
+	bool                 handedOver = false;
+
+	explicit pending_conditions(size_t count) : list(count) {}
+	pending_conditions(pending_conditions const&)            = delete;
+	pending_conditions& operator=(pending_conditions const&) = delete;
+	~pending_conditions()
+	{
+		if (handedOver)
+		{
+			return;
+		}
+		for (closure const& c : list)
+		{
+			if (c.release)
+			{
+				c.release(c.data);
+			}
+		}
+	}
+};
+
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text)
 {
 	if (text.empty())
@@ -96,12 +122,15 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		return tl::make_unexpected(ErrorContext("no table ", command.table).with(std::string(command.label)));
 	}
 	table_def const& def = defs[command.table];
-	for (column_def const& column : def.columns)
+	if (!command.condition)
 	{
-		if (column.type == column_type::Condition)
+		for (column_def const& column : def.columns)
 		{
-			return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
-				"', which CSV cannot fill").with(std::string(command.label)));
+			if (column.type == column_type::Condition)
+			{
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
+					"', and no condition function was given").with(std::string(command.label)));
+			}
 		}
 	}
 
@@ -110,7 +139,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	uint32_t valueCount                         = 0;
 	uint32_t commandCount                       = 0;
 	uint32_t stringCount                        = 0;
-	[[maybe_unused]] uint32_t conditionCount    = 0;
+	uint32_t conditionCount                     = 0;
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		switch (def.columns[c].type)
@@ -170,6 +199,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	std::vector<cell>             values(count * valueCount);
 	std::vector<std::string_view> commands(count * commandCount);
 	std::vector<string_in>        strings(count * stringCount);
+	pending_conditions            conditions(count * conditionCount);
 	for (size_t r = 0; r < count; ++r)
 	{
 		uint32_t line = file.line_of_row(r + 1);
@@ -196,6 +226,17 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				strings[r * stringCount + slot[columnOf[h]]] = text;
 				continue;
 			}
+			if (column.type == column_type::Condition)
+			{
+				auto built = command.condition(text);
+				if (!built)
+				{
+					return tl::make_unexpected(std::move(built.error())
+						.with("column '", column.name, "'").with(label(line)));
+				}
+				conditions.list[r * conditionCount + slot[columnOf[h]]] = *built;
+				continue;
+			}
 			auto value = ReadCell(column, text);
 			if (!value)
 			{
@@ -206,7 +247,9 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	}
 
 	load_refusal refusal;
-	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal, {}, strings});
+	conditions.handedOver = true;   // Load adopts them, whatever it decides
+	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal,
+		conditions.list, strings});
 	if (!loaded)
 	{
 		ErrorContext error = std::move(loaded.error());
