@@ -142,8 +142,12 @@ column order if the flags are pivoted**.
   probability, and nothing is tested before drawing. When a roll needs a condition, an
   earlier table in the DAG computes a key for it. This restriction can be lifted later
   without breaking files; adding it later could not.
-- **A pivoted flag output ORs together.** The phase table writes every flag whose band holds,
-  combined with OR.
+- **A pivoted flag output ORs together**, as animation's phase tables do today
+  (`PipelineClosure::eval_phase_bits`). The phase table writes every flag whose band holds,
+  combined with OR: each row whose keys match contributes the flag of every cell whose band
+  holds, rows sharing a key accumulate, and a blank cell contributes nothing. Bands are
+  half-open, `start <= x < end`. When nothing holds the answer is 0, so such a table needs no
+  default row.
 
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
@@ -161,6 +165,12 @@ tables); every step; when a relation's rows change.
 | Instance | object | state vector, edge history |
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them |
 
+**Column types beyond the four native ones (owner, 2026-10-16).** A string column holds a
+`counted_string`. A `vec4` column holds four floats; only `vec4` exists, never `vec2` or
+`vec3`, and unused components are ignored (`w` always, `z` in a 2D area), for consistency.
+There is no position or `Location` type: a position is a string column naming the Section
+plus a `vec4` column. A handle is a `uint64_t` stored in an `int64_t` column: punning, not a type.
+
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
 
@@ -168,9 +178,11 @@ front ends that produce those commands. Public headers live in `include/`; every
 
 The host supplies:
 
-- **compile(snippet, kind, symbols) → closure or error.** Tabular's symbol table answers name
-  lookups for the names it owns (state). A name both sides know is an error.
-  **compile rejects any snippet it cannot prove halts** (owner, 2026-10-12): loops over finite
+- **The condition function** given to the loader: cell text in, compiled condition out. It
+  takes only text; Tabular hands it no symbol table. It is for script conditions, which may
+  be as complicated as the host allows, wires included. A native condition (a band such as
+  `a..b`, a flag set) is read by Tabular itself and never reaches it (owner, 2026-10-16).
+  **It rejects any snippet it cannot prove halts** (owner, 2026-10-12): loops over finite
   query results or bounded counts are allowed; anything Rice's theorem applies to is not. A
   read-only snippet (a condition, or a wire behind an input) may call only read-only functions.
   This is how decidability survives opaque host code: the host promises it by refusing.
@@ -260,9 +272,11 @@ changed.
    table. The header names the columns in any order, every non-condition column exactly once.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
    an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
-   must parse whole, and an empty cell is refused. CSV cannot fill a condition column (how the
-   host compiles cell text into a condition is undecided), and has no quoting, so a command
-   cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
+   must parse whole, and an empty cell is refused. A condition cell is handed, as text, to a
+   function the caller passes to the loader, `std::function<condition(std::string_view)>`,
+   which returns the compiled condition; that is the whole of Tabular's part in compiling
+   conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
+   version). CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
    clash the line it clashes with.
@@ -305,5 +319,3 @@ These are open, not missing. Each is decided by editing this file.
 - The display relations: one relation with several queries, or several relations.
 - How a host-compiled snippet sees wires. Leaning (owner): free wire names become parameters,
   and the wirer's closure captures and forces them. See the shape note §3.
-- Relation column types beyond the four native ones: a position (a `Location` is a Section
-  plus a `vec2`), and whether a string column exists at all or is always a hash.
