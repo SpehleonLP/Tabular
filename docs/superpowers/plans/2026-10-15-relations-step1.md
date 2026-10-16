@@ -66,6 +66,7 @@ cd /mnt/Passport/Kreatures-Engine && scripts/wt-create.sh tabular-relations
 #define TABULAR_RELATION_H
 
 #include "Errors/errorcontext.h"
+#include "Support/shared_array.hpp"
 #include <expected/include/tl/expected.hpp>
 
 #include <cstdint>
@@ -73,21 +74,26 @@ cd /mnt/Passport/Kreatures-Engine && scripts/wt-create.sh tabular-relations
 #include <span>
 #include <string>
 #include <string_view>
-#include <variant>
 #include <vector>
 
 namespace tabular
 {
 
-// The only value types Tabular knows. A host converts its own values to these;
-// a flag set (AngelScript uint32) and a hash (CityHash32) travel as int64_t and
-// differ only in how a condition reads them.
+// The value types are the only values Tabular knows; a host converts its own
+// values to these, and a flag set (AngelScript uint32) and a hash (CityHash32)
+// travel as int64_t, differing only in how a condition reads them.
+//
+// Condition and Command columns hold no value. A condition is a closure the
+// host compiled, called with the object being tested. A command is an
+// s-expression handed to its consumer, never interpreted here.
 enum class column_type : uint8_t
 {
 	Hash,
 	Flags,
 	Int,
 	Double,
+	Condition,
+	Command,
 };
 
 // One value in a row. The column's type says which member is live.
@@ -101,52 +107,59 @@ union cell
 };
 static_assert(sizeof(cell) == 8);
 
-// ---- Schema commands --------------------------------------------------------
-// A table definition is a list of these, applied in order. Tables are numbered
-// by the order of their create_table commands, so add_column names a table by
-// that number rather than by a string lookup.
-
-struct create_table
+// A condition the host compiled. function returns whether the row counts for
+// this_in; when it cannot answer it fills error_out. release frees data and is
+// called once, when the row is retracted, refused or destroyed.
+struct closure
 {
-	std::string name;
+	bool (*function)(void* data, void const* this_in, ErrorContext* error_out) = nullptr;
+	void* data                                                            = nullptr;
+	void (*release)(void* data)                                           = nullptr;
 };
+
+// ---- Schema commands --------------------------------------------------------
+// Commands are views, valid only during the call that consumes them; the
+// builder copies what it keeps. Tables are numbered by their position in the
+// list given to BuildSchema.
 
 struct add_column
 {
-	uint32_t    table = 0;
-	std::string name;
-	column_type type  = column_type::Int;
-	bool        key   = false;
+	std::string_view name;
+	column_type      type = column_type::Int;
+	bool             key  = false;   // a secondary equality index
 };
 
-// The order a table's rows are stored in, and whether it is unique: rows
-// compare by these columns in turn, most significant first, and rows that
-// compare equal keep insertion order. A table without one keeps insertion
-// order. At most one per table. A unique order refuses a second row with the
-// same key instead of replacing the first, so two contributors claiming one
-// key is an error someone sees.
+// The order a table's rows are stored in: rows compare by these columns in
+// turn, most significant first, and rows that compare equal keep insertion
+// order. A unique order refuses a second row with the same key instead of
+// replacing the first, so two contributors claiming one key is an error
+// someone sees.
 struct order_by
 {
-	uint32_t              table = 0;
-	std::vector<uint32_t> columns;   // column numbers of that table
-	bool                  unique = false;
+	std::span<uint32_t const> columns;   // column numbers of the table
+	bool                      unique = false;
 };
 
-using schema_command = std::variant<create_table, add_column, order_by>;
+struct create_table
+{
+	std::string_view              name;
+	std::span<add_column const>   columns;
+	order_by const*               ordering = nullptr;   // none: insertion order
+};
 
 struct column_def
 {
 	std::string name;
-	column_type type;
-	bool        key;
+	column_type type = column_type::Int;
+	bool        key  = false;
 };
 
 struct table_def
 {
-	std::string             name;
-	std::vector<column_def> columns;
-	std::vector<uint32_t>   order;    // empty: insertion order
-	bool                    unique = false;
+	std::string                  name;
+	immutable_array<column_def>  columns;
+	immutable_array<uint32_t>    order;    // empty: insertion order
+	bool                         unique = false;
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -155,19 +168,19 @@ class schema
 public:
 	schema() = default;
 
-	std::span<table_def const> tables() const { return _tables; }
+	std::span<table_def const> tables() const { return {_tables.begin(), _tables.size()}; }
 
 	tl::expected<uint32_t, ErrorContext> FindTable(std::string_view name) const;
 	tl::expected<uint32_t, ErrorContext> FindColumn(uint32_t table, std::string_view name) const;
 
 private:
-	explicit schema(std::vector<table_def>&& tables) : _tables(std::move(tables)) {}
-	friend tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> commands);
+	explicit schema(immutable_array<table_def>&& tables) : _tables(std::move(tables)) {}
+	friend tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables);
 
-	std::vector<table_def> _tables;
+	immutable_array<table_def> _tables;
 };
 
-tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> commands);
+tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables);
 
 // ---- Row commands -----------------------------------------------------------
 // Every row records the owner that contributed it. Reloading a contributor is
@@ -176,9 +189,11 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> c
 
 struct insert_row
 {
-	uint32_t          table = 0;
-	uint64_t          owner = 0;
-	std::vector<cell> values;   // one per column, in column order
+	uint32_t                          table = 0;
+	uint64_t                          owner = 0;
+	std::span<cell const>             values;       // one per value column, in column order
+	std::span<closure const>          conditions;   // one per Condition column, in column order
+	std::span<std::string_view const> commands;     // one per Command column, in column order
 };
 
 // Removes the owner's rows from every table, because one contributor (a
@@ -187,8 +202,6 @@ struct retract_owner
 {
 	uint64_t owner = 0;
 };
-
-using row_command = std::variant<insert_row, retract_owner>;
 
 // Rows [first, last), in row order.
 struct row_range
@@ -199,8 +212,9 @@ struct row_range
 
 // Live rows for every table of a schema.
 //
-// Rows keep insertion order; a retract keeps the survivors' order. Row indices
-// are valid only until the next Apply, because a retract compacts the rows.
+// Rows keep their table's order, or insertion order without one; a retract
+// keeps the survivors' order. Row indices are valid only until the next
+// Insert or Retract, because both move rows.
 class relation_store
 {
 public:
@@ -213,11 +227,19 @@ public:
 
 	schema const& definition() const;
 
-	tl::expected<void, ErrorContext> Apply(row_command const& command);
+	// Adopts the row's closures whether or not it succeeds: a refused row's
+	// closures are released, so a caller never has to.
+	tl::expected<void, ErrorContext> Insert(insert_row const& command);
+	void                             Retract(retract_owner const& command);
 
-	size_t                RowCount(uint32_t table) const;
-	std::span<cell const> Row(uint32_t table, size_t row) const;
-	uint64_t              OwnerOf(uint32_t table, size_t row) const;
+	size_t   RowCount(uint32_t table) const;
+	uint64_t OwnerOf(uint32_t table, size_t row) const;
+
+	// A value column's cell. Condition and Command columns are read with
+	// Holds and CommandAt instead.
+	tl::expected<cell, ErrorContext>             Value(uint32_t table, size_t row, uint32_t column) const;
+	tl::expected<bool, ErrorContext>             Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const;
+	tl::expected<std::string_view, ErrorContext> CommandAt(uint32_t table, size_t row, uint32_t column) const;
 
 	// Changes whenever the table's rows change, and only then. A consumer
 	// compares it with the value it last saw to learn that it must re-read.
@@ -300,33 +322,43 @@ static bool Mentions(std::string const& message, std::string_view text)
 namespace
 {
 
-std::vector<schema_command> SpawnPointsSchema()
+add_column const kSpawnColumns[] = {
+	{"package", column_type::Hash,   true},
+	{"section", column_type::Hash,   true},
+	{"x",       column_type::Double, false},
+	{"y",       column_type::Double, false},
+};
+
+tl::expected<schema, ErrorContext> BuildOne(create_table const& table)
 {
-	return {
-		create_table{"spawn_points"},
-		add_column{0, "package", column_type::Hash,   true},
-		add_column{0, "section", column_type::Hash,   true},
-		add_column{0, "x",       column_type::Double, false},
-		add_column{0, "y",       column_type::Double, false},
-	};
+	return BuildSchema(std::span<create_table const>(&table, 1));
+}
+
+tl::expected<schema, ErrorContext> SpawnPointsWith(order_by const& order)
+{
+	return BuildOne(create_table{"spawn_points", kSpawnColumns, &order});
 }
 
 }
 
-TEST(RelationSchema, EmptyCommandListBuildsNoTables)
+TEST(RelationSchema, EmptyListBuildsNoTables)
 {
 	auto s = BuildSchema({});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	EXPECT_TRUE(s->tables().empty());
 }
 
-TEST(RelationSchema, CommandsBuildTablesAndColumnsInOrder)
+TEST(RelationSchema, TablesAndColumnsKeepTheirOrder)
 {
-	auto commands = SpawnPointsSchema();
-	commands.push_back(create_table{"second"});
-	commands.push_back(add_column{1, "n", column_type::Int, false});
-
-	auto s = BuildSchema(commands);
+	add_column const rules[] = {
+		{"when", column_type::Condition, false},
+		{"then", column_type::Command,   false},
+	};
+	create_table const tables[] = {
+		{"spawn_points", kSpawnColumns},
+		{"rules", rules},
+	};
+	auto s = BuildSchema(tables);
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	ASSERT_EQ(s->tables().size(), 2u);
 
@@ -340,12 +372,31 @@ TEST(RelationSchema, CommandsBuildTablesAndColumnsInOrder)
 	EXPECT_EQ(t.columns[3].type, column_type::Double);
 	EXPECT_FALSE(t.columns[3].key);
 
-	EXPECT_EQ(s->tables()[1].name, "second");
+	table_def const& r = s->tables()[1];
+	EXPECT_EQ(r.name, "rules");
+	EXPECT_EQ(r.columns[0].type, column_type::Condition);
+	EXPECT_EQ(r.columns[1].type, column_type::Command);
+}
+
+TEST(RelationSchema, CommandViewsNeedNotOutliveTheBuild)
+{
+	tl::expected<schema, ErrorContext> s;
+	{
+		std::string name   = "temporary";
+		std::string column = "n";
+		add_column const columns[] = {{column, column_type::Int, false}};
+		s = BuildOne(create_table{name, columns});
+		name.assign("overwritten");
+		column.assign("z");
+	}
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	EXPECT_EQ(s->tables()[0].name, "temporary");
+	EXPECT_EQ(s->tables()[0].columns[0].name, "n");
 }
 
 TEST(RelationSchema, FindTableAndColumnByName)
 {
-	auto s = BuildSchema(SpawnPointsSchema());
+	auto s = BuildOne(create_table{"spawn_points", kSpawnColumns});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 
 	auto table = s->FindTable("spawn_points");
@@ -362,142 +413,108 @@ TEST(RelationSchema, FindTableAndColumnByName)
 
 	auto missingColumn = s->FindColumn(*table, "z");
 	ASSERT_FALSE(missingColumn.has_value());
-	EXPECT_TRUE(Mentions(missingColumn.error().message, "z")) << missingColumn.error().message;
+	EXPECT_TRUE(Mentions(missingColumn.error().message, "'z'")) << missingColumn.error().message;
 
 	EXPECT_FALSE(s->FindColumn(7, "x").has_value());
 }
 
 TEST(RelationSchema, DuplicateTableNameIsRefused)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"}, add_column{0, "n", column_type::Int, false},
-		create_table{"a"}, add_column{1, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
+	add_column const columns[] = {{"n", column_type::Int, false}};
+	create_table const tables[] = {{"a", columns}, {"a", columns}};
+	auto s = BuildSchema(tables);
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'a'")) << s.error().message;
+	EXPECT_TRUE(Mentions(s.error().message, "table 1")) << s.error().message;
 }
 
 TEST(RelationSchema, DuplicateColumnNameIsRefused)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{0, "n", column_type::Int, false},
-		add_column{0, "n", column_type::Double, false},
-	};
-	auto s = BuildSchema(commands);
+	add_column const columns[] = {{"n", column_type::Int, false}, {"n", column_type::Double, false}};
+	auto s = BuildOne(create_table{"a", columns});
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'n'")) << s.error().message;
 }
 
-TEST(RelationSchema, ColumnNamingAnUncreatedTableIsRefused)
-{
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{1, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "table 1")) << s.error().message;
-}
-
 TEST(RelationSchema, EmptyNamesAreRefused)
 {
-	std::vector<schema_command> noTableName = { create_table{""} };
-	EXPECT_FALSE(BuildSchema(noTableName).has_value());
+	add_column const columns[] = {{"n", column_type::Int, false}};
+	EXPECT_FALSE(BuildOne(create_table{"", columns}).has_value());
 
-	std::vector<schema_command> noColumnName = {
-		create_table{"a"}, add_column{0, "", column_type::Int, false},
-	};
-	EXPECT_FALSE(BuildSchema(noColumnName).has_value());
+	add_column const unnamed[] = {{"", column_type::Int, false}};
+	EXPECT_FALSE(BuildOne(create_table{"a", unnamed}).has_value());
 }
 
 TEST(RelationSchema, TableWithoutColumnsIsRefused)
 {
-	std::vector<schema_command> commands = { create_table{"bare"} };
-	auto s = BuildSchema(commands);
+	auto s = BuildOne(create_table{"bare", {}});
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'bare'")) << s.error().message;
 }
 
-TEST(RelationSchema, KeyOnDoubleIsRefused)
+TEST(RelationSchema, OnlyHashFlagsAndIntCanBeKeys)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"}, add_column{0, "x", column_type::Double, true},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "'x'")) << s.error().message;
+	for (column_type type : {column_type::Double, column_type::Condition, column_type::Command})
+	{
+		add_column const columns[] = {{"k", type, true}};
+		auto s = BuildOne(create_table{"a", columns});
+		ASSERT_FALSE(s.has_value());
+		EXPECT_TRUE(Mentions(s.error().message, "'k'")) << s.error().message;
+	}
+	for (column_type type : {column_type::Hash, column_type::Flags, column_type::Int})
+	{
+		add_column const columns[] = {{"k", type, true}};
+		EXPECT_TRUE(BuildOne(create_table{"a", columns}).has_value());
+	}
 }
 
 TEST(RelationSchema, OrderIsRecorded)
 {
-	auto commands = SpawnPointsSchema();
-	commands.push_back(order_by{0, {1, 0}, true});
-	auto s = BuildSchema(commands);
+	uint32_t const columns[] = {1, 0};
+	auto s = SpawnPointsWith(order_by{columns, true});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
-	EXPECT_EQ(s->tables()[0].order, (std::vector<uint32_t>{1, 0}));
-	EXPECT_TRUE(s->tables()[0].unique);
+	table_def const& t = s->tables()[0];
+	ASSERT_EQ(t.order.size(), 2u);
+	EXPECT_EQ(t.order[0], 1u);
+	EXPECT_EQ(t.order[1], 0u);
+	EXPECT_TRUE(t.unique);
 }
 
 TEST(RelationSchema, TableWithoutOrderKeepsInsertionOrder)
 {
-	auto s = BuildSchema(SpawnPointsSchema());
+	auto s = BuildOne(create_table{"spawn_points", kSpawnColumns});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
-	EXPECT_TRUE(s->tables()[0].order.empty());
+	EXPECT_EQ(s->tables()[0].order.size(), 0u);
 	EXPECT_FALSE(s->tables()[0].unique);
 }
 
 TEST(RelationSchema, BadOrdersAreRefused)
 {
-	auto with = [](order_by o)
-	{
-		auto commands = SpawnPointsSchema();
-		commands.push_back(std::move(o));
-		return BuildSchema(commands);
-	};
-
-	auto unknownTable = with(order_by{4, {0}, false});
-	ASSERT_FALSE(unknownTable.has_value());
-	EXPECT_TRUE(Mentions(unknownTable.error().message, "table 4")) << unknownTable.error().message;
-
-	auto noColumns = with(order_by{0, {}, false});
+	auto noColumns = SpawnPointsWith(order_by{{}, false});
 	ASSERT_FALSE(noColumns.has_value());
 	EXPECT_TRUE(Mentions(noColumns.error().message, "spawn_points")) << noColumns.error().message;
 
-	auto missingColumn = with(order_by{0, {9}, false});
+	uint32_t const missing[] = {9};
+	auto missingColumn = SpawnPointsWith(order_by{missing, false});
 	ASSERT_FALSE(missingColumn.has_value());
 	EXPECT_TRUE(Mentions(missingColumn.error().message, "9")) << missingColumn.error().message;
 
-	auto repeated = with(order_by{0, {1, 1}, false});
+	uint32_t const twice[] = {1, 1};
+	auto repeated = SpawnPointsWith(order_by{twice, false});
 	ASSERT_FALSE(repeated.has_value());
 	EXPECT_TRUE(Mentions(repeated.error().message, "'section'")) << repeated.error().message;
 
-	auto onDouble = with(order_by{0, {2}, false});
+	uint32_t const real[] = {2};
+	auto onDouble = SpawnPointsWith(order_by{real, false});
 	ASSERT_FALSE(onDouble.has_value());
 	EXPECT_TRUE(Mentions(onDouble.error().message, "'x'")) << onDouble.error().message;
-}
 
-TEST(RelationSchema, SecondOrderIsRefused)
-{
-	auto commands = SpawnPointsSchema();
-	commands.push_back(order_by{0, {0}, false});
-	commands.push_back(order_by{0, {1}, true});
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "already has an order")) << s.error().message;
-}
-
-TEST(RelationSchema, ErrorNamesTheFailingCommand)
-{
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{0, "n", column_type::Int, false},
-		add_column{0, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "command 2")) << s.error().message;
+	add_column const rules[] = {{"when", column_type::Condition, false}};
+	uint32_t const first[] = {0};
+	order_by const byCondition{first, false};
+	auto onCondition = BuildOne(create_table{"rules", rules, &byCondition});
+	ASSERT_FALSE(onCondition.has_value());
+	EXPECT_TRUE(Mentions(onCondition.error().message, "'when'")) << onCondition.error().message;
 }
 ```
 
@@ -523,94 +540,123 @@ namespace tabular
 namespace
 {
 
-tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tables, create_table const& c)
+char const* TypeName(column_type type)
+{
+	switch (type)
+	{
+	case column_type::Hash:      return "hash";
+	case column_type::Flags:     return "flag set";
+	case column_type::Int:       return "int";
+	case column_type::Double:    return "double";
+	case column_type::Condition: return "condition";
+	case column_type::Command:   return "command";
+	}
+	return "unknown type";
+}
+
+// Keys and orders compare by equality, which only an integer value gives:
+// doubles fail on NaN and -0.0, and conditions and commands are not values.
+bool ComparesByEquality(column_type type)
+{
+	return type == column_type::Hash || type == column_type::Flags || type == column_type::Int;
+}
+
+tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_table const& c)
+{
+	if (c.columns.empty())
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' has no columns"));
+	}
+	shared_array<column_def> columns(c.columns.size());
+	for (uint32_t i = 0; i < c.columns.size(); ++i)
+	{
+		add_column const& in = c.columns[i];
+		if (in.name.empty())
+		{
+			return tl::make_unexpected(ErrorContext("column ", i, " of table '", c.name, "' needs a name"));
+		}
+		for (uint32_t earlier = 0; earlier < i; ++earlier)
+		{
+			if (columns[earlier].name == in.name)
+			{
+				return tl::make_unexpected(ErrorContext("table '", c.name, "' has column '", in.name, "' twice"));
+			}
+		}
+		if (in.key && !ComparesByEquality(in.type))
+		{
+			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' is a ",
+				TypeName(in.type), " and cannot be a key"));
+		}
+		columns[i] = column_def{std::string(in.name), in.type, in.key};
+	}
+	return immutable_array<column_def>(std::move(columns));
+}
+
+tl::expected<immutable_array<uint32_t>, ErrorContext> BuildOrder(create_table const& c,
+	immutable_array<column_def> const& columns)
+{
+	order_by const& order = *c.ordering;
+	if (order.columns.empty())
+	{
+		return tl::make_unexpected(ErrorContext("the order of table '", c.name, "' names no columns"));
+	}
+	for (size_t k = 0; k < order.columns.size(); ++k)
+	{
+		uint32_t column = order.columns[k];
+		if (column >= columns.size())
+		{
+			return tl::make_unexpected(ErrorContext("the order of table '", c.name, "' names column ", column,
+				", but the table has ", columns.size()));
+		}
+		for (size_t earlier = 0; earlier < k; ++earlier)
+		{
+			if (order.columns[earlier] == column)
+			{
+				return tl::make_unexpected(ErrorContext("the order of table '", c.name, "' names column '",
+					columns[column].name, "' twice"));
+			}
+		}
+		if (!ComparesByEquality(columns[column].type))
+		{
+			return tl::make_unexpected(ErrorContext("column '", columns[column].name, "' of table '", c.name,
+				"' is a ", TypeName(columns[column].type), " and cannot be in an order"));
+		}
+	}
+	return immutable_array<uint32_t>::FromArray(order.columns.data(), order.columns.size());
+}
+
+tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::span<table_def const> earlier)
 {
 	if (c.name.empty())
 	{
 		return tl::make_unexpected(ErrorContext("a table needs a name"));
 	}
-	for (table_def const& t : tables)
+	for (table_def const& t : earlier)
 	{
 		if (t.name == c.name)
 		{
 			return tl::make_unexpected(ErrorContext("table '", c.name, "' is defined twice"));
 		}
 	}
-	tables.push_back(table_def{c.name, {}, {}, false});
-	return {};
-}
 
-tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tables, add_column const& c)
-{
-	if (c.table >= tables.size())
+	auto columns = BuildColumns(c);
+	if (!columns)
 	{
-		return tl::make_unexpected(ErrorContext("column '", c.name, "' names table ", c.table,
-			", but only ", tables.size(), " tables exist so far"));
+		return tl::make_unexpected(std::move(columns.error()));
 	}
-	table_def& t = tables[c.table];
-	if (c.name.empty())
-	{
-		return tl::make_unexpected(ErrorContext("a column of table '", t.name, "' needs a name"));
-	}
-	for (column_def const& existing : t.columns)
-	{
-		if (existing.name == c.name)
-		{
-			return tl::make_unexpected(ErrorContext("table '", t.name, "' has column '", c.name, "' twice"));
-		}
-	}
-	// Equality on doubles fails on NaN and on -0.0 versus 0.0, so a key never is one.
-	if (c.key && c.type == column_type::Double)
-	{
-		return tl::make_unexpected(ErrorContext("column '", c.name, "' of table '", t.name,
-			"' is a double and cannot be a key"));
-	}
-	t.columns.push_back(column_def{c.name, c.type, c.key});
-	return {};
-}
 
-tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tables, order_by const& c)
-{
-	if (c.table >= tables.size())
+	table_def out{std::string(c.name), std::move(*columns), {}, false};
+	if (c.ordering)
 	{
-		return tl::make_unexpected(ErrorContext("an order names table ", c.table,
-			", but only ", tables.size(), " tables exist so far"));
-	}
-	table_def& t = tables[c.table];
-	if (!t.order.empty())
-	{
-		return tl::make_unexpected(ErrorContext("table '", t.name, "' already has an order"));
-	}
-	if (c.columns.empty())
-	{
-		return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names no columns"));
-	}
-	for (size_t k = 0; k < c.columns.size(); ++k)
-	{
-		uint32_t column = c.columns[k];
-		if (column >= t.columns.size())
+		auto order = BuildOrder(c, out.columns);
+		if (!order)
 		{
-			return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names column ", column,
-				", but the table has ", t.columns.size()));
+			return tl::make_unexpected(std::move(order.error()));
 		}
-		for (size_t earlier = 0; earlier < k; ++earlier)
-		{
-			if (c.columns[earlier] == column)
-			{
-				return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names column '",
-					t.columns[column].name, "' twice"));
-			}
-		}
-		// Same reason as keys: equality on doubles is not an identity.
-		if (t.columns[column].type == column_type::Double)
-		{
-			return tl::make_unexpected(ErrorContext("column '", t.columns[column].name, "' of table '", t.name,
-				"' is a double and cannot be in an order"));
-		}
+		out.order  = std::move(*order);
+		out.unique = c.ordering->unique;
 	}
-	t.order  = c.columns;
-	t.unique = c.unique;
-	return {};
+	return out;
 }
 
 }
@@ -644,25 +690,19 @@ tl::expected<uint32_t, ErrorContext> schema::FindColumn(uint32_t table, std::str
 	return tl::make_unexpected(ErrorContext("table '", _tables[table].name, "' has no column '", name, "'"));
 }
 
-tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> commands)
+tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables)
 {
-	std::vector<table_def> tables;
-	for (size_t i = 0; i < commands.size(); ++i)
+	shared_array<table_def> out(tables.size());
+	for (uint32_t t = 0; t < tables.size(); ++t)
 	{
-		auto applied = std::visit([&](auto const& c) { return ApplySchemaCommand(tables, c); }, commands[i]);
-		if (!applied)
+		auto built = BuildTable(tables[t], std::span<table_def const>(out.begin(), t));
+		if (!built)
 		{
-			return tl::make_unexpected(ErrorContext("schema command ", i, ": ", applied.error().message));
+			return tl::make_unexpected(ErrorContext("table ", t, ": ", built.error().message));
 		}
+		out[t] = std::move(*built);
 	}
-	for (table_def const& t : tables)
-	{
-		if (t.columns.empty())
-		{
-			return tl::make_unexpected(ErrorContext("table '", t.name, "' has no columns"));
-		}
-	}
-	return schema(std::move(tables));
+	return schema(immutable_array<table_def>(std::move(out)));
 }
 
 }
@@ -671,7 +711,7 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> c
 - [ ] **Step 7: Build and run the tests to verify they pass**
 
 Run: `env -C $WT PWD=$WT scripts/wt-build.sh && $WT/Build/Engine --gtest --gtest_filter='RelationSchema.*'`
-Expected: all 14 `RelationSchema` tests PASS.
+Expected: all 12 `RelationSchema` tests PASS.
 
 - [ ] **Step 8: Check the no-world constraint**
 
@@ -698,6 +738,8 @@ Stop. Show the owner `include/tabular/relation.h` and wait for their review befo
 ---
 
 ### Task 2: `relation_store`: insert, retract, generation
+
+> **Amended 2026-10-15 (owner header review).** The header in Task 1 is authoritative and changes this task's interface: no `row_command` variant (`Insert(insert_row const&) -> tl::expected<void, ErrorContext>` and `Retract(retract_owner const&) -> void`); `insert_row` carries views (`values` for value columns only, `conditions` adopted closures, `commands` copied text); `Row()` is replaced by `Value(table, row, column)`, plus `Holds(...)` and `CommandAt(...)` for Condition and Command columns. Where the code below conflicts with the header, the header wins; the executor ledgers each adaptation as a ruling. Tests for closure adoption (released exactly once on retract, on refusal and on destruction) and for `Holds` passing `this_in` and reporting `error_out` are added here.
 
 **Files:**
 - Modify: `Spehleon/Tabular/src/relation.cpp` (append the store)
@@ -1262,6 +1304,8 @@ Each message ends with the session's attribution lines.
 ---
 
 ### Task 3: key lookup, and spawn points end to end
+
+> **Amended 2026-10-15 (owner header review).** The header in Task 1 is authoritative and changes this task's interface: no `row_command` variant (`Insert(insert_row const&) -> tl::expected<void, ErrorContext>` and `Retract(retract_owner const&) -> void`); `insert_row` carries views (`values` for value columns only, `conditions` adopted closures, `commands` copied text); `Row()` is replaced by `Value(table, row, column)`, plus `Holds(...)` and `CommandAt(...)` for Condition and Command columns. Where the code below conflicts with the header, the header wins; the executor ledgers each adaptation as a ruling. Tests for closure adoption (released exactly once on retract, on refusal and on destruction) and for `Holds` passing `this_in` and reporting `error_out` are added here.
 
 **Files:**
 - Modify: `Spehleon/Tabular/src/relation.cpp` (replace the `Find` stub)

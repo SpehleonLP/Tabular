@@ -16,33 +16,43 @@ static bool Mentions(std::string const& message, std::string_view text)
 namespace
 {
 
-std::vector<schema_command> SpawnPointsSchema()
+add_column const kSpawnColumns[] = {
+	{"package", column_type::Hash,   true},
+	{"section", column_type::Hash,   true},
+	{"x",       column_type::Double, false},
+	{"y",       column_type::Double, false},
+};
+
+tl::expected<schema, ErrorContext> BuildOne(create_table const& table)
 {
-	return {
-		create_table{"spawn_points"},
-		add_column{0, "package", column_type::Hash,   true},
-		add_column{0, "section", column_type::Hash,   true},
-		add_column{0, "x",       column_type::Double, false},
-		add_column{0, "y",       column_type::Double, false},
-	};
+	return BuildSchema(std::span<create_table const>(&table, 1));
+}
+
+tl::expected<schema, ErrorContext> SpawnPointsWith(order_by const& order)
+{
+	return BuildOne(create_table{"spawn_points", kSpawnColumns, &order});
 }
 
 }
 
-TEST(RelationSchema, EmptyCommandListBuildsNoTables)
+TEST(RelationSchema, EmptyListBuildsNoTables)
 {
 	auto s = BuildSchema({});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	EXPECT_TRUE(s->tables().empty());
 }
 
-TEST(RelationSchema, CommandsBuildTablesAndColumnsInOrder)
+TEST(RelationSchema, TablesAndColumnsKeepTheirOrder)
 {
-	auto commands = SpawnPointsSchema();
-	commands.push_back(create_table{"second"});
-	commands.push_back(add_column{1, "n", column_type::Int, false});
-
-	auto s = BuildSchema(commands);
+	add_column const rules[] = {
+		{"when", column_type::Condition, false},
+		{"then", column_type::Command,   false},
+	};
+	create_table const tables[] = {
+		{"spawn_points", kSpawnColumns},
+		{"rules", rules},
+	};
+	auto s = BuildSchema(tables);
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	ASSERT_EQ(s->tables().size(), 2u);
 
@@ -56,12 +66,31 @@ TEST(RelationSchema, CommandsBuildTablesAndColumnsInOrder)
 	EXPECT_EQ(t.columns[3].type, column_type::Double);
 	EXPECT_FALSE(t.columns[3].key);
 
-	EXPECT_EQ(s->tables()[1].name, "second");
+	table_def const& r = s->tables()[1];
+	EXPECT_EQ(r.name, "rules");
+	EXPECT_EQ(r.columns[0].type, column_type::Condition);
+	EXPECT_EQ(r.columns[1].type, column_type::Command);
+}
+
+TEST(RelationSchema, CommandViewsNeedNotOutliveTheBuild)
+{
+	tl::expected<schema, ErrorContext> s;
+	{
+		std::string name   = "temporary";
+		std::string column = "n";
+		add_column const columns[] = {{column, column_type::Int, false}};
+		s = BuildOne(create_table{name, columns});
+		name.assign("overwritten");
+		column.assign("z");
+	}
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	EXPECT_EQ(s->tables()[0].name, "temporary");
+	EXPECT_EQ(s->tables()[0].columns[0].name, "n");
 }
 
 TEST(RelationSchema, FindTableAndColumnByName)
 {
-	auto s = BuildSchema(SpawnPointsSchema());
+	auto s = BuildOne(create_table{"spawn_points", kSpawnColumns});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 
 	auto table = s->FindTable("spawn_points");
@@ -78,140 +107,106 @@ TEST(RelationSchema, FindTableAndColumnByName)
 
 	auto missingColumn = s->FindColumn(*table, "z");
 	ASSERT_FALSE(missingColumn.has_value());
-	EXPECT_TRUE(Mentions(missingColumn.error().message, "z")) << missingColumn.error().message;
+	EXPECT_TRUE(Mentions(missingColumn.error().message, "'z'")) << missingColumn.error().message;
 
 	EXPECT_FALSE(s->FindColumn(7, "x").has_value());
 }
 
 TEST(RelationSchema, DuplicateTableNameIsRefused)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"}, add_column{0, "n", column_type::Int, false},
-		create_table{"a"}, add_column{1, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
+	add_column const columns[] = {{"n", column_type::Int, false}};
+	create_table const tables[] = {{"a", columns}, {"a", columns}};
+	auto s = BuildSchema(tables);
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'a'")) << s.error().message;
+	EXPECT_TRUE(Mentions(s.error().message, "table 1")) << s.error().message;
 }
 
 TEST(RelationSchema, DuplicateColumnNameIsRefused)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{0, "n", column_type::Int, false},
-		add_column{0, "n", column_type::Double, false},
-	};
-	auto s = BuildSchema(commands);
+	add_column const columns[] = {{"n", column_type::Int, false}, {"n", column_type::Double, false}};
+	auto s = BuildOne(create_table{"a", columns});
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'n'")) << s.error().message;
 }
 
-TEST(RelationSchema, ColumnNamingAnUncreatedTableIsRefused)
-{
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{1, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "table 1")) << s.error().message;
-}
-
 TEST(RelationSchema, EmptyNamesAreRefused)
 {
-	std::vector<schema_command> noTableName = { create_table{""} };
-	EXPECT_FALSE(BuildSchema(noTableName).has_value());
+	add_column const columns[] = {{"n", column_type::Int, false}};
+	EXPECT_FALSE(BuildOne(create_table{"", columns}).has_value());
 
-	std::vector<schema_command> noColumnName = {
-		create_table{"a"}, add_column{0, "", column_type::Int, false},
-	};
-	EXPECT_FALSE(BuildSchema(noColumnName).has_value());
+	add_column const unnamed[] = {{"", column_type::Int, false}};
+	EXPECT_FALSE(BuildOne(create_table{"a", unnamed}).has_value());
 }
 
 TEST(RelationSchema, TableWithoutColumnsIsRefused)
 {
-	std::vector<schema_command> commands = { create_table{"bare"} };
-	auto s = BuildSchema(commands);
+	auto s = BuildOne(create_table{"bare", {}});
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().message, "'bare'")) << s.error().message;
 }
 
-TEST(RelationSchema, KeyOnDoubleIsRefused)
+TEST(RelationSchema, OnlyHashFlagsAndIntCanBeKeys)
 {
-	std::vector<schema_command> commands = {
-		create_table{"a"}, add_column{0, "x", column_type::Double, true},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "'x'")) << s.error().message;
+	for (column_type type : {column_type::Double, column_type::Condition, column_type::Command})
+	{
+		add_column const columns[] = {{"k", type, true}};
+		auto s = BuildOne(create_table{"a", columns});
+		ASSERT_FALSE(s.has_value());
+		EXPECT_TRUE(Mentions(s.error().message, "'k'")) << s.error().message;
+	}
+	for (column_type type : {column_type::Hash, column_type::Flags, column_type::Int})
+	{
+		add_column const columns[] = {{"k", type, true}};
+		EXPECT_TRUE(BuildOne(create_table{"a", columns}).has_value());
+	}
 }
 
 TEST(RelationSchema, OrderIsRecorded)
 {
-	auto commands = SpawnPointsSchema();
-	commands.push_back(order_by{0, {1, 0}, true});
-	auto s = BuildSchema(commands);
+	uint32_t const columns[] = {1, 0};
+	auto s = SpawnPointsWith(order_by{columns, true});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
-	EXPECT_EQ(s->tables()[0].order, (std::vector<uint32_t>{1, 0}));
-	EXPECT_TRUE(s->tables()[0].unique);
+	table_def const& t = s->tables()[0];
+	ASSERT_EQ(t.order.size(), 2u);
+	EXPECT_EQ(t.order[0], 1u);
+	EXPECT_EQ(t.order[1], 0u);
+	EXPECT_TRUE(t.unique);
 }
 
 TEST(RelationSchema, TableWithoutOrderKeepsInsertionOrder)
 {
-	auto s = BuildSchema(SpawnPointsSchema());
+	auto s = BuildOne(create_table{"spawn_points", kSpawnColumns});
 	ASSERT_TRUE(s.has_value()) << s.error().message;
-	EXPECT_TRUE(s->tables()[0].order.empty());
+	EXPECT_EQ(s->tables()[0].order.size(), 0u);
 	EXPECT_FALSE(s->tables()[0].unique);
 }
 
 TEST(RelationSchema, BadOrdersAreRefused)
 {
-	auto with = [](order_by o)
-	{
-		auto commands = SpawnPointsSchema();
-		commands.push_back(std::move(o));
-		return BuildSchema(commands);
-	};
-
-	auto unknownTable = with(order_by{4, {0}, false});
-	ASSERT_FALSE(unknownTable.has_value());
-	EXPECT_TRUE(Mentions(unknownTable.error().message, "table 4")) << unknownTable.error().message;
-
-	auto noColumns = with(order_by{0, {}, false});
+	auto noColumns = SpawnPointsWith(order_by{{}, false});
 	ASSERT_FALSE(noColumns.has_value());
 	EXPECT_TRUE(Mentions(noColumns.error().message, "spawn_points")) << noColumns.error().message;
 
-	auto missingColumn = with(order_by{0, {9}, false});
+	uint32_t const missing[] = {9};
+	auto missingColumn = SpawnPointsWith(order_by{missing, false});
 	ASSERT_FALSE(missingColumn.has_value());
 	EXPECT_TRUE(Mentions(missingColumn.error().message, "9")) << missingColumn.error().message;
 
-	auto repeated = with(order_by{0, {1, 1}, false});
+	uint32_t const twice[] = {1, 1};
+	auto repeated = SpawnPointsWith(order_by{twice, false});
 	ASSERT_FALSE(repeated.has_value());
 	EXPECT_TRUE(Mentions(repeated.error().message, "'section'")) << repeated.error().message;
 
-	auto onDouble = with(order_by{0, {2}, false});
+	uint32_t const real[] = {2};
+	auto onDouble = SpawnPointsWith(order_by{real, false});
 	ASSERT_FALSE(onDouble.has_value());
 	EXPECT_TRUE(Mentions(onDouble.error().message, "'x'")) << onDouble.error().message;
-}
 
-TEST(RelationSchema, SecondOrderIsRefused)
-{
-	auto commands = SpawnPointsSchema();
-	commands.push_back(order_by{0, {0}, false});
-	commands.push_back(order_by{0, {1}, true});
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "already has an order")) << s.error().message;
-}
-
-TEST(RelationSchema, ErrorNamesTheFailingCommand)
-{
-	std::vector<schema_command> commands = {
-		create_table{"a"},
-		add_column{0, "n", column_type::Int, false},
-		add_column{0, "n", column_type::Int, false},
-	};
-	auto s = BuildSchema(commands);
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().message, "command 2")) << s.error().message;
+	add_column const rules[] = {{"when", column_type::Condition, false}};
+	uint32_t const first[] = {0};
+	order_by const byCondition{first, false};
+	auto onCondition = BuildOne(create_table{"rules", rules, &byCondition});
+	ASSERT_FALSE(onCondition.has_value());
+	EXPECT_TRUE(Mentions(onCondition.error().message, "'when'")) << onCondition.error().message;
 }
