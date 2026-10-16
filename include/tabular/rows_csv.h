@@ -11,7 +11,8 @@ namespace tabular
 // column but a Condition one appears exactly once. Cells are read by their
 // column's type: a hash is CityHash32 of the text, flags an unsigned decimal
 // or 0x hex below 2^32, an int a signed decimal, a double as from_chars reads
-// it, a command verbatim. Cells are trimmed of surrounding whitespace, blank
+// it, a vec2 as `a..b`, two floats, a command verbatim. Cells are trimmed of
+// surrounding whitespace, blank
 // lines and lines starting with '#' are skipped, a leading UTF-8 BOM is
 // dropped, and text is otherwise taken byte for byte, so a hash matches the
 // one a script literal of the same name gets. The rows replace the owner's

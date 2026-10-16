@@ -24,6 +24,7 @@ char const* TypeName(column_type type)
 	case column_type::Double:    return "double";
 	case column_type::Condition: return "condition";
 	case column_type::Command:   return "command";
+	case column_type::Vec2:      return "vec2";
 	}
 	return "unknown type";
 }

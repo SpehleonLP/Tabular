@@ -121,3 +121,10 @@ TEST(SchemaYaml, MalformedYamlIsRefused)
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "bad.yaml")) << s.error().format();
 }
+
+TEST(SchemaYaml, ReadsTheVec2Type)
+{
+	auto s = SchemaFromYaml("tables:\n  - name: t\n    columns:\n      - {name: at, type: vec2}\n", "t.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	EXPECT_EQ(s->tables()[0].columns[0].type, column_type::Vec2);
+}

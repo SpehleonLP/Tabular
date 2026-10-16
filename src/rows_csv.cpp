@@ -69,6 +69,17 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 		}
 		return cell::Real(v);
 	}
+	case column_type::Vec2:
+	{
+		size_t const dots = text.find("..");
+		float        x    = 0;
+		float        y    = 0;
+		if (dots == std::string_view::npos || !ParseWhole(text.substr(0, dots), x) || !ParseWhole(text.substr(dots + 2), y))
+		{
+			return tl::make_unexpected(ErrorContext("column '", column.name, "' is a vec2, written a..b; got '", text, "'"));
+		}
+		return cell::Vector(x, y);
+	}
 	default:
 		return tl::make_unexpected(ErrorContext("column '", column.name, "' holds no value"));
 	}

@@ -46,8 +46,8 @@ struct document_yaml
 };
 
 // In column_type's order: the index is the enumerator.
-char const* const kTypeNames[] = {"hash", "flags", "int", "double", "condition", "command"};
-YamlEnum const    kTypes{kTypeNames, 6};
+char const* const kTypeNames[] = {"hash", "flags", "int", "double", "condition", "command", "vec2"};
+YamlEnum const    kTypes{kTypeNames, 7};
 
 YamlField const kColumnFields[] = {
 	{"name", FieldType::String, offsetof(column_yaml, name), true},

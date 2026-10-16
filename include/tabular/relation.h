@@ -19,7 +19,8 @@ namespace tabular
 
 // The value types are the only values Tabular knows; a host converts its own
 // values to these, and a flag set (AngelScript uint32) and a hash (CityHash32)
-// travel as int64_t, differing only in how a condition reads them.
+// travel as int64_t, differing only in how a condition reads them. A vec2 is
+// two floats; it is the only vector, and a band a..b is one.
 //
 // Condition and Command columns hold no value. A condition is a closure the
 // host compiled, called with the object being tested. A command is an
@@ -32,6 +33,7 @@ enum class column_type : uint8_t
 	Double,
 	Condition,
 	Command,
+	Vec2,
 };
 
 // One value in a row. The column's type says which member is live.
@@ -39,9 +41,11 @@ union cell
 {
 	int64_t i;
 	double  d;
+	float   v[2];
 
 	static cell Integer(int64_t v) { cell c; c.i = v; return c; }
 	static cell Real(double v)     { cell c; c.d = v; return c; }
+	static cell Vector(float x, float y) { cell c; c.v[0] = x; c.v[1] = y; return c; }
 };
 static_assert(sizeof(cell) == 8);
 

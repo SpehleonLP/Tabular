@@ -171,3 +171,59 @@ TEST(RowsCsv, AHashIsOfTheBytesAsWrittenLikeNameHash)
 	ASSERT_EQ(Load(store, "package,section,mask,x,on_spawn\n" + std::string(name) + ",1,0,0,()\n"), "");
 	EXPECT_EQ(store.Value(0, 0, 0)->i, Hash(name));
 }
+
+namespace
+{
+
+constexpr std::string_view kVecSchema = R"(
+tables:
+  - name: marks
+    read_only: true
+    columns:
+      - {name: id, type: int}
+      - {name: at, type: vec2}
+)";
+
+relation_store VecStore()
+{
+	auto s = SchemaFromYaml(kVecSchema, "marks.yaml");
+	EXPECT_TRUE(s.has_value()) << s.error().format();
+	return relation_store(std::move(*s));
+}
+
+std::string LoadMarks(relation_store& store, std::string_view text)
+{
+	auto loaded = LoadCsv(store, csv_rows{0, 1, text, "marks.csv"});
+	return loaded ? std::string() : loaded.error().format();
+}
+
+}
+
+TEST(RowsCsv, Vec2IsWrittenAsARange)
+{
+	relation_store store = VecStore();
+	ASSERT_EQ(LoadMarks(store, "id,at\n1,0.25..0.5\n"), "");
+	EXPECT_EQ(store.Value(0, 0, 1)->v[0], 0.25f);
+	EXPECT_EQ(store.Value(0, 0, 1)->v[1], 0.5f);
+}
+
+TEST(RowsCsv, MalformedVec2IsRefusedNamingTheColumn)
+{
+	for (std::string_view bad : {"1..", "..2", "1..2..3", "1;2", "a..b"})
+	{
+		relation_store store = VecStore();
+		std::string error = LoadMarks(store, std::string("id,at\n1,") + std::string(bad) + "\n");
+		EXPECT_TRUE(Mentions(error, "'at'")) << bad << ": " << error;
+		EXPECT_TRUE(Mentions(error, "marks.csv:2")) << bad << ": " << error;
+	}
+}
+
+TEST(RowsCsv, Vec2AcceptsSignsAndExponentsAndRefusesInnerSpaces)
+{
+	relation_store store = VecStore();
+	ASSERT_EQ(LoadMarks(store, "id,at\n1,-1..-0.5\n2,1e3..2\n"), "");
+	EXPECT_EQ(store.Value(0, 0, 1)->v[1], -0.5f);
+	EXPECT_EQ(store.Value(0, 1, 1)->v[0], 1000.0f);
+	relation_store spaced = VecStore();
+	EXPECT_TRUE(Mentions(LoadMarks(spaced, "id,at\n1,1 .. 2\n"), "'at'"));
+}
