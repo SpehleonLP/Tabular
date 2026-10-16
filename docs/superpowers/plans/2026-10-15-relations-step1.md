@@ -4,7 +4,7 @@
 
 **Goal:** The first code of the new Tabular: plain relations (tables of typed rows, each row owned by a contributor) built and filled entirely from flat command structs, with no parser.
 
-**Architecture:** Two command variants. `schema_command` (`create_table`, `add_column`) builds an immutable `schema` through `BuildSchema`. `row_command` (`insert_row`, `retract_owner`) is applied to a `relation_store` made from that schema. Rows are flat arrays of 8-byte `cell`s, kept in insertion order. Each table has a generation counter that changes whenever its rows change, and an equality index on its key columns. YAML and CSV front ends (steps 2 and 3) will produce these same commands. Machines are step 4.
+**Architecture:** Two command variants. `schema_command` (`create_table`, `add_column`) builds an immutable `schema` through `BuildSchema`. `row_command` (`insert_row`, `retract_owner`) is applied to a `relation_store` made from that schema. Rows are flat arrays of 8-byte `cell`s, kept in insertion order. A table may declare an order (`order_by`, owner 2026-10-15): rows are stored sorted by those columns, optionally unique, and looked up by prefix with a binary search. Each table has a generation counter that changes whenever its rows change, and an equality index on its key columns. YAML and CSV front ends (steps 2 and 3) will produce these same commands. Machines are step 4.
 
 **Tech Stack:** C++20, `tl::expected` + `ErrorContext` from `Spehleon/lib`, GoogleTest compiled into the Engine binary, CMake source lists.
 
@@ -119,7 +119,20 @@ struct add_column
 	bool        key   = false;
 };
 
-using schema_command = std::variant<create_table, add_column>;
+// The order a table's rows are stored in, and whether it is unique: rows
+// compare by these columns in turn, most significant first, and rows that
+// compare equal keep insertion order. A table without one keeps insertion
+// order. At most one per table. A unique order refuses a second row with the
+// same key instead of replacing the first, so two contributors claiming one
+// key is an error someone sees.
+struct order_by
+{
+	uint32_t              table = 0;
+	std::vector<uint32_t> columns;   // column numbers of that table
+	bool                  unique = false;
+};
+
+using schema_command = std::variant<create_table, add_column, order_by>;
 
 struct column_def
 {
@@ -132,6 +145,8 @@ struct table_def
 {
 	std::string             name;
 	std::vector<column_def> columns;
+	std::vector<uint32_t>   order;    // empty: insertion order
+	bool                    unique = false;
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -175,6 +190,13 @@ struct retract_owner
 
 using row_command = std::variant<insert_row, retract_owner>;
 
+// Rows [first, last), in row order.
+struct row_range
+{
+	size_t first = 0;
+	size_t last  = 0;
+};
+
 // Live rows for every table of a schema.
 //
 // Rows keep insertion order; a retract keeps the survivors' order. Row indices
@@ -204,6 +226,10 @@ public:
 	// Rows whose key column equals value, in row order. Only key columns can
 	// be searched; a lookup, not a scan.
 	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t table, uint32_t column, cell value) const;
+
+	// Rows whose leading order columns equal prefix, by binary search. The
+	// prefix may be shorter than the order; an empty one matches every row.
+	tl::expected<row_range, ErrorContext> FindOrdered(uint32_t table, std::span<cell const> prefix) const;
 
 private:
 	struct Storage;
@@ -404,6 +430,64 @@ TEST(RelationSchema, KeyOnDoubleIsRefused)
 	EXPECT_TRUE(Mentions(s.error().message, "'x'")) << s.error().message;
 }
 
+TEST(RelationSchema, OrderIsRecorded)
+{
+	auto commands = SpawnPointsSchema();
+	commands.push_back(order_by{0, {1, 0}, true});
+	auto s = BuildSchema(commands);
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	EXPECT_EQ(s->tables()[0].order, (std::vector<uint32_t>{1, 0}));
+	EXPECT_TRUE(s->tables()[0].unique);
+}
+
+TEST(RelationSchema, TableWithoutOrderKeepsInsertionOrder)
+{
+	auto s = BuildSchema(SpawnPointsSchema());
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	EXPECT_TRUE(s->tables()[0].order.empty());
+	EXPECT_FALSE(s->tables()[0].unique);
+}
+
+TEST(RelationSchema, BadOrdersAreRefused)
+{
+	auto with = [](order_by o)
+	{
+		auto commands = SpawnPointsSchema();
+		commands.push_back(std::move(o));
+		return BuildSchema(commands);
+	};
+
+	auto unknownTable = with(order_by{4, {0}, false});
+	ASSERT_FALSE(unknownTable.has_value());
+	EXPECT_TRUE(Mentions(unknownTable.error().message, "table 4")) << unknownTable.error().message;
+
+	auto noColumns = with(order_by{0, {}, false});
+	ASSERT_FALSE(noColumns.has_value());
+	EXPECT_TRUE(Mentions(noColumns.error().message, "spawn_points")) << noColumns.error().message;
+
+	auto missingColumn = with(order_by{0, {9}, false});
+	ASSERT_FALSE(missingColumn.has_value());
+	EXPECT_TRUE(Mentions(missingColumn.error().message, "9")) << missingColumn.error().message;
+
+	auto repeated = with(order_by{0, {1, 1}, false});
+	ASSERT_FALSE(repeated.has_value());
+	EXPECT_TRUE(Mentions(repeated.error().message, "'section'")) << repeated.error().message;
+
+	auto onDouble = with(order_by{0, {2}, false});
+	ASSERT_FALSE(onDouble.has_value());
+	EXPECT_TRUE(Mentions(onDouble.error().message, "'x'")) << onDouble.error().message;
+}
+
+TEST(RelationSchema, SecondOrderIsRefused)
+{
+	auto commands = SpawnPointsSchema();
+	commands.push_back(order_by{0, {0}, false});
+	commands.push_back(order_by{0, {1}, true});
+	auto s = BuildSchema(commands);
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().message, "already has an order")) << s.error().message;
+}
+
 TEST(RelationSchema, ErrorNamesTheFailingCommand)
 {
 	std::vector<schema_command> commands = {
@@ -452,7 +536,7 @@ tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tabl
 			return tl::make_unexpected(ErrorContext("table '", c.name, "' is defined twice"));
 		}
 	}
-	tables.push_back(table_def{c.name, {}});
+	tables.push_back(table_def{c.name, {}, {}, false});
 	return {};
 }
 
@@ -482,6 +566,50 @@ tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tabl
 			"' is a double and cannot be a key"));
 	}
 	t.columns.push_back(column_def{c.name, c.type, c.key});
+	return {};
+}
+
+tl::expected<void, ErrorContext> ApplySchemaCommand(std::vector<table_def>& tables, order_by const& c)
+{
+	if (c.table >= tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("an order names table ", c.table,
+			", but only ", tables.size(), " tables exist so far"));
+	}
+	table_def& t = tables[c.table];
+	if (!t.order.empty())
+	{
+		return tl::make_unexpected(ErrorContext("table '", t.name, "' already has an order"));
+	}
+	if (c.columns.empty())
+	{
+		return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names no columns"));
+	}
+	for (size_t k = 0; k < c.columns.size(); ++k)
+	{
+		uint32_t column = c.columns[k];
+		if (column >= t.columns.size())
+		{
+			return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names column ", column,
+				", but the table has ", t.columns.size()));
+		}
+		for (size_t earlier = 0; earlier < k; ++earlier)
+		{
+			if (c.columns[earlier] == column)
+			{
+				return tl::make_unexpected(ErrorContext("the order of table '", t.name, "' names column '",
+					t.columns[column].name, "' twice"));
+			}
+		}
+		// Same reason as keys: equality on doubles is not an identity.
+		if (t.columns[column].type == column_type::Double)
+		{
+			return tl::make_unexpected(ErrorContext("column '", t.columns[column].name, "' of table '", t.name,
+				"' is a double and cannot be in an order"));
+		}
+	}
+	t.order  = c.columns;
+	t.unique = c.unique;
 	return {};
 }
 
@@ -543,7 +671,7 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<schema_command const> c
 - [ ] **Step 7: Build and run the tests to verify they pass**
 
 Run: `env -C $WT PWD=$WT scripts/wt-build.sh && $WT/Build/Engine --gtest --gtest_filter='RelationSchema.*'`
-Expected: all 10 `RelationSchema` tests PASS.
+Expected: all 14 `RelationSchema` tests PASS.
 
 - [ ] **Step 8: Check the no-world constraint**
 
@@ -757,6 +885,94 @@ TEST(RelationStore, FlagsOutOfRangeIsRefused)
 	EXPECT_EQ(store.RowCount(1), 2u);
 }
 
+namespace
+{
+
+// sorted(section: int, package: int, mask: flags), ordered by (section, package).
+relation_store MakeOrderedStore(bool unique)
+{
+	std::vector<schema_command> commands = {
+		create_table{"sorted"},
+		add_column{0, "section", column_type::Int,   false},
+		add_column{0, "package", column_type::Int,   true},
+		add_column{0, "mask",    column_type::Flags, false},
+		order_by{0, {0, 1}, unique},
+	};
+	auto s = BuildSchema(commands);
+	EXPECT_TRUE(s.has_value());
+	return relation_store(std::move(*s));
+}
+
+insert_row Sorted(uint64_t owner, int64_t section, int64_t package, int64_t mask)
+{
+	return insert_row{0, owner, {cell::Integer(section), cell::Integer(package), cell::Integer(mask)}};
+}
+
+}
+
+TEST(RelationStore, OrderedTableSortsRowsAndTiesKeepInsertionOrder)
+{
+	relation_store store = MakeOrderedStore(false);
+	ASSERT_TRUE(store.Apply(Sorted(1, 5, 2, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(1, 3, 9, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(1, 5, 1, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(1, 5, 2, 1)).has_value());   // ties with the first row
+	ASSERT_TRUE(store.Apply(Sorted(1, -4, 0, 0)).has_value());
+
+	ASSERT_EQ(store.RowCount(0), 5u);
+	std::vector<std::vector<int64_t>> got;
+	for (size_t r = 0; r < store.RowCount(0); ++r)
+	{
+		auto row = store.Row(0, r);
+		got.push_back({row[0].i, row[1].i, row[2].i});
+	}
+	std::vector<std::vector<int64_t>> want = {
+		{-4, 0, 0}, {3, 9, 0}, {5, 1, 0}, {5, 2, 0}, {5, 2, 1},
+	};
+	EXPECT_EQ(got, want);
+}
+
+TEST(RelationStore, UniqueOrderRefusesASecondRowWithTheKey)
+{
+	relation_store store = MakeOrderedStore(true);
+	ASSERT_TRUE(store.Apply(Sorted(1, 5, 2, 0)).has_value());
+	uint64_t before = store.Generation(0);
+
+	auto r = store.Apply(Sorted(2, 5, 2, 7));
+	ASSERT_FALSE(r.has_value());
+	EXPECT_TRUE(Mentions(r.error().message, "sorted")) << r.error().message;
+	EXPECT_TRUE(Mentions(r.error().message, "owner 1")) << r.error().message;
+	EXPECT_EQ(store.RowCount(0), 1u);
+	EXPECT_EQ(store.Generation(0), before);
+
+	EXPECT_TRUE(store.Apply(Sorted(2, 5, 3, 7)).has_value());   // a different key is fine
+}
+
+TEST(RelationStore, UniqueKeyCanBeReusedAfterItsOwnerReloads)
+{
+	relation_store store = MakeOrderedStore(true);
+	ASSERT_TRUE(store.Apply(Sorted(1, 5, 2, 0)).has_value());
+	ASSERT_TRUE(store.Apply(retract_owner{1}).has_value());
+	auto r = store.Apply(Sorted(1, 5, 2, 9));
+	ASSERT_TRUE(r.has_value()) << r.error().message;
+	EXPECT_EQ(store.Row(0, 0)[2].i, 9);
+}
+
+TEST(RelationStore, RetractKeepsAnOrderedTableSorted)
+{
+	relation_store store = MakeOrderedStore(false);
+	ASSERT_TRUE(store.Apply(Sorted(1, 4, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(2, 2, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(1, 3, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Sorted(2, 1, 0, 0)).has_value());
+
+	ASSERT_TRUE(store.Apply(retract_owner{2}).has_value());
+
+	ASSERT_EQ(store.RowCount(0), 2u);
+	EXPECT_EQ(store.Row(0, 0)[0].i, 3);
+	EXPECT_EQ(store.Row(0, 1)[0].i, 4);
+}
+
 TEST(RelationStore, MovedStoreKeepsItsRows)
 {
 	relation_store store = MakeStore();
@@ -804,6 +1020,48 @@ namespace
 bool FitsFlags(int64_t v)
 {
 	return v >= 0 && v <= INT64_C(0xFFFFFFFF);
+}
+
+// Negative, zero or positive as the row sorts before, with or after key, over
+// the first key.size() order columns. Order columns are never doubles, so
+// every compared cell is an integer.
+int CompareOrder(std::span<cell const> row, std::span<uint32_t const> order, std::span<cell const> key)
+{
+	for (size_t k = 0; k < key.size(); ++k)
+	{
+		int64_t a = row[order[k]].i;
+		int64_t b = key[k].i;
+		if (a != b)
+		{
+			return a < b ? -1 : 1;
+		}
+	}
+	return 0;
+}
+
+// The first row that does not sort before key (lower), or the first that
+// sorts after it (upper), by binary search over rows already in order.
+size_t OrderBound(std::span<cell const> cells, size_t rowCount, size_t stride,
+	std::span<uint32_t const> order, std::span<cell const> key, bool upper)
+{
+	size_t first = 0;
+	size_t count = rowCount;
+	while (count > 0)
+	{
+		size_t half = count / 2;
+		size_t mid  = first + half;
+		int    cmp  = CompareOrder(cells.subspan(mid * stride, stride), order, key);
+		if (upper ? cmp <= 0 : cmp < 0)
+		{
+			first  = mid + 1;
+			count -= half + 1;
+		}
+		else
+		{
+			count = half;
+		}
+	}
+	return first;
 }
 
 }
@@ -876,16 +1134,50 @@ tl::expected<void, ErrorContext> relation_store::Apply(row_command const& comman
 			}
 		}
 
-		auto& rows = _storage->tables[insert->table];
-		auto  row  = static_cast<uint32_t>(rows.owners.size());
-		rows.cells.insert(rows.cells.end(), insert->values.begin(), insert->values.end());
-		rows.owners.push_back(insert->owner);
-		for (size_t c = 0; c < def.columns.size(); ++c)
+		auto&  rows   = _storage->tables[insert->table];
+		size_t stride = def.columns.size();
+		size_t count  = rows.owners.size();
+		size_t pos    = count;
+		if (!def.order.empty())
 		{
-			if (def.columns[c].key)
+			std::vector<cell> key;
+			key.reserve(def.order.size());
+			for (uint32_t c : def.order)
 			{
-				rows.index[c][insert->values[c].i].push_back(row);
+				key.push_back(insert->values[c]);
 			}
+			size_t lower = OrderBound(rows.cells, count, stride, def.order, key, false);
+			pos          = OrderBound(rows.cells, count, stride, def.order, key, true);
+			if (def.unique && lower != pos)
+			{
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
+					rows.owners[lower], " already has a row with this key"));
+			}
+		}
+
+		rows.cells.insert(rows.cells.begin() + pos * stride, insert->values.begin(), insert->values.end());
+		rows.owners.insert(rows.owners.begin() + pos, insert->owner);
+		auto row = static_cast<uint32_t>(pos);
+		for (size_t c = 0; c < stride; ++c)
+		{
+			if (!def.columns[c].key)
+			{
+				continue;
+			}
+			// Rows after the insertion point moved down one.
+			for (auto& entry : rows.index[c])
+			{
+				for (uint32_t& r : entry.second)
+				{
+					if (r >= row)
+					{
+						++r;
+					}
+				}
+			}
+			// Each list stays in row order, which is the order Find returns.
+			auto& list = rows.index[c][insert->values[c].i];
+			list.insert(std::lower_bound(list.begin(), list.end(), row), row);
 		}
 		++rows.generation;
 		return {};
@@ -943,13 +1235,18 @@ tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t, u
 	return tl::make_unexpected(ErrorContext("relation_store::Find is not implemented yet"));
 }
 
+tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t, std::span<cell const>) const
+{
+	return tl::make_unexpected(ErrorContext("relation_store::FindOrdered is not implemented yet"));
+}
+
 }
 ```
 
 - [ ] **Step 4: Build and run the tests to verify they pass**
 
 Run: `env -C $WT PWD=$WT scripts/wt-build.sh && $WT/Build/Engine --gtest --gtest_filter='Relation*'`
-Expected: 10 `RelationSchema` and 11 `RelationStore` tests PASS.
+Expected: 14 `RelationSchema` and 15 `RelationStore` tests PASS.
 
 - [ ] **Step 5: Commit (coordinator), leaves first**
 
@@ -973,7 +1270,7 @@ Each message ends with the session's attribution lines.
 
 **Interfaces:**
 - Consumes: `relation_store::Storage::table_rows::index` as filled by Task 2's `Apply`.
-- Produces: `relation_store::Find(uint32_t table, uint32_t column, cell value) const -> tl::expected<std::vector<size_t>, ErrorContext>`.
+- Produces: `relation_store::Find(uint32_t table, uint32_t column, cell value) const -> tl::expected<std::vector<size_t>, ErrorContext>` and `relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const -> tl::expected<row_range, ErrorContext>`. `FindOrdered` uses Task 2's `OrderBound`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1099,6 +1396,102 @@ TEST(RelationFind, ExtremeValuesLookUpAndRetract)
 	EXPECT_TRUE(gone->empty());
 }
 
+TEST(RelationFind, KeyLookupIsRightAfterAnInsertInTheMiddle)
+{
+	std::vector<schema_command> commands = {
+		create_table{"t"},
+		add_column{0, "rank", column_type::Int, false},
+		add_column{0, "tag",  column_type::Hash, true},
+		order_by{0, {0}, false},
+	};
+	auto s = BuildSchema(commands);
+	ASSERT_TRUE(s.has_value()) << s.error().message;
+	relation_store store(std::move(*s));
+	ASSERT_TRUE(store.Apply(insert_row{0, 1, {cell::Integer(10), cell::Integer(7)}}).has_value());
+	ASSERT_TRUE(store.Apply(insert_row{0, 1, {cell::Integer(30), cell::Integer(7)}}).has_value());
+	ASSERT_TRUE(store.Apply(insert_row{0, 1, {cell::Integer(20), cell::Integer(7)}}).has_value());
+
+	auto found = store.Find(0, 1, cell::Integer(7));
+	ASSERT_TRUE(found.has_value());
+	EXPECT_EQ(*found, (std::vector<size_t>{0, 1, 2}));
+	EXPECT_EQ(store.Row(0, 1)[0].i, 20);
+}
+
+namespace
+{
+
+// spawn points ordered by (section, package)
+relation_store OrderedSpawnPoints()
+{
+	std::vector<schema_command> commands = {
+		create_table{"spawn_points"},
+		add_column{0, "package", column_type::Hash,   true},
+		add_column{0, "section", column_type::Hash,   true},
+		add_column{0, "x",       column_type::Double, false},
+		add_column{0, "y",       column_type::Double, false},
+		order_by{0, {1, 0}, false},
+	};
+	auto s = BuildSchema(commands);
+	EXPECT_TRUE(s.has_value());
+	return relation_store(std::move(*s));
+}
+
+}
+
+TEST(RelationFind, OrderedPrefixFindsAContiguousRange)
+{
+	relation_store store = OrderedSpawnPoints();
+	ASSERT_TRUE(store.Apply(Spawn(1, 10, 600, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Spawn(1, 10, 500, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Spawn(2, 20, 500, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Spawn(2, 20, 700, 0, 0)).has_value());
+
+	cell meadow[] = {cell::Integer(500)};
+	auto inMeadow = store.FindOrdered(0, meadow);
+	ASSERT_TRUE(inMeadow.has_value()) << inMeadow.error().message;
+	EXPECT_EQ(inMeadow->first, 0u);
+	EXPECT_EQ(inMeadow->last, 2u);
+
+	cell exact[] = {cell::Integer(500), cell::Integer(20)};
+	auto one = store.FindOrdered(0, exact);
+	ASSERT_TRUE(one.has_value());
+	EXPECT_EQ(one->last - one->first, 1u);
+	EXPECT_EQ(store.Row(0, one->first)[0].i, 20);
+
+	cell nowhere[] = {cell::Integer(550)};
+	auto none = store.FindOrdered(0, nowhere);
+	ASSERT_TRUE(none.has_value());
+	EXPECT_EQ(none->first, none->last);
+}
+
+TEST(RelationFind, EmptyPrefixMatchesEveryRow)
+{
+	relation_store store = OrderedSpawnPoints();
+	ASSERT_TRUE(store.Apply(Spawn(1, 10, 600, 0, 0)).has_value());
+	ASSERT_TRUE(store.Apply(Spawn(1, 10, 500, 0, 0)).has_value());
+	auto all = store.FindOrdered(0, {});
+	ASSERT_TRUE(all.has_value());
+	EXPECT_EQ(all->first, 0u);
+	EXPECT_EQ(all->last, 2u);
+}
+
+TEST(RelationFind, BadOrderedLookupsAreRefused)
+{
+	relation_store unordered = SpawnPoints();
+	cell key[] = {cell::Integer(1)};
+	auto noOrder = unordered.FindOrdered(0, key);
+	ASSERT_FALSE(noOrder.has_value());
+	EXPECT_TRUE(Mentions(noOrder.error().message, "no order")) << noOrder.error().message;
+
+	relation_store ordered = OrderedSpawnPoints();
+	cell tooLong[] = {cell::Integer(1), cell::Integer(2), cell::Integer(3)};
+	auto longer = ordered.FindOrdered(0, tooLong);
+	ASSERT_FALSE(longer.has_value());
+	EXPECT_TRUE(Mentions(longer.error().message, "3")) << longer.error().message;
+
+	EXPECT_FALSE(ordered.FindOrdered(5, key).has_value());
+}
+
 // The owner's example: a package contributes spawn points, is reloaded with
 // different ones, and a consumer notices through the generation and re-reads.
 TEST(RelationFind, SpawnPointsSurvivePackageReload)
@@ -1137,7 +1530,7 @@ Expected: the lookup tests FAIL with "relation_store::Find is not implemented ye
 
 - [ ] **Step 3: Implement `Find`**
 
-Replace the stub in `Spehleon/Tabular/src/relation.cpp`:
+Replace both stubs in `Spehleon/Tabular/src/relation.cpp` with:
 
 ```cpp
 tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, cell value) const
@@ -1167,16 +1560,42 @@ tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t ta
 	}
 	return out;
 }
+
+tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const
+{
+	auto defs = _storage->definition.tables();
+	if (table >= defs.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	table_def const& def = defs[table];
+	if (def.order.empty())
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no order to look up by"));
+	}
+	if (prefix.size() > def.order.size())
+	{
+		return tl::make_unexpected(ErrorContext("a prefix of ", prefix.size(), " values for table '", def.name,
+			"', whose order has ", def.order.size(), " columns"));
+	}
+	auto const& rows   = _storage->tables[table];
+	size_t      stride = def.columns.size();
+	size_t      count  = rows.owners.size();
+	return row_range{
+		OrderBound(rows.cells, count, stride, def.order, prefix, false),
+		OrderBound(rows.cells, count, stride, def.order, prefix, true),
+	};
+}
 ```
 
 - [ ] **Step 4: Build and run all relation tests**
 
 Run: `env -C $WT PWD=$WT scripts/wt-build.sh && $WT/Build/Engine --gtest --gtest_filter='Relation*'`
-Expected: 10 `RelationSchema`, 11 `RelationStore` and 7 `RelationFind` tests PASS, 28 in total.
+Expected: 14 `RelationSchema`, 15 `RelationStore` and 11 `RelationFind` tests PASS, 40 in total.
 
 - [ ] **Step 5: Show that a test can fail**
 
-Temporarily change `++rows.generation;` in the insert path to nothing. Rebuild (touch the file so Ninja recompiles) and run `--gtest_filter='Relation*'`. Expected: `InsertChangesOnlyItsTablesGeneration` and `SpawnPointsSurvivePackageReload` FAIL. Restore the line, `touch` the file, rebuild and confirm all 28 pass again.
+Temporarily change `++rows.generation;` in the insert path to nothing. Rebuild (touch the file so Ninja recompiles) and run `--gtest_filter='Relation*'`. Expected: `InsertChangesOnlyItsTablesGeneration` and `SpawnPointsSurvivePackageReload` FAIL. Restore the line, `touch` the file, rebuild and confirm all 40 pass again.
 
 - [ ] **Step 6: Run the full suite once**
 
