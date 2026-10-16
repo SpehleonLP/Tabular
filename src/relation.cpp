@@ -578,14 +578,57 @@ tl::expected<std::string_view, ErrorContext> relation_store::CommandAt(uint32_t 
 	return std::string_view(rows.commands[row * rows.commandCount + rows.slot[column]]);
 }
 
-tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t, uint32_t, cell) const
+tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, cell value) const
 {
-	return tl::make_unexpected(ErrorContext("relation_store::Find is not implemented yet"));
+	auto defs = _storage->definition.tables();
+	if (table >= defs.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	table_def const& def = defs[table];
+	if (column >= def.columns.size())
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
+	}
+	if (!def.columns[column].key)
+	{
+		return tl::make_unexpected(ErrorContext("column '", def.columns[column].name, "' of '", def.name,
+			"' is not a key, so it cannot be looked up"));
+	}
+
+	std::vector<size_t> out;
+	auto const& index = _storage->tables[table].index[column];
+	auto        found = index.find(value.i);
+	if (found != index.end())
+	{
+		out.assign(found->second.begin(), found->second.end());
+	}
+	return out;
 }
 
-tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t, std::span<cell const>) const
+tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const
 {
-	return tl::make_unexpected(ErrorContext("relation_store::FindOrdered is not implemented yet"));
+	auto defs = _storage->definition.tables();
+	if (table >= defs.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	table_def const& def  = defs[table];
+	auto const&      rows = _storage->tables[table];
+	if (rows.orderSlots.empty())
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no order to look up by"));
+	}
+	if (prefix.size() > rows.orderSlots.size())
+	{
+		return tl::make_unexpected(ErrorContext("a prefix of ", prefix.size(), " values for table '", def.name,
+			"', whose order has ", rows.orderSlots.size(), " columns"));
+	}
+	size_t count = rows.owners.size();
+	return row_range{
+		OrderBound(rows.cells, count, rows.valueCount, rows.orderSlots, prefix, false),
+		OrderBound(rows.cells, count, rows.valueCount, rows.orderSlots, prefix, true),
+	};
 }
 
 }
