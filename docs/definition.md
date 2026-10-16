@@ -256,6 +256,21 @@ changed.
    The YAML definition supplies the column types the CSV cells are read as.
 4. **Machines** built from tables.
 
+**Two kinds of table (owner, 2026-10-15).**
+
+- **Read-only tables** are loaded from files (CSV) and never updated. A reload builds a whole
+  new version of the table, checks all of it, and only then replaces the old one. The old
+  version is never modified, so a reader holding it keeps a consistent view until it lets go.
+  Machines are made from these.
+- **Mutable tables** are engine data that script expressions and s-expressions add to:
+  who owns the main screen's state, programmable gambits, spawn tables. They are never loaded
+  from CSV. No case is known for a table that is both loaded from CSV and mutated, so each
+  kind refuses the other's writes.
+
+**A machine is a SELECT** over read-only tables, checked to always produce exactly one row,
+then compiled to run fast (possibly to machine code; undecided). Immutability is what makes
+that check and that compilation hold.
+
 ## Undecided
 
 These are open, not missing. Each is decided by editing this file.
