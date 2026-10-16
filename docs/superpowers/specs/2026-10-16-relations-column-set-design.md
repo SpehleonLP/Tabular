@@ -50,9 +50,15 @@ column's type to add or drop a reference, which needs a raw-handle API on `count
 how leaks and double frees are made. Here reference counting stays inside `counted_string`'s own
 copy and destruction, and copying a survivor into a new version is an ordinary copy.
 
-- **Writes.** `insert_row` and `load_rows` gain `std::span<std::string_view const> strings`, one
-  per string column per row, row-major like `commands`. The store interns each one with
-  `counted_string::MakeShared`.
+- **Writes.** `insert_row` and `load_rows` gain `std::span<string_in const> strings`, one per
+  string column per row, row-major like `commands`. `string_in` is a small view implicitly
+  constructible from a `std::string_view` or from a `counted_string const&` (owner, 2026-10-16: a
+  caller that already holds a `counted_string` passes it as it is), so
+  `std::vector<string_in>(handles.begin(), handles.end())` adapts an array of either. The store
+  interns each with `counted_string::MakeShared` of its bytes. A `counted_string` already interned
+  in the default table comes back as the same handle, so nothing is copied; one interned in another
+  table, or unique, is interned by content, because under `HAVE_IMGUI` each intern table dedups
+  separately and only the default table's handles may be compared by identity.
 - **Interning makes identity equality.** Interned strings with the same content share one handle,
   so two string cells are equal exactly when their handles are. A string column may therefore be a
   **key**: the equality index keys on the handle, and `Find(table, column, std::string_view)` (an
@@ -123,6 +129,8 @@ Each names the production change that would turn it red.
    of another owner.
 2. A string key column is found by content, including from a probe built separately from the
    loaded text (identity through interning, not through the caller's buffer).
+2b. A row inserted with a `counted_string` stores that same handle when it is interned
+   (`ptr_compare == 0`), and a unique `counted_string` with the same text is found by the same key.
 3. A `vec2` column round-trips through YAML, CSV, `Load` and `Value`.
 4. `BuildSchema` refuses a string in `order_by`, and a `vec2` as a key or in `order_by`.
 5. `vec2` CSV cells `1..`, `..2`, `1..2..3`, `1,2` and `a..b` are refused naming the column.
