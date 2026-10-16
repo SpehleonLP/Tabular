@@ -117,7 +117,7 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 		return tl::make_unexpected(std::move(columns.error()));
 	}
 
-	table_def out{std::string(c.name), std::move(*columns), {}, false};
+	table_def out{std::string(c.name), std::move(*columns), {}, false, c.read_only};
 	if (c.ordering)
 	{
 		auto order = BuildOrder(c, out.columns);
@@ -275,47 +275,104 @@ size_t OrderBound(std::span<cell const> cells, size_t rowCount, size_t stride,
 
 }
 
-struct relation_store::Storage
+// A table's rows: three parallel slices, one per kind of column, so a row
+// moves as one when the table is sorted or compacted. A writable table's live
+// in the store; a read-only table's live in its current TableVersion.
+struct table_rows
 {
-	// Each row is three parallel slices, one per kind of column, so a row
-	// moves as one when the table is sorted or compacted.
-	struct table_rows
+	std::vector<cell>        cells;      // value columns, row-major
+	std::vector<closure>     closures;   // Condition columns, row-major
+	std::vector<std::string> commands;   // Command columns, row-major
+	std::vector<uint64_t>    owners;     // one per row
+	uint64_t                 generation = 0;
+
+	uint32_t              valueCount     = 0;
+	uint32_t              conditionCount = 0;
+	uint32_t              commandCount   = 0;
+	std::vector<uint32_t> slot;          // per column: its position among columns of its kind
+	std::vector<uint32_t> orderSlots;    // the order's columns, as value slots
+
+	// Per column, value -> rows in row order; filled for key columns only.
+	std::vector<std::unordered_map<int64_t, std::vector<uint32_t>>> index;
+
+	// No rows, laid out for def.
+	explicit table_rows(table_def const& def)
 	{
-		std::vector<cell>        cells;      // value columns, row-major
-		std::vector<closure>     closures;   // Condition columns, row-major
-		std::vector<std::string> commands;   // Command columns, row-major
-		std::vector<uint64_t>    owners;     // one per row
-		uint64_t                 generation = 0;
-
-		uint32_t              valueCount     = 0;
-		uint32_t              conditionCount = 0;
-		uint32_t              commandCount   = 0;
-		std::vector<uint32_t> slot;          // per column: its position among columns of its kind
-		std::vector<uint32_t> orderSlots;    // the order's columns, as value slots
-
-		// Per column, value -> rows in row order; filled for key columns only.
-		std::vector<std::unordered_map<int64_t, std::vector<uint32_t>>> index;
-
-		void RebuildIndex(table_def const& def)
+		slot.resize(def.columns.size());
+		index.resize(def.columns.size());
+		for (uint32_t c = 0; c < def.columns.size(); ++c)
 		{
-			size_t rowCount = owners.size();
-			for (uint32_t c = 0; c < def.columns.size(); ++c)
+			switch (def.columns[c].type)
 			{
-				index[c].clear();
-				if (!def.columns[c].key)
-				{
-					continue;
-				}
-				for (size_t r = 0; r < rowCount; ++r)
-				{
-					index[c][cells[r * valueCount + slot[c]].i].push_back(static_cast<uint32_t>(r));
-				}
+			case column_type::Condition: slot[c] = conditionCount++; break;
+			case column_type::Command:   slot[c] = commandCount++;   break;
+			default:                     slot[c] = valueCount++;     break;
 			}
 		}
-	};
+		for (uint32_t k = 0; k < def.order.size(); ++k)
+		{
+			orderSlots.push_back(slot[def.order[k]]);
+		}
+	}
 
+	size_t RowCount() const { return owners.size(); }
+
+	void RebuildIndex(table_def const& def)
+	{
+		size_t rowCount = owners.size();
+		for (uint32_t c = 0; c < def.columns.size(); ++c)
+		{
+			index[c].clear();
+			if (!def.columns[c].key)
+			{
+				continue;
+			}
+			for (size_t r = 0; r < rowCount; ++r)
+			{
+				index[c][cells[r * valueCount + slot[c]].i].push_back(static_cast<uint32_t>(r));
+			}
+		}
+	}
+};
+
+struct TableVersion::Data
+{
+	table_def  def;
+	table_rows rows;
+};
+
+TableVersion::TableVersion(std::unique_ptr<Data>&& data)
+	: _data(std::move(data))
+{
+}
+
+TableVersion::~TableVersion() = default;
+
+void TableVersion::Release() const
+{
+	if (_refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+	{
+		delete this;
+	}
+}
+
+struct relation_store::Storage
+{
 	schema                  definition;
-	std::vector<table_rows> tables;
+	std::vector<table_rows> tables;     // a read-only table's stays empty
+	std::vector<counted_ptr<TableVersion const>> versions;   // null for a writable table
+
+	// TableVersion's constructor and data are private to the store.
+	static counted_ptr<TableVersion const> NewVersion(table_def const& def, table_rows&& rows)
+	{
+		auto data = std::make_unique<TableVersion::Data>(TableVersion::Data{def, std::move(rows)});
+		return UncountedWrap(static_cast<TableVersion const*>(new TableVersion(std::move(data))));
+	}
+
+	table_rows const& RowsOf(uint32_t table) const
+	{
+		return versions[table] ? versions[table]->_data->rows : tables[table];
+	}
 
 	~Storage()
 	{
@@ -331,25 +388,17 @@ relation_store::relation_store(schema&& definition)
 {
 	_storage->definition = std::move(definition);
 	auto defs = _storage->definition.tables();
-	_storage->tables.resize(defs.size());
+	_storage->tables.reserve(defs.size());
+	_storage->versions.resize(defs.size());
 	for (size_t t = 0; t < defs.size(); ++t)
 	{
-		auto&            rows = _storage->tables[t];
-		table_def const& def  = defs[t];
-		rows.slot.resize(def.columns.size());
-		rows.index.resize(def.columns.size());
-		for (uint32_t c = 0; c < def.columns.size(); ++c)
+		_storage->tables.emplace_back(defs[t]);
+	}
+	for (size_t t = 0; t < defs.size(); ++t)
+	{
+		if (defs[t].read_only)
 		{
-			switch (def.columns[c].type)
-			{
-			case column_type::Condition: rows.slot[c] = rows.conditionCount++; break;
-			case column_type::Command:   rows.slot[c] = rows.commandCount++;   break;
-			default:                     rows.slot[c] = rows.valueCount++;     break;
-			}
-		}
-		for (uint32_t k = 0; k < def.order.size(); ++k)
-		{
-			rows.orderSlots.push_back(rows.slot[def.order[k]]);
+			_storage->versions[t] = Storage::NewVersion(defs[t], table_rows(defs[t]));
 		}
 	}
 }
@@ -365,17 +414,17 @@ schema const& relation_store::definition() const
 
 size_t relation_store::RowCount(uint32_t table) const
 {
-	return _storage->tables[table].owners.size();
+	return _storage->RowsOf(table).RowCount();
 }
 
 uint64_t relation_store::OwnerOf(uint32_t table, size_t row) const
 {
-	return _storage->tables[table].owners[row];
+	return _storage->RowsOf(table).owners[row];
 }
 
 uint64_t relation_store::Generation(uint32_t table) const
 {
-	return _storage->tables[table].generation;
+	return _storage->RowsOf(table).generation;
 }
 
 tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& command)
@@ -394,6 +443,10 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	}
 	table_def const& def  = defs[command.table];
 	auto&            rows = _storage->tables[command.table];
+	if (def.read_only)
+	{
+		return refuse(ErrorContext("table '", def.name, "' is read-only; its rows come only from Load"));
+	}
 	if (command.values.size() != rows.valueCount)
 	{
 		return refuse(ErrorContext("insert into '", def.name, "' has ", command.values.size(),
@@ -485,8 +538,20 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 void relation_store::Retract(retract_owner const& command)
 {
 	auto defs = _storage->definition.tables();
-	for (size_t t = 0; t < defs.size(); ++t)
+	for (uint32_t t = 0; t < defs.size(); ++t)
 	{
+		if (_storage->versions[t])
+		{
+			// A table with a condition column cannot be loaded, so it has no
+			// rows to remove. Any other gets the version without the owner's
+			// rows, put in place like any load; removing rows cannot clash.
+			if (_storage->versions[t]->_data->rows.conditionCount == 0)
+			{
+				auto removed = Load(load_rows{t, command.owner, 0, {}, {}});
+				(void)removed;
+			}
+			continue;
+		}
 		auto&  rows = _storage->tables[t];
 		size_t kept = 0;
 		for (size_t r = 0; r < rows.owners.size(); ++r)
@@ -526,20 +591,165 @@ void relation_store::Retract(retract_owner const& command)
 	}
 }
 
-namespace
+tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 {
+	auto defs = _storage->definition.tables();
+	if (command.table >= defs.size())
+	{
+		return tl::make_unexpected(ErrorContext("load into table ", command.table, ", but the schema has ", defs.size(), " tables"));
+	}
+	table_def const& def = defs[command.table];
+	if (!def.read_only)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is not read-only; its rows come from Insert"));
+	}
+	table_rows const& current = _storage->versions[command.table]->_data->rows;
+	if (current.conditionCount != 0)
+	{
+		for (column_def const& column : def.columns)
+		{
+			if (column.type == column_type::Condition)
+			{
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
+					"', and a load carries no conditions"));
+			}
+		}
+	}
+	if (command.values.size() != command.count * current.valueCount)
+	{
+		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
+			command.values.size(), " values, but needs ", command.count * current.valueCount));
+	}
+	if (command.commands.size() != command.count * current.commandCount)
+	{
+		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
+			command.commands.size(), " commands, but needs ", command.count * current.commandCount));
+	}
+	for (size_t r = 0; r < command.count; ++r)
+	{
+		for (uint32_t c = 0; c < def.columns.size(); ++c)
+		{
+			if (IsValueColumn(def.columns[c].type))
+			{
+				auto fits = Check32(def.columns[c], def, command.values[r * current.valueCount + current.slot[c]].i);
+				if (!fits)
+				{
+					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
+				}
+			}
+		}
+	}
 
-// Checks a (table, row, column) address and the column's kind, so each reader
-// can refuse a bad address with the same message.
-tl::expected<column_def const*, ErrorContext> CheckAddress(schema const& definition, size_t rowCount,
-	uint32_t table, size_t row, uint32_t column, column_type const* wanted, char const* wantedName)
+	// Every row the next version holds, as (from the load?, row): survivors
+	// first, so a survivor sorts before a loaded row with the same key, as an
+	// earlier insert would.
+	struct source
+	{
+		bool   loaded;
+		size_t row;
+	};
+	std::vector<source> order;
+	order.reserve(current.RowCount() + command.count);
+	for (size_t r = 0; r < current.RowCount(); ++r)
+	{
+		if (current.owners[r] != command.owner)
+		{
+			order.push_back({false, r});
+		}
+	}
+	if (order.size() == current.RowCount() && command.count == 0)
+	{
+		return {};   // nothing of this owner's here and nothing new: no change
+	}
+	for (size_t r = 0; r < command.count; ++r)
+	{
+		order.push_back({true, r});
+	}
+	auto cellsOf = [&](source s) -> std::span<cell const>
+	{
+		return s.loaded ? command.values.subspan(s.row * current.valueCount, current.valueCount)
+		                : std::span<cell const>(current.cells).subspan(s.row * current.valueCount, current.valueCount);
+	};
+	auto ownerOf = [&](source s) { return s.loaded ? command.owner : current.owners[s.row]; };
+	if (!current.orderSlots.empty())
+	{
+		auto keyCompare = [&](source a, source b) -> int
+		{
+			std::span<cell const> ac = cellsOf(a);
+			std::span<cell const> bc = cellsOf(b);
+			for (uint32_t s : current.orderSlots)
+			{
+				if (ac[s].i != bc[s].i)
+				{
+					return ac[s].i < bc[s].i ? -1 : 1;
+				}
+			}
+			return 0;
+		};
+		std::stable_sort(order.begin(), order.end(), [&](source a, source b) { return keyCompare(a, b) < 0; });
+		if (def.unique)
+		{
+			for (size_t i = 1; i < order.size(); ++i)
+			{
+				if (keyCompare(order[i - 1], order[i]) == 0)
+				{
+					return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
+						ownerOf(order[i - 1]), " already has a row with the key of a row from owner ", ownerOf(order[i])));
+				}
+			}
+		}
+	}
+
+	// The current version may be held, so survivors are copied, never moved.
+	table_rows next(def);
+	next.cells.reserve(order.size() * next.valueCount);
+	next.commands.reserve(order.size() * next.commandCount);
+	next.owners.reserve(order.size());
+	for (source s : order)
+	{
+		std::span<cell const> from = cellsOf(s);
+		next.cells.insert(next.cells.end(), from.begin(), from.end());
+		for (uint32_t k = 0; k < next.commandCount; ++k)
+		{
+			if (s.loaded)
+			{
+				next.commands.emplace_back(command.commands[s.row * next.commandCount + k]);
+			}
+			else
+			{
+				next.commands.push_back(current.commands[s.row * next.commandCount + k]);
+			}
+		}
+		next.owners.push_back(ownerOf(s));
+	}
+	next.RebuildIndex(def);
+	next.generation = current.generation + 1;
+	_storage->versions[command.table] = Storage::NewVersion(def, std::move(next));
+	return {};
+}
+
+tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Version(uint32_t table) const
 {
-	auto defs = definition.tables();
+	auto defs = _storage->definition.tables();
 	if (table >= defs.size())
 	{
 		return tl::make_unexpected(ErrorContext("no table ", table));
 	}
-	table_def const& def = defs[table];
+	if (!_storage->versions[table])
+	{
+		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is not read-only, so it has no version"));
+	}
+	return _storage->versions[table];
+}
+
+namespace
+{
+
+// Checks a (row, column) address and the column's kind, so each reader can
+// refuse a bad address with the same message.
+tl::expected<column_def const*, ErrorContext> CheckAddress(table_def const& def, size_t rowCount,
+	size_t row, uint32_t column, column_type const* wanted, char const* wantedName)
+{
 	if (row >= rowCount)
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no row ", row));
@@ -557,62 +767,29 @@ tl::expected<column_def const*, ErrorContext> CheckAddress(schema const& definit
 	return &c;
 }
 
-}
-
-tl::expected<cell, ErrorContext> relation_store::Value(uint32_t table, size_t row, uint32_t column) const
+tl::expected<cell, ErrorContext> ReadValue(table_def const& def, table_rows const& rows, size_t row, uint32_t column)
 {
-	size_t rowCount = table < _storage->tables.size() ? _storage->tables[table].owners.size() : 0;
-	auto   checked  = CheckAddress(_storage->definition, rowCount, table, row, column, nullptr, "value column");
+	auto checked = CheckAddress(def, rows.RowCount(), row, column, nullptr, "value column");
 	if (!checked)
 	{
 		return tl::make_unexpected(std::move(checked.error()));
 	}
-	auto const& rows = _storage->tables[table];
 	return rows.cells[row * rows.valueCount + rows.slot[column]];
 }
 
-tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const
+tl::expected<std::string_view, ErrorContext> ReadCommand(table_def const& def, table_rows const& rows, size_t row, uint32_t column)
 {
-	column_type const wanted   = column_type::Condition;
-	size_t            rowCount = table < _storage->tables.size() ? _storage->tables[table].owners.size() : 0;
-	auto checked = CheckAddress(_storage->definition, rowCount, table, row, column, &wanted, "condition");
+	column_type const wanted  = column_type::Command;
+	auto              checked = CheckAddress(def, rows.RowCount(), row, column, &wanted, "command");
 	if (!checked)
 	{
 		return tl::make_unexpected(std::move(checked.error()));
 	}
-	auto const&    rows  = _storage->tables[table];
-	closure const& c     = rows.closures[row * rows.conditionCount + rows.slot[column]];
-	ErrorContext   error;
-	bool           holds = c.function(c.data, this_in, &error);
-	// An error may arrive as context alone, from a closure wrapping another's.
-	if (!error.empty())
-	{
-		return tl::make_unexpected(std::move(error));
-	}
-	return holds;
-}
-
-tl::expected<std::string_view, ErrorContext> relation_store::CommandAt(uint32_t table, size_t row, uint32_t column) const
-{
-	column_type const wanted   = column_type::Command;
-	size_t            rowCount = table < _storage->tables.size() ? _storage->tables[table].owners.size() : 0;
-	auto checked = CheckAddress(_storage->definition, rowCount, table, row, column, &wanted, "command");
-	if (!checked)
-	{
-		return tl::make_unexpected(std::move(checked.error()));
-	}
-	auto const& rows = _storage->tables[table];
 	return std::string_view(rows.commands[row * rows.commandCount + rows.slot[column]]);
 }
 
-tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, cell value) const
+tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, table_rows const& rows, uint32_t column, cell value)
 {
-	auto defs = _storage->definition.tables();
-	if (table >= defs.size())
-	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
-	}
-	table_def const& def = defs[table];
 	if (column >= def.columns.size())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
@@ -629,7 +806,7 @@ tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t ta
 	}
 
 	std::vector<size_t> out;
-	auto const& index = _storage->tables[table].index[column];
+	auto const& index = rows.index[column];
 	auto        found = index.find(value.i);
 	if (found != index.end())
 	{
@@ -638,15 +815,8 @@ tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t ta
 	return out;
 }
 
-tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const
+tl::expected<row_range, ErrorContext> FindPrefix(table_def const& def, table_rows const& rows, std::span<cell const> prefix)
 {
-	auto defs = _storage->definition.tables();
-	if (table >= defs.size())
-	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
-	}
-	table_def const& def  = defs[table];
-	auto const&      rows = _storage->tables[table];
 	if (rows.orderSlots.empty())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no order to look up by"));
@@ -664,11 +834,99 @@ tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table
 			return tl::make_unexpected(std::move(fits.error()));
 		}
 	}
-	size_t count = rows.owners.size();
+	size_t count = rows.RowCount();
 	return row_range{
 		OrderBound(rows.cells, count, rows.valueCount, rows.orderSlots, prefix, false),
 		OrderBound(rows.cells, count, rows.valueCount, rows.orderSlots, prefix, true),
 	};
+}
+
+}
+
+table_def const& TableVersion::definition() const { return _data->def; }
+size_t   TableVersion::RowCount() const           { return _data->rows.RowCount(); }
+uint64_t TableVersion::OwnerOf(size_t row) const  { return _data->rows.owners[row]; }
+uint64_t TableVersion::Generation() const         { return _data->rows.generation; }
+
+tl::expected<cell, ErrorContext> TableVersion::Value(size_t row, uint32_t column) const
+{
+	return ReadValue(_data->def, _data->rows, row, column);
+}
+
+tl::expected<std::string_view, ErrorContext> TableVersion::CommandAt(size_t row, uint32_t column) const
+{
+	return ReadCommand(_data->def, _data->rows, row, column);
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> TableVersion::Find(uint32_t column, cell value) const
+{
+	return FindKey(_data->def, _data->rows, column, value);
+}
+
+tl::expected<row_range, ErrorContext> TableVersion::FindOrdered(std::span<cell const> prefix) const
+{
+	return FindPrefix(_data->def, _data->rows, prefix);
+}
+
+tl::expected<cell, ErrorContext> relation_store::Value(uint32_t table, size_t row, uint32_t column) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return ReadValue(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+}
+
+tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	table_def const&  def     = _storage->definition.tables()[table];
+	table_rows const& rows    = _storage->RowsOf(table);
+	column_type const wanted  = column_type::Condition;
+	auto              checked = CheckAddress(def, rows.RowCount(), row, column, &wanted, "condition");
+	if (!checked)
+	{
+		return tl::make_unexpected(std::move(checked.error()));
+	}
+	closure const& c     = rows.closures[row * rows.conditionCount + rows.slot[column]];
+	ErrorContext   error;
+	bool           holds = c.function(c.data, this_in, &error);
+	// An error may arrive as context alone, from a closure wrapping another's.
+	if (!error.empty())
+	{
+		return tl::make_unexpected(std::move(error));
+	}
+	return holds;
+}
+
+tl::expected<std::string_view, ErrorContext> relation_store::CommandAt(uint32_t table, size_t row, uint32_t column) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return ReadCommand(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, cell value) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return FindKey(_storage->definition.tables()[table], _storage->RowsOf(table), column, value);
+}
+
+tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const
+{
+	if (table >= _storage->tables.size())
+	{
+		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	return FindPrefix(_storage->definition.tables()[table], _storage->RowsOf(table), prefix);
 }
 
 }

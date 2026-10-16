@@ -2,9 +2,11 @@
 #define TABULAR_RELATION_H
 
 #include "Errors/errorcontext.h"
+#include "Support/counted_ptr.hpp"
 #include "Support/shared_array.hpp"
 #include <expected/include/tl/expected.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -80,7 +82,11 @@ struct create_table
 {
 	std::string_view              name;
 	std::span<add_column const>   columns;
-	order_by const*               ordering = nullptr;   // none: insertion order
+	order_by const*               ordering  = nullptr;   // none: insertion order
+	// Rows come only from Load, and each load replaces the table with a new
+	// version rather than updating it. A table loaded from files is one of
+	// these; engine data that scripts add rows to is not.
+	bool                          read_only = false;
 };
 
 struct column_def
@@ -95,7 +101,8 @@ struct table_def
 	std::string                  name;
 	immutable_array<column_def>  columns;
 	immutable_array<uint32_t>    order;    // empty: insertion order
-	bool                         unique = false;
+	bool                         unique    = false;
+	bool                         read_only = false;
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -139,6 +146,19 @@ struct retract_owner
 	uint64_t owner = 0;
 };
 
+// Replaces every row the owner has in one read-only table with count new
+// rows: a file reloaded is one load. Values and commands are row-major, one
+// row's value columns (or Command columns) after another. A table with a
+// Condition column cannot be loaded.
+struct load_rows
+{
+	uint32_t                          table  = 0;
+	uint64_t                          owner  = 0;
+	size_t                            count  = 0;
+	std::span<cell const>             values;     // count * value columns
+	std::span<std::string_view const> commands;   // count * Command columns
+};
+
 // Rows [first, last), in row order.
 struct row_range
 {
@@ -146,11 +166,48 @@ struct row_range
 	size_t last  = 0;
 };
 
+// One version of a read-only table. Load and Retract build a whole new
+// version, check it, and only then put it in place of the one before; a
+// version is never modified once built. Its row numbers are valid for as long
+// as it is held.
+class TableVersion
+{
+public:
+	~TableVersion();
+	TableVersion(TableVersion const&)            = delete;
+	TableVersion& operator=(TableVersion const&) = delete;
+
+	table_def const& definition() const;
+	size_t           RowCount() const;
+	uint64_t         OwnerOf(size_t row) const;
+	uint64_t         Generation() const;
+
+	tl::expected<cell, ErrorContext>                Value(size_t row, uint32_t column) const;
+	tl::expected<std::string_view, ErrorContext>    CommandAt(size_t row, uint32_t column) const;
+	tl::expected<std::vector<size_t>, ErrorContext> Find(uint32_t column, cell value) const;
+	tl::expected<row_range, ErrorContext>           FindOrdered(std::span<cell const> prefix) const;
+
+	void AddRef() const { _refs.fetch_add(1, std::memory_order_relaxed); }
+	void Release() const;
+
+private:
+	friend class relation_store;
+	struct Data;
+	explicit TableVersion(std::unique_ptr<Data>&& data);
+
+	std::unique_ptr<Data const> _data;
+	mutable std::atomic<int>    _refs{1};
+};
+
 // Live rows for every table of a schema.
 //
 // Rows keep their table's order, or insertion order without one; a retract
 // keeps the survivors' order. Row indices are valid only until the next
-// Insert or Retract, because both move rows.
+// Insert, Load or Retract, because each moves rows; a reader that must keep
+// its rows across them holds a read-only table's Version.
+//
+// One thread at a time: a Load or Retract replacing a version while another
+// thread takes it from Version is a race.
 class relation_store
 {
 public:
@@ -167,6 +224,13 @@ public:
 	// closures are released, so a caller never has to.
 	tl::expected<void, ErrorContext> Insert(insert_row const& command);
 	void                             Retract(retract_owner const& command);
+	// Builds the table's next version, checks it, and only then puts it in
+	// place; on refusal the current version is untouched. Read-only tables only.
+	tl::expected<void, ErrorContext> Load(load_rows const& command);
+
+	// The current version of a read-only table, for a reader that holds it
+	// across loads; refused for a writable table.
+	tl::expected<counted_ptr<TableVersion const>, ErrorContext> Version(uint32_t table) const;
 
 	size_t   RowCount(uint32_t table) const;
 	uint64_t OwnerOf(uint32_t table, size_t row) const;
