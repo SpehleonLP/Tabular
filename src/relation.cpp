@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <iterator>
 #include <unordered_map>
 #include <utility>
@@ -69,7 +70,17 @@ tl::expected<immutable_array<input_def>, ErrorContext> BuildInputs(create_table 
 			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name,
 				"' is a ", TypeName(in.type), "; an input is a double or a flag set"));
 		}
-		inputs[i] = input_def{std::string(in.name), in.type};
+		if (in.ranged && in.type != column_type::Double)
+		{
+			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name, "' is a ",
+				TypeName(in.type), "; only a double has a range"));
+		}
+		if (in.ranged && !(std::isfinite(in.lo) && std::isfinite(in.hi) && in.lo < in.hi))
+		{
+			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name, "' has range ",
+				detail::FloatText(in.lo), "..", detail::FloatText(in.hi), "; a range is lo < hi, both finite"));
+		}
+		inputs[i] = input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi};
 	}
 	return immutable_array<input_def>(std::move(inputs));
 }
@@ -218,6 +229,18 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 	if (!out.read_only)
 	{
 		return tl::make_unexpected(ErrorContext("table '", c.name, "' is picked, and a picked table is read-only"));
+	}
+	// Totality covers a best table's band inputs, so each needs a finite domain.
+	if (c.pick == pick_policy::Best)
+	{
+		for (column_def const& col : out.columns)
+		{
+			if (col.type == column_type::Band && !out.inputs[col.input].ranged)
+			{
+				return tl::make_unexpected(ErrorContext("band '", col.name, "' of best table '", c.name,
+					"' reads input '", out.inputs[col.input].name, "', which declares no range"));
+			}
+		}
 	}
 	// A pick's keys are the order's leading columns, found by binary search.
 	uint32_t k = 0;
@@ -438,6 +461,7 @@ namespace tabular
 namespace
 {
 
+using detail::FloatText;
 using detail::held_condition;
 using detail::Hold;
 using detail::ReleaseClosure;
@@ -907,6 +931,23 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 						command.refusal->row = r;
 					}
 					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
+				}
+			}
+			if (def.columns[c].type == column_type::Band && def.inputs[def.columns[c].input].ranged)
+			{
+				input_def const& in   = def.inputs[def.columns[c].input];
+				cell const       band = command.values[r * current.valueCount + current.slot[c]];
+				// Clamped inputs never reach past the range, so a band that does
+				// is partly dead, and one running backwards holds nowhere.
+				if (!(in.lo <= band.v[0] && band.v[0] < band.v[1] && band.v[1] <= in.hi))
+				{
+					if (command.refusal)
+					{
+						command.refusal->row = r;
+					}
+					return tl::make_unexpected(ErrorContext("band '", def.columns[c].name, "' of '", def.name, "' is ",
+						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it runs low to high inside input '",
+						in.name, "''s range ", FloatText(in.lo), "..", FloatText(in.hi)).with("row ", r));
 				}
 			}
 		}

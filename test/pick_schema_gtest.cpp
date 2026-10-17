@@ -2,6 +2,7 @@
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
 
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,7 +17,7 @@ static bool Mentions(std::string const& message, std::string_view text)
 namespace
 {
 
-add_input const kInputs[] = {{"mode", column_type::Flags}, {"t", column_type::Double}};
+add_input const kInputs[] = {{"mode", column_type::Flags}, {"t", column_type::Double, true, 0.0f, 1.0f}};
 
 // label (key), req (ranks by mode), window (band over t), clip.
 std::vector<add_column> Columns()
@@ -153,4 +154,21 @@ TEST(PickSchema, ABandCellIsWrittenAsARange)
 	auto bad = LoadCsv(store, csv_rows{0, 1, "label,req,window,clip\n1,0,0.25,7\n", "l.csv"});
 	ASSERT_FALSE(bad.has_value());
 	EXPECT_TRUE(Mentions(bad.error().format(), "is a band, written a..b")) << bad.error().format();
+}
+
+TEST(PickSchema, ABestTablesBandInputDeclaresARange)
+{
+	add_input const unranged[] = {{"mode", column_type::Flags}, {"t", column_type::Double}};
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), unranged)), "declares no range")) << Refusal(Build(Columns(), unranged));
+	EXPECT_EQ(Refusal(Build(Columns(), unranged, pick_policy::None)), "") << "only a best table needs one";
+}
+
+TEST(PickSchema, ARangeIsOnADoubleAndRunsLowToHigh)
+{
+	add_input const onFlags[] = {{"mode", column_type::Flags, true, 0.0f, 1.0f}, {"t", column_type::Double, true, 0.0f, 1.0f}};
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), onFlags)), "only a double has a range"));
+	add_input const backwards[] = {{"mode", column_type::Flags}, {"t", column_type::Double, true, 1.0f, 0.0f}};
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), backwards)), "lo < hi"));
+	add_input const infinite[] = {{"mode", column_type::Flags}, {"t", column_type::Double, true, 0.0f, INFINITY}};
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), infinite)), "lo < hi"));
 }

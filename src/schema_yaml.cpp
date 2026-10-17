@@ -1,4 +1,5 @@
 #include "tabular/schema_yaml.h"
+#include "csv_cells.h"
 #include "Yaml/yaml_markup.h"
 #include "Yaml/yaml_parse.h"
 
@@ -31,6 +32,7 @@ struct input_yaml
 {
 	std::string name;
 	int32_t     type = -1;
+	std::string range;
 };
 
 struct pivot_yaml
@@ -95,6 +97,7 @@ YamlSet const kColumnSet{kColumnFields, nullptr, "column"};
 YamlField const kInputFields[] = {
 	{"name", FieldType::String, offsetof(input_yaml, name), true},
 	{"type", FieldType::Enum,   offsetof(input_yaml, type), true, 0, nullptr, nullptr, &kTypes},
+	{"range", FieldType::String, offsetof(input_yaml, range)},
 };
 YamlSet const kInputSet{kInputFields, nullptr, "input"};
 
@@ -178,9 +181,25 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 	for (size_t t = 0; t < document.tables.size(); ++t)
 	{
 		table_yaml const& in = document.tables[t];
-		for (input_yaml const& i : in.inputs)
+		LF::Yaml::Node const* inputNodes = tableNodes->as_sequence().items[t]->get("inputs");
+		for (uint32_t ii = 0; ii < in.inputs.size(); ++ii)
 		{
-			inputs[t].push_back(add_input{i.name, static_cast<column_type>(i.type)});
+			input_yaml const& i = in.inputs[ii];
+			add_input         a{i.name, static_cast<column_type>(i.type)};
+			// Presence, not emptiness, as with input: `range: ""` is a mistake.
+			if (inputNodes->as_sequence().items[ii]->get("range") != nullptr)
+			{
+				size_t const dots = i.range.find("..");
+				a.ranged = dots != std::string::npos && i.range.find("...") == std::string::npos
+					&& detail::ParseWhole(std::string_view(i.range).substr(0, dots), a.lo)
+					&& detail::ParseWhole(std::string_view(i.range).substr(dots + 2), a.hi);
+				if (!a.ranged)
+				{
+					return tl::make_unexpected(ErrorContext("input '", i.name, "' of table '", in.name, "' has range '",
+						i.range, "'; a range is written lo..hi").with(std::string(label)));
+				}
+			}
+			inputs[t].push_back(a);
 		}
 		auto inputOf = [&](std::string const& name) -> uint32_t
 		{

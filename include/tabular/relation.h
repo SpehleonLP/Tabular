@@ -84,7 +84,10 @@ struct add_column
 struct add_input
 {
 	std::string_view name;
-	column_type      type = column_type::Double;   // Double or Flags
+	column_type      type   = column_type::Double;   // Double or Flags
+	bool             ranged = false;                 // Double only: lo <= x < hi; picks clamp to it
+	float            lo     = 0;
+	float            hi     = 0;
 };
 
 enum class pick_policy : uint8_t { None, Best, All, Or };
@@ -152,7 +155,10 @@ struct column_def
 struct input_def
 {
 	std::string name;
-	column_type type = column_type::Double;
+	column_type type   = column_type::Double;
+	bool        ranged = false;
+	float       lo     = 0;
+	float       hi     = 0;
 };
 
 struct table_def

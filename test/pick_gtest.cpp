@@ -90,7 +90,7 @@ tables:
     read_only: true
     pick: best
     inputs:
-      - {name: t, type: double}
+      - {name: t, type: double, range: 0..1}
     columns:
       - {name: label, type: int, key: true}
       - {name: window, type: band, input: t}
@@ -525,4 +525,32 @@ tables:
 )", "two.yaml");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "starts with its keys")) << s.error().format();
+}
+
+TEST(PickBest, ARangedInputIsClampedAndNanHoldsNothing)
+{
+	relation_store store = StoreFrom(kGuarded);
+	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 0.5f, closure{}, 10}, {1, 0.5f, 1.0f, closure{}, 11}}).has_value());
+	EXPECT_EQ(GuardedClip(store, 1, -3.0, 0), 10) << "below lo reads as lo";
+	EXPECT_EQ(GuardedClip(store, 1, 1.0, 0), 11) << "hi reads as the largest float below it";
+	EXPECT_EQ(GuardedClip(store, 1, 7.0, 0), 11);
+	EXPECT_EQ(GuardedClip(store, 1, std::nan(""), 0), -1) << "NaN is not clamped and holds no band";
+}
+
+TEST(PickBest, ABandOutsideItsInputsRangeIsRefused)
+{
+	relation_store store = StoreFrom(kGuarded);
+	load_refusal refusal;
+	std::vector<cell> values = {cell::Integer(1), cell::Vector(0.0f, 1.0f), cell::Integer(10),
+	                            cell::Integer(1), cell::Vector(0.5f, 1.5f), cell::Integer(11)};
+	std::vector<closure> conditions = {closure{}, closure{}};
+	auto loaded = store.Load(load_rows{0, 1, 2, values, {}, &refusal, conditions});
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "0.5..1.5")) << loaded.error().format();
+	EXPECT_TRUE(Mentions(loaded.error().format(), "range 0..1")) << loaded.error().format();
+	EXPECT_EQ(refusal.row, 1u);
+
+	std::vector<cell> backwards = {cell::Integer(1), cell::Vector(0.5f, 0.25f), cell::Integer(10)};
+	std::vector<closure> one = {closure{}};
+	EXPECT_FALSE(store.Load(load_rows{0, 1, 1, backwards, {}, nullptr, one}).has_value());
 }

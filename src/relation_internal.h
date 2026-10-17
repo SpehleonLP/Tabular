@@ -8,6 +8,7 @@
 #include "tabular/grid.h"
 
 #include <atomic>
+#include <charconv>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -23,6 +24,14 @@ namespace tabular
 // includes this header.
 namespace detail
 {
+
+// cc refuses floats; messages spell them the shortest way that reads back.
+inline std::string FloatText(float v)
+{
+	char buffer[32];
+	auto r = std::to_chars(buffer, buffer + sizeof buffer, v);
+	return std::string(buffer, r.ptr);
+}
 
 inline void ReleaseClosure(closure const& c)
 {

@@ -2,6 +2,7 @@
 
 #include "relation_internal.h"
 
+#include <cmath>
 #include <tuple>
 
 namespace tabular
@@ -70,7 +71,21 @@ tl::expected<bool, ErrorContext> RowHolds(TableVersion const& version, size_t ro
 			continue;
 		}
 		cell const  band = rows.cells[row * rows.valueCount + rows.slot[c]];
-		float const x    = static_cast<float>(query.inputs[def.columns[c].input].d);
+		input_def const& in = def.inputs[def.columns[c].input];
+		float            x  = static_cast<float>(query.inputs[def.columns[c].input].d);
+		// Clamped in float, as bands compare; hi is excluded, so the top value
+		// lands in the top band. NaN fails both tests and stays NaN.
+		if (in.ranged)
+		{
+			if (x < in.lo)
+			{
+				x = in.lo;
+			}
+			else if (x >= in.hi)
+			{
+				x = std::nextafter(in.hi, -INFINITY);
+			}
+		}
 		if (!(x >= band.v[0] && x < band.v[1]))
 		{
 			return false;

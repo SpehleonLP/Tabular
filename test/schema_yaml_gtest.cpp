@@ -258,3 +258,38 @@ tables:
 	EXPECT_TRUE(Mentions(s.error().format(), "band")) << s.error().format();
 	EXPECT_FALSE(Mentions(s.error().format(), "unknown type")) << s.error().format();
 }
+
+TEST(SchemaYaml, AnInputReadsItsRange)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: phase
+    read_only: true
+    pick: or
+    output: bits
+    inputs:
+      - {name: t, type: double, range: -0.5..2}
+    columns:
+      - {name: clip, type: int, key: true}
+      - {name: bits, type: flags}
+      - {name: window, type: band, input: t}
+    order_by: {columns: [clip]}
+)", "phase.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	input_def const& t = s->tables()[0].inputs[0];
+	EXPECT_TRUE(t.ranged);
+	EXPECT_EQ(t.lo, -0.5f);
+	EXPECT_EQ(t.hi, 2.0f);
+
+	auto bad = SchemaFromYaml(R"(
+tables:
+  - name: phase
+    read_only: true
+    inputs:
+      - {name: t, type: double, range: "0-1"}
+    columns:
+      - {name: clip, type: int}
+)", "phase.yaml");
+	ASSERT_FALSE(bad.has_value());
+	EXPECT_TRUE(bad.error().format().find("written lo..hi") != std::string::npos) << bad.error().format();
+}
