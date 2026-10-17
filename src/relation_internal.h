@@ -5,12 +5,14 @@
 // public header: nothing outside src/ includes it.
 
 #include "tabular/relation.h"
+#include "tabular/grid.h"
 
 #include <atomic>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace tabular
@@ -151,11 +153,31 @@ struct TableVersion::Data
 	table_rows rows;
 };
 
+struct GridVersion::Data
+{
+	table_def                                 def;
+	uint64_t                                  owner      = 0;
+	uint64_t                                  generation = 0;
+	uint32_t                                  rows       = 0;
+	uint32_t                                  columns    = 0;
+	std::vector<std::pair<int64_t, uint32_t>> rowKeys;      // (key, position), sorted by key
+	std::vector<std::pair<int64_t, uint32_t>> columnKeys;
+	std::vector<cell>                         values;       // value grid: rows * columns, row-major
+	std::vector<counted_string>               strings;      // String or Command grid
+};
+
 struct relation_store::Storage
 {
 	schema                  definition;
 	std::vector<table_rows> tables;     // a read-only table's stays empty
 	std::vector<counted_ptr<TableVersion const>> versions;   // null for a writable table
+	std::vector<counted_ptr<GridVersion const>> grids;      // null for a table that is not a grid
+
+	static counted_ptr<GridVersion const> NewGrid(GridVersion::Data&& data)
+	{
+		auto owned = std::make_unique<GridVersion::Data>(std::move(data));
+		return UncountedWrap(static_cast<GridVersion const*>(new GridVersion(std::move(owned))));
+	}
 
 	// TableVersion's constructor and data are private to the store.
 	static counted_ptr<TableVersion const> NewVersion(table_def const& def, table_rows&& rows)

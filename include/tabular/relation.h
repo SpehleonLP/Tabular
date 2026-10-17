@@ -108,6 +108,20 @@ struct pivot_by
 	uint32_t cells   = UINT32_MAX;   // the column each non-empty cell fills
 };
 
+struct grid_axis
+{
+	std::string_view name;
+	column_type      type = column_type::Hash;   // Hash or Int
+};
+
+// A dense 2D array: every (row key, column key) pair has one cell of one type.
+struct grid_shape
+{
+	grid_axis   rows;
+	grid_axis   columns;
+	column_type cells = column_type::Int;   // a value type, String or Command
+};
+
 struct create_table
 {
 	std::string_view              name;
@@ -123,6 +137,7 @@ struct create_table
 	pick_policy                   pick   = pick_policy::None;
 	uint32_t                      output = UINT32_MAX;   // Or: the Flags value column OR'd
 	pivot_by const*               pivot  = nullptr;
+	grid_shape const*             grid   = nullptr;   // set: this table is a grid
 };
 
 struct column_def
@@ -153,6 +168,10 @@ struct table_def
 	uint32_t                     key_count = 0;            // columns with key: true
 	uint32_t                     pivot_headers = UINT32_MAX;
 	uint32_t                     pivot_cells   = UINT32_MAX;
+	bool                         is_grid       = false;
+	column_def                   grid_rows;               // name and type of the row axis
+	column_def                   grid_columns;
+	column_type                  grid_cells    = column_type::Int;
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -236,6 +255,29 @@ struct load_rows
 	std::span<uint16_t const>         pivot;      // empty, or count: each row's pivot column
 };
 
+// Which keys of a refused grid load clash, as indices into the load's key spans.
+struct grid_refusal
+{
+	size_t row            = SIZE_MAX;
+	size_t earlier_row    = SIZE_MAX;
+	size_t column         = SIZE_MAX;
+	size_t earlier_column = SIZE_MAX;
+};
+
+// A whole grid from one contributor: a load replaces it. Cells are row-major,
+// row_keys.size() * column_keys.size() of them, in values for a value grid or
+// strings for a String or Command grid; the other span stays empty.
+struct load_grid
+{
+	uint32_t                   table = 0;
+	uint64_t                   owner = 0;
+	std::span<cell const>      row_keys;
+	std::span<cell const>      column_keys;
+	std::span<cell const>      values;
+	std::span<string_in const> strings;
+	grid_refusal*              refusal = nullptr;
+};
+
 // Rows [first, last), in row order.
 struct row_range
 {
@@ -244,6 +286,7 @@ struct row_range
 };
 
 struct version_access;
+class GridVersion;
 
 // One version of a read-only table. Load and Retract build a whole new
 // version, check it, and only then put it in place of the one before; a
@@ -310,6 +353,12 @@ public:
 	// Builds the table's next version, checks it, and only then puts it in
 	// place; on refusal the current version is untouched. Read-only tables only.
 	tl::expected<void, ErrorContext> Load(load_rows const& command);
+
+	// A grid's whole next version, checked and then put in place; on refusal
+	// the current one is untouched. Grid tables only.
+	tl::expected<void, ErrorContext>                           LoadGrid(load_grid const& command);
+	// A grid's current version; refused for a table that is not a grid.
+	tl::expected<counted_ptr<GridVersion const>, ErrorContext> Grid(uint32_t table) const;
 
 	// The current version of a read-only table, for a reader that holds it
 	// across loads; refused for a writable table.

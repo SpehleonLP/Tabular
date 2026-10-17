@@ -292,6 +292,42 @@ tl::expected<void, ErrorContext> BuildPivot(create_table const& c, table_def& ou
 	return {};
 }
 
+// A grid is read-only, has two integer axes and one cell type, and none of a
+// row table's shape.
+tl::expected<table_def, ErrorContext> BuildGrid(create_table const& c)
+{
+	grid_shape const& g = *c.grid;
+	if (!c.columns.empty() || c.ordering || !c.inputs.empty() || c.pick != pick_policy::None
+		|| c.output != UINT32_MAX || c.pivot)
+	{
+		return tl::make_unexpected(ErrorContext("grid '", c.name,
+			"' has rows, columns and cells; it has no columns, order, inputs, pick or pivot"));
+	}
+	for (grid_axis const* axis : {&g.rows, &g.columns})
+	{
+		if (axis->name.empty())
+		{
+			return tl::make_unexpected(ErrorContext("an axis of grid '", c.name, "' needs a name"));
+		}
+		if (axis->type != column_type::Hash && axis->type != column_type::Int)
+		{
+			return tl::make_unexpected(ErrorContext("axis '", axis->name, "' of grid '", c.name, "' is a ",
+				TypeName(axis->type), "; an axis is a hash or an int"));
+		}
+	}
+	if (g.cells == column_type::Condition || g.cells == column_type::Band)
+	{
+		return tl::make_unexpected(ErrorContext("the cells of grid '", c.name, "' are ", TypeName(g.cells),
+			"s; a grid holds values, strings or commands"));
+	}
+	table_def out{std::string(c.name), {}, {}, false, true};
+	out.is_grid      = true;
+	out.grid_rows    = column_def{std::string(g.rows.name), g.rows.type};
+	out.grid_columns = column_def{std::string(g.columns.name), g.columns.type};
+	out.grid_cells   = g.cells;
+	return out;
+}
+
 tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::span<table_def const> earlier)
 {
 	if (c.name.empty())
@@ -304,6 +340,11 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 		{
 			return tl::make_unexpected(ErrorContext("table '", c.name, "' is defined twice"));
 		}
+	}
+
+	if (c.grid)
+	{
+		return BuildGrid(c);
 	}
 
 	auto inputs = BuildInputs(c);
@@ -526,13 +567,18 @@ relation_store::relation_store(schema&& definition)
 	auto defs = _storage->definition.tables();
 	_storage->tables.reserve(defs.size());
 	_storage->versions.resize(defs.size());
+	_storage->grids.resize(defs.size());
 	for (size_t t = 0; t < defs.size(); ++t)
 	{
 		_storage->tables.emplace_back(defs[t]);
 	}
 	for (size_t t = 0; t < defs.size(); ++t)
 	{
-		if (defs[t].read_only)
+		if (defs[t].is_grid)
+		{
+			_storage->grids[t] = Storage::NewGrid(GridVersion::Data{defs[t]});
+		}
+		else if (defs[t].read_only)
 		{
 			_storage->versions[t] = Storage::NewVersion(defs[t], table_rows(defs[t]));
 		}
@@ -579,6 +625,10 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	}
 	table_def const& def  = defs[command.table];
 	auto&            rows = _storage->tables[command.table];
+	if (def.is_grid)
+	{
+		return refuse(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
+	}
 	if (def.read_only)
 	{
 		return refuse(ErrorContext("table '", def.name, "' is read-only; its rows come only from Load"));
@@ -689,6 +739,17 @@ void relation_store::Retract(retract_owner const& command)
 	auto defs = _storage->definition.tables();
 	for (uint32_t t = 0; t < defs.size(); ++t)
 	{
+		if (defs[t].is_grid)
+		{
+			GridVersion::Data const& data = *_storage->grids[t]->_data;
+			if (data.owner == command.owner && data.rows != 0)
+			{
+				GridVersion::Data empty{defs[t]};
+				empty.generation = data.generation + 1;
+				_storage->grids[t] = Storage::NewGrid(std::move(empty));
+			}
+			continue;
+		}
 		if (_storage->versions[t])
 		{
 			// The version without the owner's rows, put in place like any load.
@@ -758,6 +819,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		return tl::make_unexpected(ErrorContext("load into table ", command.table, ", but the schema has ", defs.size(), " tables"));
 	}
 	table_def const& def = defs[command.table];
+	if (def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
+	}
 	if (!def.read_only)
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' is not read-only; its rows come from Insert"));
@@ -1004,6 +1069,10 @@ tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Vers
 	if (table >= defs.size())
 	{
 		return tl::make_unexpected(ErrorContext("no table ", table));
+	}
+	if (defs[table].is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is a grid; read it with Grid"));
 	}
 	if (!_storage->versions[table])
 	{
