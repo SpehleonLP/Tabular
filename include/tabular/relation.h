@@ -221,6 +221,7 @@ struct load_rows
 	load_refusal*                     refusal = nullptr;   // filled on a refusal, if given
 	std::span<closure const>          conditions; // count * Condition columns
 	std::span<string_in const>        strings;    // count * String columns
+	std::span<uint16_t const>         pivot;      // empty, or count: each row's pivot column
 };
 
 // Rows [first, last), in row order.
@@ -229,6 +230,8 @@ struct row_range
 	size_t first = 0;
 	size_t last  = 0;
 };
+
+struct version_access;
 
 // One version of a read-only table. Load and Retract build a whole new
 // version, check it, and only then put it in place of the one before; a
@@ -259,6 +262,7 @@ public:
 
 private:
 	friend class relation_store;
+	friend struct version_access;
 	struct Data;
 	explicit TableVersion(std::unique_ptr<Data>&& data);
 

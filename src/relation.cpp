@@ -1,5 +1,7 @@
 #include "tabular/relation.h"
 
+#include "relation_internal.h"
+
 #include "Support/strings.h"
 
 #include <algorithm>
@@ -347,6 +349,10 @@ namespace tabular
 namespace
 {
 
+using detail::held_condition;
+using detail::Hold;
+using detail::ReleaseClosure;
+
 bool IsValueColumn(column_type type)
 {
 	return type != column_type::Condition && type != column_type::Command && type != column_type::String
@@ -378,54 +384,12 @@ tl::expected<void, ErrorContext> Check32(column_def const& column, table_def con
 	return {};
 }
 
-void ReleaseClosure(closure const& c)
-{
-	if (c.release)
-	{
-		c.release(c.data);
-	}
-}
-
 void ReleaseAll(std::span<closure const> closures)
 {
 	for (closure const& c : closures)
 	{
 		ReleaseClosure(c);
 	}
-}
-
-// A condition shared by every holder of its row. A survivor of a reload sits
-// in the old version and the new one, and release must still run exactly
-// once: when the last of them lets go.
-class HeldCondition
-{
-public:
-	explicit HeldCondition(closure const& c) : _closure(c) {}
-	~HeldCondition() { ReleaseClosure(_closure); }
-	HeldCondition(HeldCondition const&)            = delete;
-	HeldCondition& operator=(HeldCondition const&) = delete;
-
-	closure const& get() const { return _closure; }
-
-	void AddRef() const { _refs.fetch_add(1, std::memory_order_relaxed); }
-	void Release() const
-	{
-		if (_refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
-		{
-			delete this;
-		}
-	}
-
-private:
-	closure                  _closure;
-	mutable std::atomic<int> _refs{1};
-};
-
-using held_condition = counted_ptr<HeldCondition const>;
-
-held_condition Hold(closure const& c)
-{
-	return UncountedWrap(static_cast<HeldCondition const*>(new HeldCondition(c)));
 }
 
 counted_string Intern(string_in s)
@@ -493,87 +457,6 @@ size_t OrderBound(std::span<cell const> cells, size_t rowCount, size_t stride,
 
 }
 
-// A table's rows: three parallel slices, one per kind of column, so a row
-// moves as one when the table is sorted or compacted. A writable table's live
-// in the store; a read-only table's live in its current TableVersion.
-struct table_rows
-{
-	std::vector<cell>        cells;      // value columns, row-major
-	std::vector<held_condition> conditions; // Condition columns, row-major
-	std::vector<std::string> commands;   // Command columns, row-major
-	std::vector<counted_string> strings; // String columns, row-major, interned
-	std::vector<uint64_t>    owners;     // one per row
-	uint64_t                 generation = 0;
-
-	uint32_t              valueCount     = 0;
-	uint32_t              conditionCount = 0;
-	uint32_t              commandCount   = 0;
-	uint32_t              stringCount    = 0;
-	std::vector<uint32_t> slot;          // per column: its position among columns of its kind
-	std::vector<uint32_t> orderSlots;    // the order's columns, as value slots
-
-	// Per column, value -> rows in row order; filled for key columns only.
-	std::vector<std::unordered_map<int64_t, std::vector<uint32_t>>> index;
-	// The same for String key columns, keyed by text. The views point into the
-	// handles in strings, whose bytes do not move.
-	std::vector<std::unordered_map<std::string_view, std::vector<uint32_t>>> stringIndex;
-
-	// No rows, laid out for def.
-	explicit table_rows(table_def const& def)
-	{
-		slot.resize(def.columns.size());
-		index.resize(def.columns.size());
-		stringIndex.resize(def.columns.size());
-		for (uint32_t c = 0; c < def.columns.size(); ++c)
-		{
-			switch (def.columns[c].type)
-			{
-			case column_type::Condition: slot[c] = conditionCount++; break;
-			case column_type::Command:   slot[c] = commandCount++;   break;
-			case column_type::String:    slot[c] = stringCount++;    break;
-			default:                     slot[c] = valueCount++;     break;
-			}
-		}
-		for (uint32_t k = 0; k < def.order.size(); ++k)
-		{
-			orderSlots.push_back(slot[def.order[k]]);
-		}
-	}
-
-	size_t RowCount() const { return owners.size(); }
-
-	void RebuildIndex(table_def const& def)
-	{
-		size_t rowCount = owners.size();
-		for (uint32_t c = 0; c < def.columns.size(); ++c)
-		{
-			index[c].clear();
-			stringIndex[c].clear();
-			if (!def.columns[c].key)
-			{
-				continue;
-			}
-			for (size_t r = 0; r < rowCount; ++r)
-			{
-				if (def.columns[c].type == column_type::String)
-				{
-					stringIndex[c][std::string_view(strings[r * stringCount + slot[c]])].push_back(static_cast<uint32_t>(r));
-				}
-				else
-				{
-					index[c][cells[r * valueCount + slot[c]].i].push_back(static_cast<uint32_t>(r));
-				}
-			}
-		}
-	}
-};
-
-struct TableVersion::Data
-{
-	table_def  def;
-	table_rows rows;
-};
-
 TableVersion::TableVersion(std::unique_ptr<Data>&& data)
 	: _data(std::move(data))
 {
@@ -588,25 +471,6 @@ void TableVersion::Release() const
 		delete this;
 	}
 }
-
-struct relation_store::Storage
-{
-	schema                  definition;
-	std::vector<table_rows> tables;     // a read-only table's stays empty
-	std::vector<counted_ptr<TableVersion const>> versions;   // null for a writable table
-
-	// TableVersion's constructor and data are private to the store.
-	static counted_ptr<TableVersion const> NewVersion(table_def const& def, table_rows&& rows)
-	{
-		auto data = std::make_unique<TableVersion::Data>(TableVersion::Data{def, std::move(rows)});
-		return UncountedWrap(static_cast<TableVersion const*>(new TableVersion(std::move(data))));
-	}
-
-	table_rows const& RowsOf(uint32_t table) const
-	{
-		return versions[table] ? versions[table]->_data->rows : tables[table];
-	}
-};
 
 relation_store::relation_store(schema&& definition)
 	: _storage(std::make_unique<Storage>())
@@ -878,6 +742,11 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
 			command.strings.size(), " strings, but the table has ", current.stringCount, " string columns"));
 	}
+	if (!command.pivot.empty() && command.pivot.size() != command.count)
+	{
+		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
+			command.pivot.size(), " pivot columns; give none or one per row"));
+	}
 	for (size_t i = 0; i < command.conditions.size(); ++i)
 	{
 		if (command.conditions[i].function == nullptr)
@@ -984,6 +853,61 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		}
 	}
 
+	// A ranked best table answers "nothing matched" with its R == 0 row, so a
+	// key run that gains rows must have one. Runs this load does not touch are
+	// not re-checked: removing rows is never refused (Retract relies on it).
+	if (def.pick == pick_policy::Best && def.ranking != UINT32_MAX)
+	{
+		uint32_t const rankSlot = current.slot[def.ranking];
+		auto sameKey = [&](source a, source b)
+		{
+			for (uint32_t k = 0; k < def.key_count; ++k)
+			{
+				uint32_t const s = current.orderSlots[k];
+				if (cellsOf(a)[s].i != cellsOf(b)[s].i)
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		size_t start = 0;
+		while (start < order.size())
+		{
+			size_t end = start + 1;
+			while (end < order.size() && sameKey(order[start], order[end]))
+			{
+				++end;
+			}
+			bool   hasDefault  = false;
+			size_t firstLoaded = SIZE_MAX;
+			for (size_t i = start; i < end; ++i)
+			{
+				hasDefault = hasDefault || cellsOf(order[i])[rankSlot].i == 0;
+				if (order[i].loaded && firstLoaded == SIZE_MAX)
+				{
+					firstLoaded = order[i].row;
+				}
+			}
+			if (!hasDefault && firstLoaded != SIZE_MAX)
+			{
+				if (command.refusal)
+				{
+					command.refusal->row = firstLoaded;
+				}
+				std::string key;
+				for (uint32_t k = 0; k < def.key_count; ++k)
+				{
+					key = cc(key, key.empty() ? "" : ", ", cellsOf(order[start])[current.orderSlots[k]].i);
+				}
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' ranks by '",
+					def.columns[def.ranking].name, "', and key (", key,
+					") has no row with no flags, the default for an input that matches nothing"));
+			}
+			start = end;
+		}
+	}
+
 	// The current version may be held, so survivors are copied, never moved.
 	table_rows next(def);
 	next.cells.reserve(order.size() * next.valueCount);
@@ -991,6 +915,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	next.conditions.reserve(order.size() * next.conditionCount);
 	next.strings.reserve(order.size() * next.stringCount);
 	next.owners.reserve(order.size());
+	next.pivots.reserve(order.size());
 	for (source s : order)
 	{
 		std::span<cell const> from = cellsOf(s);
@@ -1017,6 +942,8 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			                                : current.strings[s.row * next.stringCount + k]);
 		}
 		next.owners.push_back(ownerOf(s));
+		next.pivots.push_back(s.loaded ? (command.pivot.empty() ? uint16_t(0) : command.pivot[s.row])
+		                               : current.pivots[s.row]);
 	}
 	next.RebuildIndex(def);
 	next.generation = current.generation + 1;
