@@ -184,3 +184,33 @@ tables:
 	ASSERT_FALSE(output.has_value());
 	EXPECT_TRUE(Mentions(output.error().format(), "output 'bits'")) << output.error().format();
 }
+
+TEST(SchemaYaml, AGridHasAxesAndCellsAndNoColumns)
+{
+	auto ok = SchemaFromYaml(R"(
+tables:
+  - name: g
+    grid: {rows: {name: creature, type: hash}, columns: {name: kind, type: hash}, cells: command}
+)", "g.yaml");
+	ASSERT_TRUE(ok.has_value()) << ok.error().format();
+	table_def const& def = ok->tables()[0];
+	EXPECT_TRUE(def.is_grid);
+	EXPECT_EQ(def.grid_rows.name, "creature");
+	EXPECT_EQ(def.grid_cells, column_type::Command);
+
+	auto both = SchemaFromYaml(R"(
+tables:
+  - name: g
+    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: int}
+    columns:
+      - {name: x, type: int}
+)", "g.yaml");
+	EXPECT_FALSE(both.has_value());
+
+	auto neither = SchemaFromYaml(R"(
+tables:
+  - name: t
+)", "t.yaml");
+	ASSERT_FALSE(neither.has_value());
+	EXPECT_TRUE(Mentions(neither.error().format(), "no columns")) << neither.error().format();
+}

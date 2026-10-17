@@ -1,6 +1,6 @@
 # Picking and grids
 
-**Status:** approved by the owner 2026-10-16. The plan (`docs/superpowers/plans/2026-10-16-picking-and-grids.md`, "Spec amendments made while planning") amends six points: command structs name inputs, outputs and pivots by column number; the grid shape is one `grid_shape` struct; pivot cells may be strings; bands compare in float; the default-row check covers only key runs a load adds to; at most one script condition applies to every table. Where they differ, the plan wins.
+**Status:** landed 2026-10-16 (approved by the owner the same day). See **As built** at the end for where the plan amended this spec.
 
 **Contract:** `Spehleon/Tabular/docs/definition.md` ("A row", "Flag matching", "Picking", "Pivot").
 This slice is the first where Tabular answers *which row*, not only *what rows exist*.
@@ -269,3 +269,14 @@ Each names the production change that would turn it red.
 - `docs/definition.md`: the flag-ranking order; the Undecided bullet on condition kinds becomes
   the ruling (band, flags ranking, one script condition; all must hold); grids under Pivot.
   `docs/feature-checklist.md`: tick what this builds.
+
+## As built
+
+The plan (`docs/superpowers/landed/plans/2026-10-16-picking-and-grids.md`) amended the spec in six places, and the code follows the plan:
+
+1. Command structs name inputs, outputs and pivots by number, like `order_by` names its columns; YAML resolves names to numbers. So `add_column::input` and `create_table::output` are `uint32_t` (`UINT32_MAX` = none), and the pivot is `pivot_by const*` (`{headers, cells}` column numbers).
+2. The grid shape is one struct, `grid_shape const* grid` on `create_table` (`{rows, columns, cells}`).
+3. A pivot's cells column may be a string column, besides a value or band column.
+4. Bands compare in float, as `eval_phase_bits` does: the `double` input is narrowed to `float` and tested `x >= start && x < end`.
+5. The default-row load check covers key runs that contain a row of the load. A run made only of survivors is not re-checked, so removing rows is never refused, and such a run's `PickBest` returns an empty optional when nothing ranked holds.
+6. "At most one script condition" applies to every table, not only pickable ones.

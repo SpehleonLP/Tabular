@@ -2,6 +2,8 @@
 #include "tabular/grid.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
+#include "tabular/rows_csv.h"
+#include "tabular/schema_yaml.h"
 
 #include <string>
 #include <string_view>
@@ -179,4 +181,85 @@ TEST(Grid, AGridIsDeclaredWithAxesAndOneCellType)
 	ASSERT_TRUE(ok.has_value()) << ok.error().message;
 	EXPECT_TRUE(ok->tables()[0].is_grid);
 	EXPECT_TRUE(ok->tables()[0].read_only);
+}
+
+namespace
+{
+
+constexpr std::string_view kClipByKind = R"(
+tables:
+  - name: clip_by_kind
+    grid: {rows: {name: creature, type: hash}, columns: {name: kind, type: int}, cells: string}
+)";
+
+relation_store YamlGridStore(std::string_view yaml)
+{
+	auto s = SchemaFromYaml(yaml, "grid.yaml");
+	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
+	return relation_store(std::move(*s));
+}
+
+std::string GridError(relation_store& store, std::string_view text)
+{
+	auto r = LoadGridCsv(store, csv_grid{0, 1, text, "grid.csv"});
+	return r ? std::string() : r.error().format();
+}
+
+}
+
+TEST(GridCsv, LoadsADenseStringGridFromYamlAndCsv)
+{
+	relation_store store = YamlGridStore(kClipByKind);
+	ASSERT_TRUE(store.definition().tables()[0].is_grid);
+	ASSERT_EQ(GridError(store, "creature,1,2\ngrendel, anim/g_walk.glb ,anim/g_run.glb\nnorn,anim/n_walk.glb,anim/n_run.glb\n"), "");
+	auto grid = *store.Grid(0);
+	EXPECT_EQ(grid->Rows(), 2u);
+	// Row indices are line order; row keys are CityHash32 of the names, so read by index.
+	uint32_t const run = *grid->ColumnOf(cell::Integer(2));
+	EXPECT_EQ(std::string_view(grid->StringAt(0, run)), "anim/g_run.glb");
+	EXPECT_EQ(std::string_view(grid->StringAt(1, run)), "anim/n_run.glb");
+	EXPECT_EQ(std::string_view(grid->StringAt(0, 0)), "anim/g_walk.glb") << "cells are trimmed";
+}
+
+TEST(GridCsv, BlankCellsAreErrorsNamingLineAndHeader)
+{
+	relation_store store = YamlGridStore(kClipByKind);
+	std::string error = GridError(store, "creature,1,2\ngrendel,a,b\nnorn,c,\n");
+	EXPECT_TRUE(Mentions(error, "'2'")) << error;
+	EXPECT_TRUE(Mentions(error, "grid.csv:3")) << error;
+}
+
+TEST(GridCsv, RaggedLinesDuplicatesAndBadCellsAreRefused)
+{
+	relation_store store = YamlGridStore(kClipByKind);
+	EXPECT_TRUE(Mentions(GridError(store, "creature,1,2\ngrendel,a\n"), "grid.csv:2"));
+	std::string dupRow = GridError(store, "creature,1\ngrendel,a\nnorn,b\ngrendel,c\n");
+	EXPECT_TRUE(Mentions(dupRow, "grid.csv:4")) << dupRow;
+	EXPECT_TRUE(Mentions(dupRow, "line 2")) << dupRow;
+	std::string dupColumn = GridError(store, "creature,1,1\ngrendel,a,b\n");
+	EXPECT_TRUE(Mentions(dupColumn, "'1'")) << dupColumn;
+	EXPECT_TRUE(Mentions(GridError(store, "creature,x\ngrendel,a\n"), "'kind'")) << "an int axis key that is not an int";
+
+	relation_store ints = YamlGridStore(R"(
+tables:
+  - name: g
+    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: double}
+)");
+	EXPECT_TRUE(Mentions(GridError(ints, "r,1\n1,fast\n"), "grid.csv:2"));
+	EXPECT_EQ(GridError(ints, "r,-1,2\n-5,0.5,1e3\n"), "");
+	EXPECT_EQ((*ints.Grid(0))->At(cell::Integer(-5), cell::Integer(2))->d, 1000.0);
+}
+
+TEST(GridCsv, AGridIsNotLoadedAsRowsNorRowsAsAGrid)
+{
+	relation_store store = YamlGridStore(kClipByKind);
+	EXPECT_FALSE(LoadCsv(store, csv_rows{0, 1, "creature\nx\n", "g.csv"}).has_value());
+	relation_store rows = YamlGridStore(R"(
+tables:
+  - name: t
+    read_only: true
+    columns:
+      - {name: x, type: int}
+)");
+	EXPECT_TRUE(Mentions(GridError(rows, "x,1\n1,2\n"), "not a grid"));
 }

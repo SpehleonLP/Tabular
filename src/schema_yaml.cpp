@@ -39,6 +39,19 @@ struct pivot_yaml
 	std::string cells;
 };
 
+struct axis_yaml
+{
+	std::string name;
+	int32_t     type = -1;
+};
+
+struct grid_yaml
+{
+	axis_yaml rows;
+	axis_yaml columns;
+	int32_t   cells = -1;
+};
+
 struct order_yaml
 {
 	std::vector<std::string> columns;
@@ -55,6 +68,7 @@ struct table_yaml
 	int32_t                  pick = 0;
 	std::string              output;
 	pivot_yaml               pivot;
+	grid_yaml                grid;
 };
 
 struct document_yaml
@@ -90,6 +104,19 @@ YamlField const kPivotFields[] = {
 };
 YamlSet const kPivotSet{kPivotFields, nullptr, "pivot"};
 
+YamlField const kAxisFields[] = {
+	{"name", FieldType::String, offsetof(axis_yaml, name), true},
+	{"type", FieldType::Enum,   offsetof(axis_yaml, type), true, 0, nullptr, nullptr, &kTypes},
+};
+YamlSet const kAxisSet{kAxisFields, nullptr, "axis"};
+
+YamlField const kGridFields[] = {
+	{"rows",    FieldType::Nested, offsetof(grid_yaml, rows), true, 0, &kAxisSet},
+	{"columns", FieldType::Nested, offsetof(grid_yaml, columns), true, 0, &kAxisSet},
+	{"cells",   FieldType::Enum,   offsetof(grid_yaml, cells), true, 0, nullptr, nullptr, &kTypes},
+};
+YamlSet const kGridSet{kGridFields, nullptr, "grid"};
+
 YamlField const kOrderColumn{"", FieldType::String, 0};
 YamlField const kOrderFields[] = {
 	{"columns", FieldType::Sequence, offsetof(order_yaml, columns), true,
@@ -100,7 +127,7 @@ YamlSet const kOrderSet{kOrderFields, nullptr, "order_by"};
 
 YamlField const kTableFields[] = {
 	{"name",      FieldType::String,   offsetof(table_yaml, name), true},
-	{"columns",   FieldType::Sequence, offsetof(table_yaml, columns), true,
+	{"columns",   FieldType::Sequence, offsetof(table_yaml, columns), false,
 	 0, &kColumnSet, nullptr, nullptr, MakeContainer<std::vector<column_yaml>>()},
 	{"order_by",  FieldType::Nested,   offsetof(table_yaml, order_by), false, 0, &kOrderSet},
 	{"read_only", FieldType::Bool,     offsetof(table_yaml, read_only)},
@@ -109,6 +136,7 @@ YamlField const kTableFields[] = {
 	{"pick",      FieldType::Enum,     offsetof(table_yaml, pick), false, 0, nullptr, nullptr, &kPicks},
 	{"output",    FieldType::String,   offsetof(table_yaml, output)},
 	{"pivot",     FieldType::Nested,   offsetof(table_yaml, pivot), false, 0, &kPivotSet},
+	{"grid",      FieldType::Nested,   offsetof(table_yaml, grid), false, 0, &kGridSet},
 };
 YamlSet const kTableSet{kTableFields, nullptr, "table"};
 
@@ -144,6 +172,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 	std::vector<std::vector<uint32_t>>   orderColumns(document.tables.size());
 	std::vector<order_by>                orders(document.tables.size());
 	std::vector<pivot_by>                pivots(document.tables.size());
+	std::vector<grid_shape>              grids(document.tables.size());
 	std::vector<create_table>            commands;
 	commands.reserve(document.tables.size());
 	for (size_t t = 0; t < document.tables.size(); ++t)
@@ -224,8 +253,16 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 					.with(std::string(label)));
 			}
 		}
+		bool const isGrid = tableNodes->as_sequence().items[t]->get("grid") != nullptr;
+		if (isGrid)
+		{
+			grids[t] = grid_shape{{in.grid.rows.name, static_cast<column_type>(in.grid.rows.type)},
+			                      {in.grid.columns.name, static_cast<column_type>(in.grid.columns.type)},
+			                      static_cast<column_type>(in.grid.cells)};
+		}
 		commands.push_back(create_table{in.name, columns[t], ordered ? &orders[t] : nullptr, in.read_only,
-			inputs[t], static_cast<pick_policy>(in.pick), output, pivoted ? &pivots[t] : nullptr});
+			inputs[t], static_cast<pick_policy>(in.pick), output, pivoted ? &pivots[t] : nullptr,
+			isGrid ? &grids[t] : nullptr});
 	}
 
 	auto built = BuildSchema(commands);

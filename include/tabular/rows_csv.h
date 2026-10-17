@@ -45,6 +45,22 @@ struct csv_rows
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command);
 
+// A grid in CSV: the header row's cells after the first are the column keys,
+// each line's first cell its row key, and every other cell one grid cell.
+// Keys read as key cells (a hash is CityHash32 of the text, an int decimal).
+// Every cell is filled: a blank one is refused, naming its line and column
+// header. Trimming, '#' lines, blank lines and the BOM are as in LoadCsv.
+struct csv_grid
+{
+	uint32_t         table      = 0;
+	uint64_t         owner      = 0;
+	std::string_view text;
+	std::string_view label;
+	uint32_t         first_line = 1;
+};
+
+tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid const& command);
+
 }
 
 #endif // TABULAR_ROWS_CSV_H

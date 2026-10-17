@@ -101,8 +101,11 @@ the feature is wrong, not the rule.
 - **Conditions:** whether this row counts. **Every match that is not equality is a
   condition** (flags subset, band, edge, script). **At most one script condition per row;**
   any number of the others. A row may carry several, of different kinds (for
-  example a band, a flag and a script condition). If a row does not count, evaluation falls
-  through to the next one.
+  example a band, a flag and a script condition); **all of a row's conditions must hold**
+  (owner, 2026-10-16). If a row does not count, evaluation falls through to the next one.
+  Built: a band (`a..b`, half-open, compared in float as animation's phase bands are), a flags
+  ranking column (it ranks, and never fails a row) and the one script condition; edges stay
+  to be built.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
   Writes always go to the *next* vector, which is swapped in at the end of the step. **What
@@ -121,14 +124,17 @@ the feature is wrong, not the rule.
 
 **Flag matching (owner, 2026-10-12).** For an input flag set `F` and each row's flag set `R`:
 
-1. a row with `R == F` exactly wins;
-2. failing that, the row with the largest `R & F`, compared as an integer, wins. Higher bits
-   outrank all lower bits together, so **the bit order of a flag set is its priority**;
-3. if `R & F` is 0 for every row, the row with `R == 0` wins. **That row must exist:** it is the
-   clear default. Every table needs a well-defined answer to "what happens if nothing matches".
+The order as built, the same as animation's `LookupBest`:
 
-Ties (two rows with the same largest `R & F`, neither exact) go to the **first in row order, or
-column order if the flags are pivoted**.
+1. a row whose flags are all in the input (`R & F == R`) comes first;
+2. then the larger `R & F`, compared as an integer. Higher bits outrank all lower bits
+   together, so **the bit order of a flag set is its priority**;
+3. then the larger `R`.
+
+Ties go to the lower pivot column (header order), then row order. A row with `R != 0` and
+`R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and
+**must exist** in every key run a load adds rows to: it is the clear default. Every table
+needs a well-defined answer to "what happens if nothing matches".
 
 **Picking (owner, 2026-10-12).**
 
@@ -152,6 +158,9 @@ column order if the flags are pivoted**.
 **Pivot is presentation of any axis.** The clip table pivots a key (kind) into the column
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
 flags across the top are the value column, and the cells are bands, i.e. conditions.
+A key by key pivot is a **grid**, stored densely with every cell filled (a blank is an
+error). A flags-of-key pivot and an output pivot are ordinary rows sorted by key, which the CSV
+front end expands.
 
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
 tables); every step; when a relation's rows change.
@@ -284,6 +293,8 @@ changed.
    cell is an interned `counted_string` (a caller may pass one it holds, or a view), and a string
    key column is found by text; a `vec2` is two floats, written `a..b` in CSV; read-only tables
    hold conditions, each released once when the last version holding its row lets go.
+   **Picking and grids** (built: `tabular/pick.h`, `tabular/grid.h`): inputs, bands and a ranking
+   column; `PickBest`, `PickAll`, `PickOr`; pivoted CSV; grid tables and grid CSV.
 4. **Machines** built from tables.
 
 **Two kinds of table (owner, 2026-10-15).**
@@ -305,8 +316,6 @@ that check and that compilation hold.
 
 These are open, not missing. Each is decided by editing this file.
 
-- The condition column kinds, and how many of each one table may have. Whether a row's
-  conditions all have to hold.
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
 - What a bridge step carries (state or clip, exit, commands on entry, bounded repeat), and

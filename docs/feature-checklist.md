@@ -40,12 +40,13 @@ Sources, cited in brackets:
 
 ## 2. Front ends
 
+- [x] Grid tables: key × key, dense, every cell filled; grid CSV [owner 2026-10-16]
 - [x] YAML table definitions; any diagnostic fails, unknown keys included [def order 2]
 - [x] CSV rows into read-only tables; header names columns; refusals name the line and the clashing line; BOM dropped; no Unicode normalisation [def order 3]
 - [x] CSV filling condition columns: `csv_rows::condition`, a `std::function<tl::expected<closure, ErrorContext>(std::string_view)>`, is called per cell; read-only `Load` accepts condition columns [def order 3, owner 2026-10-16]
 - [ ] CSV quoting, or a rest-of-line last column, so a command cell can hold a comma [def order 3; sr §6.1 `restInLastColumn`]
-- [ ] Pivoted tables: any axis pivots into the headers (clip table pivots a key; phase table pivots the output, cells are bands) [def Pivot; cat §2.6; arc §5.2; cook §2.2]
-- [ ] Flag domain from pivot headers: first column None = 0, each next column the next bit, `A|B` combos OR earlier columns [cook §2.2; arc §5.2]
+- [x] Pivoted tables: any axis pivots into the headers (clip table pivots a key; phase table pivots the output, cells are bands) [def Pivot; cat §2.6; arc §5.2; cook §2.2]
+- [x] Flag domain from pivot headers: first column None = 0, each next column the next bit, `A|B` combos OR earlier columns [cook §2.2; arc §5.2]
 - [ ] `.tabular` bundle: one file holding YAML definitions plus CSV sections; the bundle file itself is the host's [arc §5.1; def What it is not]
 - [ ] Mutable-table writes from s-expressions and script expressions (spawn tables, gambits, screen ownership) [def Two kinds]
 
@@ -53,13 +54,13 @@ Sources, cited in brackets:
 
 Needed before machines: "a machine is a SELECT checked to always produce exactly one row" [def].
 
-- [ ] Flags match: exact wins; else the largest `R & F` as an integer (bit order is priority); else the required `R == 0` default row; ties go to row order, or column order if pivoted [def Flag matching; arc §3.2 `best`; cook §5]
-- [ ] Ranked fall-through: keys select candidates, flags rank them, take the best row whose other conditions hold, down to the default [def Picking]
-- [ ] Native condition kinds on Tabular's own types only: flags subset, band (half-open `start <= x < end`, as animation's phase bands) / one-input comparison against a literal, edge (crossing over the previous..now interval) (?) [def A row, What it is not; arc §3.1; cat §2.6]
-- [ ] At most one script condition per row, any number of native ones (?) [def A row]
+- [x] Flags match: all-in-input first, then the largest `R & F` as an integer (bit order is priority), then the larger `R`; else the required `R == 0` default row; ties go to column order if pivoted, then row order [def Flag matching; arc §3.2 `best`; cook §5]
+- [x] Ranked fall-through: keys select candidates, flags rank them, take the best row whose other conditions hold, down to the default [def Picking]
+- [~] Native condition kinds on Tabular's own types only (flags ranking and band are built; edge not built): flags subset, band (half-open `start <= x < end`, as animation's phase bands) / one-input comparison against a literal, edge (crossing over the previous..now interval) (?) [def A row, What it is not; arc §3.1; cat §2.6]
+- [x] At most one script condition per row, any number of native ones [def A row]
 - [ ] Weighted tables: keys + one weight + outputs, no conditions; draw across the selected rows [def Picking; c3 §5.9]
-- [ ] Pivoted flag outputs OR together, as animation phase tables do (`PipelineClosure::eval_phase_bits`): headers are flags, cells are bands, blank cells contribute nothing; every row whose key matches and whose band holds ORs in its column's bit; several rows may share a key and accumulate; nothing holding gives 0, so an OR table is total with no default row [def Picking; `src/Animation/authoring-form-spec.md` §Phase tables]
-- [ ] Pick "all": every matching row runs in row order [arc §3.2; cat §2.6]
+- [x] Pivoted flag outputs OR together, as animation phase tables do (`PipelineClosure::eval_phase_bits`): headers are flags, cells are bands, blank cells contribute nothing; every row whose key matches and whose band holds ORs in its column's bit; several rows may share a key and accumulate; nothing holding gives 0, so an OR table is total with no default row [def Picking; `src/Animation/authoring-form-spec.md` §Phase tables]
+- [x] Pick "all": every matching row runs in row order [arc §3.2; cat §2.6]
 - [ ] Query order for unordered results (nearest, then stable id) [c3 §8.9]
 - [ ] Fan-out over a query result [c3 §8.1]
 - [ ] Display relations: one relation with several queries, or several relations (?) [def Undecided; cat D1]
@@ -121,8 +122,8 @@ from are built; a test for one is a test of those. `[x]` when everything it foll
 - [x] A failed rebuild keeps the old version running ← read-only versions replaced only after the new one checks out (§1, RCU) [def promise 5; attach §6]
 - [x] Conditions are `{function, data, release}` closures, released with their row ← the condition function returns the `closure` type `relation.h` already defines (§5) [def Host interface; cat §2.3]
 - [ ] Every query picks a row (totality at run time) ← flags match with its required default row (§3) + ranked fall-through down to the default (§3) + the totality check (§4) [def promise 1; cat §2.6]
-- [ ] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]
-- [ ] No tie is ever ambiguous ← flags match breaks ties by row order, or column order if pivoted (§3) [def Flag matching]
+- [~] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked for key runs a load adds rows to; a run left without one by removing rows picks nothing
+- [x] No tie is ever ambiguous ← flags match breaks ties by row order, or column order if pivoted (§3) [def Flag matching]
 - [ ] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]
 - [ ] Tables run in DAG order within a step, so a phase → lookup → bridge chain settles in one step ← tables that feed each other form a checked DAG (§4) [def A row]
 - [ ] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]
