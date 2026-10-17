@@ -43,6 +43,11 @@ the feature is wrong, not the rule.
    rows never stop matching. Over finite key domains, totality is checked when a definition
    is built. A table whose rows are guarded by opaque conditions must end in an unconditional
    row or an explicit hold.
+   Built for best tables (2026-10-17): in every key run a load adds rows to, the rows with no
+   script condition (and, when the table ranks, no flags) cover every value of the band
+   inputs' declared ranges; a row the rows tried before it always cover is refused as dead.
+   Hash key domains are closed by a machine, which relates its keys to each other, so a key
+   with no run is not checked until machines exist. An all or an or table may answer nothing.
 2. **Decidability.** Rows are finite, there is no recursion, and within one step the tables
    that feed each other form a DAG. Whatever the loader checks about a table, an author can
    also know by reading it.
@@ -105,7 +110,8 @@ the feature is wrong, not the rule.
   (owner, 2026-10-16). If a row does not count, evaluation falls through to the next one.
   Built: a band (`a..b`, half-open, compared in float as animation's phase bands are), a flags
   ranking column (it ranks, and never fails a row) and the one script condition; edges stay
-  to be built.
+  to be built. A row with no script condition carries a closure with no function; a blank
+  condition cell in CSV is one.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
   Writes always go to the *next* vector, which is swapped in at the end of the step. **What
@@ -132,8 +138,9 @@ The order as built, the same as animation's `LookupBest`:
 3. then the larger `R`.
 
 Ties go to the lower pivot column (header order), then row order. A row with `R != 0` and
-`R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and
-**must exist** in every key run a load adds rows to: it is the clear default. Every table
+`R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and in
+every key run a load adds rows to the `R == 0` rows with no script condition must cover every
+input: they are the clear default (see promise 1). Every table
 needs a well-defined answer to "what happens if nothing matches".
 Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
 last, but its lookup grid has one None column, so no table it reads has two.
@@ -181,6 +188,11 @@ tables); every step; when a relation's rows change.
 it is the only vector type (no `vec3` or `vec4`). A band `a..b` is a `vec2`. There is no
 position or `Location` type: a 2D position is a string column naming the Section plus a
 `vec2` column, and a 3D one adds a second `vec2` or a `double`. A handle is a `uint64_t` stored in an `int64_t` column: punning, not a type.
+
+**Input ranges (owner, 2026-10-17).** A double input may declare `range: lo..hi`, half-open;
+a best table's band inputs must. A pick clamps the input into the range (the top end to the
+largest float below `hi`, so the top value is in the top band; NaN is left alone and holds no
+band), and a band reaching outside its input's range is refused.
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
@@ -283,14 +295,16 @@ changed.
    table. The header names the columns in any order, every non-condition column exactly once.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
    an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
-   must parse whole, and an empty cell is refused. A condition cell is handed, as text, to a
+   must parse whole, and an empty cell is refused, except a blank condition cell, which is no
+   condition. A condition cell is handed, as text, to a
    function the caller passes to the loader (`csv_rows::condition`, returning
    `tl::expected<closure, ErrorContext>`), which returns the compiled condition; that is the whole of Tabular's part in compiling
    conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
    version). CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
-   clash the line it clashes with.
+   clash the line it clashes with. Within one load, two texts with one hash, or a text
+   hashing to 0, are refused, naming both lines.
    **Column set** (built: string, `vec2` and condition columns, in `tabular/relation.h`): a string
    cell is an interned `counted_string` (a caller may pass one it holds, or a view), and a string
    key column is found by text; a `vec2` is two floats, written `a..b` in CSV; read-only tables

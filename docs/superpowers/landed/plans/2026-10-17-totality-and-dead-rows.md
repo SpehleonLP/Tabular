@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, tl::expected, gtest compiled into `Build/Engine`, Spehleon/lib (`Errors`, `Support`, `Utility/load_csv.h`, `Yaml`), CityHash32.
 
-**Spec:** `Spehleon/Tabular/docs/superpowers/specs/2026-10-17-totality-and-dead-rows-design.md`. The contract is `Spehleon/Tabular/docs/definition.md`.
+**Spec:** `Spehleon/Tabular/docs/superpowers/landed/specs/2026-10-17-totality-and-dead-rows-design.md`. The contract is `Spehleon/Tabular/docs/definition.md`.
 
 ## Global Constraints
 

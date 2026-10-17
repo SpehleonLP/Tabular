@@ -34,7 +34,7 @@ Sources, cited in brackets:
 - [x] Runs with no world, no threads, no script engine, no files [def What Tabular is]
 - [ ] RAII owner handles that retract their rows when dropped (crash and unload recovery) [def Lifetimes; cat D1 §1.3]
 - [ ] Report that a relation's rows changed, so the owning subsystem can apply its reload policy and dependent queries wake [def First version, Triggers; arc §6.2]
-- [ ] Refuse hash 0 and same-file hash collisions, naming both names [sr §3.1]
+- [x] Refuse hash 0 and same-file hash collisions, naming both names [sr §3.1] (CSV front ends; within one load, any column)
 - [x] `vec2` column: two floats, one cell; the only vector type. Bands are `vec2`; a position is a string column naming the Section plus one or two `vec2` columns; no `Location` type [def Column types, owner 2026-10-16]
 - [x] String column holding an interned `counted_string`, in its own per-table slot array like commands [def Column types, owner 2026-10-16]
 
@@ -69,8 +69,8 @@ Needed before machines: "a machine is a SELECT checked to always produce exactly
 
 Whatever the loader checks, an author can know by reading the table [def promise 2].
 
-- [ ] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1; cat §2.6]
-- [ ] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7]
+- [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1; cat §2.6] (built per key run for best tables; key domains wait for machines, which close them)
+- [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables; partial overlaps are priority)
 - [ ] Within one step, tables that feed each other form a DAG; a cycle is refused, naming the tables [def promise 2; attach §4]
 - [ ] Two tables writing one state column refused [arc §2.6; attach §4; c3 §5.4]
 
@@ -122,9 +122,9 @@ from are built; a test for one is a test of those. `[x]` when everything it foll
 - [x] A failed rebuild keeps the old version running ← read-only versions replaced only after the new one checks out (§1, RCU) [def promise 5; attach §6]
 - [x] Conditions are `{function, data, release}` closures, released with their row ← the condition function returns the `closure` type `relation.h` already defines (§5) [def Host interface; cat §2.3]
 - [ ] Every query picks a row (totality at run time) ← flags match with its required default row (§3) + ranked fall-through down to the default (§3) + the totality check (§4) [def promise 1; cat §2.6]
-- [~] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked for key runs a load adds rows to; a run left without one by removing rows picks nothing
+- [x] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked for key runs a load adds rows to, as totality; a run left without one by removing rows picks nothing
 - [x] No tie is ever ambiguous ← flags match breaks ties by row order, or column order if pivoted (§3) [def Flag matching]
-- [ ] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]
+- [x] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]; a gap is a totality refusal, a full overlap a dead row, a partial overlap priority
 - [ ] Tables run in DAG order within a step, so a phase → lookup → bridge chain settles in one step ← tables that feed each other form a checked DAG (§4) [def A row]
 - [ ] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]
 - [ ] Edges are machine state ← the Instance holds edge history (§6) + edge is a native condition kind (§3) [def Structure; cat §2.6]

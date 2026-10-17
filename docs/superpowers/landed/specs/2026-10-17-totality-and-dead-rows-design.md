@@ -1,6 +1,6 @@
 # Totality and dead rows
 
-**Status:** draft 2026-10-17, for the owner's review.
+**Status:** landed 2026-10-17 (approved by the owner the same day). See **As built** at the end for where the plan amended this spec.
 
 **Contract:** `Spehleon/Tabular/docs/definition.md` ("What it promises" 1 and 2, "Flag matching",
 "Picking"). The picking slice (`landed/specs/2026-10-16-picking-and-grids-design.md`) made a
@@ -216,3 +216,21 @@ check itself:
 - §5: a quiescent row covering a later one refused; a scripted earlier row does not shadow;
   same-`R` rows in pivot order; different `R` never refused; two rows that together cover a
   third refused, naming both.
+
+## As built
+
+The plan (`docs/superpowers/landed/plans/2026-10-17-totality-and-dead-rows.md`) amended the spec in six places, and the code follows the plan:
+
+1. A range is three fields, `bool ranged; float lo; float hi;`, at the end of `add_input` and `input_def`, not `std::optional<std::array<float, 2>>`, so `relation.h` gains no include and positional `add_input{name, type}` initialisers keep compiling.
+2. A dead row's covering row is reported in a new `load_refusal::covered_by`, not in `earlier`: the CSV front ends print `earlier` as "same key as line N" and `covered_by` as "covered by line N".
+3. Messages keep "no row with no flags" for ranked tables (`key (1): t 0.2 has no row with no flags and no script condition`); an unranked table says `... has no row with no script condition`. The spec's "without a script condition" wording was not used.
+4. A band whose start is not below its end is refused with the out-of-range band check, and a row whose band columns on one input do not overlap is a dead row with no covering rows ("its bands hold for no input").
+5. A survivor made dead by a load (a loaded row ahead of it in tie order) refuses the load; `refusal.row` is then the loaded covering row.
+6. Two private helpers are tested directly: `test/coverage_gtest.cpp` includes `src/coverage.h`, and `test/csv_hash_gtest.cpp` includes `src/csv_cells.h` to test hash 0, since no text hashing to 0 is known.
+
+Beyond the plan:
+
+- `Uncovered` takes the boxes flat, `count` boxes of `domain.size()` intervals one after another, rather than a span of spans.
+- A dead-row message with one covering row reads "loaded row 2 covers it"; with several, "loaded rows 0, 1 cover it".
+- `range` in YAML is checked by presence, as `input` is: a written `range: ""` is refused rather than read as no range.
+- The old "has a row with no flags" check is gone; totality replaces it, and also runs on best tables with no ranking column.
