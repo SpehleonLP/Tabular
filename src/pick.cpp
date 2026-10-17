@@ -177,6 +177,55 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 	return firstHolding(inOrder);
 }
 
+tl::expected<std::vector<size_t>, ErrorContext> PickAll(TableVersion const& version, pick_query const& query)
+{
+	auto run = RunOf(version, query, pick_policy::All);
+	if (!run)
+	{
+		return tl::make_unexpected(std::move(run.error()));
+	}
+	std::vector<size_t> out;
+	for (size_t r = run->first; r < run->last; ++r)
+	{
+		auto holds = RowHolds(version, r, query);
+		if (!holds)
+		{
+			return tl::make_unexpected(std::move(holds.error()));
+		}
+		if (*holds)
+		{
+			out.push_back(r);
+		}
+	}
+	return out;
+}
+
+tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_query const& query)
+{
+	auto run = RunOf(version, query, pick_policy::Or);
+	if (!run)
+	{
+		return tl::make_unexpected(std::move(run.error()));
+	}
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	uint32_t const    slot = rows.slot[def.output];
+	uint32_t          bits = 0;
+	for (size_t r = run->first; r < run->last; ++r)
+	{
+		auto holds = RowHolds(version, r, query);
+		if (!holds)
+		{
+			return tl::make_unexpected(std::move(holds.error()));
+		}
+		if (*holds)
+		{
+			bits |= static_cast<uint32_t>(rows.cells[r * rows.valueCount + slot].i);
+		}
+	}
+	return bits;
+}
+
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(relation_store const& store, uint32_t table, pick_query const& query)
 {
 	auto version = store.Version(table);
@@ -185,6 +234,26 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(relation_store const&
 		return tl::make_unexpected(std::move(version.error()));
 	}
 	return PickBest(**version, query);
+}
+
+tl::expected<std::vector<size_t>, ErrorContext> PickAll(relation_store const& store, uint32_t table, pick_query const& query)
+{
+	auto version = store.Version(table);
+	if (!version)
+	{
+		return tl::make_unexpected(std::move(version.error()));
+	}
+	return PickAll(**version, query);
+}
+
+tl::expected<uint32_t, ErrorContext> PickOr(relation_store const& store, uint32_t table, pick_query const& query)
+{
+	auto version = store.Version(table);
+	if (!version)
+	{
+		return tl::make_unexpected(std::move(version.error()));
+	}
+	return PickOr(**version, query);
 }
 
 }

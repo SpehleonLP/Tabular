@@ -33,6 +33,16 @@ struct pick_query
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& version, pick_query const& query);
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(relation_store const& store, uint32_t table, pick_query const& query);
 
+// Every row of the key run that holds, in row order; ranking is not used.
+tl::expected<std::vector<size_t>, ErrorContext> PickAll(TableVersion const& version, pick_query const& query);
+tl::expected<std::vector<size_t>, ErrorContext> PickAll(relation_store const& store, uint32_t table, pick_query const& query);
+
+// The OR of the output column over every row of the key run that holds; 0 when
+// none does, so an or table needs no default. This is animation's
+// PipelineClosure::eval_phase_bits.
+tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_query const& query);
+tl::expected<uint32_t, ErrorContext> PickOr(relation_store const& store, uint32_t table, pick_query const& query);
+
 }
 
 #endif // TABULAR_PICK_H

@@ -298,3 +298,126 @@ tables:
 	auto picked = PickBest(store, 0, pick_query{});
 	ASSERT_FALSE(picked.has_value());
 }
+
+namespace
+{
+
+// animation's phase CSV example (src/Animation/authoring-form-spec.md, Phase
+// tables), long-form: clip 1 = grendel_walk, 2 = grendel_run; footstep = 1, pivot = 2.
+constexpr std::string_view kPhase = R"(
+tables:
+  - name: phase
+    read_only: true
+    pick: or
+    output: bits
+    inputs:
+      - {name: t, type: double}
+    columns:
+      - {name: clip, type: int, key: true}
+      - {name: bits, type: flags}
+      - {name: window, type: band, input: t}
+    order_by: {columns: [clip]}
+)";
+
+relation_store PhaseStore()
+{
+	relation_store store = StoreFrom(kPhase);
+	struct phase_row { int64_t clip; int64_t bits; float lo; float hi; };
+	std::vector<phase_row> const rows = {
+		{1, 1, 0.0f, 0.4f},
+		{2, 1, 0.0f, 0.3f}, {2, 2, 0.4f, 0.5f},
+		{2, 1, 0.6f, 0.9f},
+	};
+	std::vector<cell> values;
+	for (phase_row const& r : rows)
+	{
+		values.push_back(cell::Integer(r.clip));
+		values.push_back(cell::Integer(r.bits));
+		values.push_back(cell::Vector(r.lo, r.hi));
+	}
+	EXPECT_TRUE(store.Load(load_rows{0, 1, rows.size(), values}).has_value());
+	return store;
+}
+
+uint32_t PhaseBits(relation_store const& store, int64_t clip, double t)
+{
+	cell const keys[]   = {cell::Integer(clip)};
+	cell const inputs[] = {cell::Real(t)};
+	auto bits = PickOr(store, 0, pick_query{keys, inputs});
+	EXPECT_TRUE(bits.has_value()) << (bits ? std::string() : bits.error().format());
+	return bits ? *bits : 0xFFFFFFFFu;
+}
+
+}
+
+TEST(PickOr, MatchesAnimationsPhaseBits)
+{
+	relation_store store = PhaseStore();
+	EXPECT_EQ(PhaseBits(store, 2, 0.1), 1u);
+	EXPECT_EQ(PhaseBits(store, 2, 0.45), 2u);
+	EXPECT_EQ(PhaseBits(store, 2, 0.7), 1u) << "rows sharing a key accumulate";
+	EXPECT_EQ(PhaseBits(store, 2, 0.55), 0u) << "nothing holding gives 0";
+	EXPECT_EQ(PhaseBits(store, 1, 0.5), 0u);
+	EXPECT_EQ(PhaseBits(store, 9, 0.1), 0u) << "an unknown key holds nothing";
+}
+
+TEST(PickOr, OverlappingBandsOrTogether)
+{
+	relation_store store = StoreFrom(kPhase);
+	cell const values[] = {
+		cell::Integer(1), cell::Integer(1), cell::Vector(0.0f, 1.0f),
+		cell::Integer(1), cell::Integer(4), cell::Vector(0.25f, 0.75f),
+	};
+	ASSERT_TRUE(store.Load(load_rows{0, 1, 2, values}).has_value());
+	EXPECT_EQ(PhaseBits(store, 1, 0.5), 5u);
+}
+
+TEST(PickOr, EdgesAreHalfOpenAndNanHoldsNothing)
+{
+	relation_store store = PhaseStore();
+	EXPECT_EQ(PhaseBits(store, 2, 0.0), 1u) << "t == start holds";
+	EXPECT_EQ(PhaseBits(store, 2, 0.3), 0u) << "t == end does not";
+	EXPECT_EQ(PhaseBits(store, 2, 0.4), 2u);
+	EXPECT_EQ(PhaseBits(store, 2, std::nan("")), 0u);
+}
+
+TEST(PickAll, ReturnsEveryHoldingRowInRowOrder)
+{
+	int released = 0;
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: all
+    read_only: true
+    pick: all
+    inputs:
+      - {name: t, type: double}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: window, type: band, input: t}
+      - {name: when, type: condition}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)");
+	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(0, &released), 10},
+	                                {1, 0.5f, 1.0f, MakeProbe(0, &released), 11},
+	                                {1, 0.0f, 1.0f, MakeProbe(9, &released), 12},
+	                                {1, 0.0f, 1.0f, MakeProbe(0, &released), 13}}).has_value());
+	cell const keys[]   = {cell::Integer(1)};
+	cell const inputs[] = {cell::Real(0.25)};
+	int64_t    thisIn   = 1;
+	auto rows = PickAll(store, 0, pick_query{keys, inputs, &thisIn});
+	ASSERT_TRUE(rows.has_value()) << rows.error().format();
+	EXPECT_EQ(*rows, (std::vector<size_t>{0, 3}));
+}
+
+TEST(PickPolicy, EachTableIsPickedOneWay)
+{
+	relation_store phase = PhaseStore();
+	cell const keys[]   = {cell::Integer(2)};
+	cell const inputs[] = {cell::Real(0.1)};
+	EXPECT_TRUE(Mentions(PickBest(phase, 0, pick_query{keys, inputs}).error().format(), "not picked with best"));
+	EXPECT_TRUE(Mentions(PickAll(phase, 0, pick_query{keys, inputs}).error().format(), "not picked with all"));
+	relation_store ranked = StoreFrom(kRanked);
+	cell const mode[] = {cell::Integer(0)};
+	EXPECT_TRUE(Mentions(PickOr(ranked, 0, pick_query{keys, mode}).error().format(), "not picked with or"));
+}
