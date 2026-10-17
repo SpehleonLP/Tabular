@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cmath>
 #include <iterator>
 #include <unordered_map>
@@ -17,6 +18,14 @@ namespace tabular
 
 namespace
 {
+
+// cc refuses floats; messages spell them the shortest way that reads back.
+std::string FloatText(float v)
+{
+	char buffer[32];
+	auto r = std::to_chars(buffer, buffer + sizeof buffer, v);
+	return std::string(buffer, r.ptr);
+}
 
 char const* TypeName(column_type type)
 {
@@ -79,7 +88,7 @@ tl::expected<immutable_array<input_def>, ErrorContext> BuildInputs(create_table 
 		if (in.ranged && !(std::isfinite(in.lo) && std::isfinite(in.hi) && in.lo < in.hi))
 		{
 			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name, "' has range ",
-				detail::FloatText(in.lo), "..", detail::FloatText(in.hi), "; a range is lo < hi, both finite"));
+				FloatText(in.lo), "..", FloatText(in.hi), "; a range is lo < hi, both finite"));
 		}
 		inputs[i] = input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi};
 	}
@@ -462,7 +471,6 @@ namespace tabular
 namespace
 {
 
-using detail::FloatText;
 using detail::held_condition;
 using detail::Hold;
 using detail::ReleaseClosure;
@@ -947,8 +955,8 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 						command.refusal->row = r;
 					}
 					return tl::make_unexpected(ErrorContext("band '", def.columns[c].name, "' of '", def.name, "' is ",
-						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it runs low to high inside input '",
-						in.name, "''s range ", FloatText(in.lo), "..", FloatText(in.hi)).with("row ", r));
+						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it runs low to high inside the range ",
+						FloatText(in.lo), "..", FloatText(in.hi), " of input '", in.name, "'").with("row ", r));
 				}
 			}
 		}
@@ -1220,10 +1228,32 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				auto nameOf = [&](source s)
 				{
 					return s.loaded ? cc(std::string("loaded row "), s.row)
-					                : cc(std::string("owner "), current.owners[s.row], "'s row");
+					                : cc(std::string("owner "), current.owners[s.row], "'s row ", s.row,
+					                     " of the current version");
 				};
+				bool emptyBox = false;
+				for (detail::interval const& in : own)
+				{
+					emptyBox = emptyBox || !(in.lo < in.hi);
+				}
+				// The rows that take B's place: those tried before it whose box
+				// meets B's. A row tried earlier on other inputs only does not.
+				std::vector<size_t> covering;
+				for (size_t i = 0; i < before.size() && !emptyBox; ++i)
+				{
+					bool meets = true;
+					for (size_t a = 0; a < own.size(); ++a)
+					{
+						detail::interval const& other = boxes[i * own.size() + a];
+						meets = meets && std::max(own[a].lo, other.lo) < std::min(own[a].hi, other.hi);
+					}
+					if (meets)
+					{
+						covering.push_back(before[i]);
+					}
+				}
 				size_t lastLoaded = SIZE_MAX;
-				for (size_t a : before)
+				for (size_t a : covering)
 				{
 					if (order[a].loaded)
 					{
@@ -1235,33 +1265,26 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					command.refusal->row        = B.loaded ? B.row : lastLoaded;
 					command.refusal->covered_by = B.loaded ? lastLoaded : SIZE_MAX;
 				}
-				bool emptyBox = false;
-				for (detail::interval const& in : own)
-				{
-					emptyBox = emptyBox || !(in.lo < in.hi);
-				}
 				if (emptyBox)
 				{
 					return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
 						nameOf(B), " is never picked; its bands hold for no input"));
 				}
 				bool allLoaded = true;
-				for (size_t a : before)
+				for (size_t a : covering)
 				{
 					allLoaded = allLoaded && order[a].loaded;
 				}
-				// Every row tried before B, not a minimal cover: these are the
-				// rows that take B's place.
-				std::string covering;
-				for (size_t a : before)
+				std::string names;
+				for (size_t a : covering)
 				{
-					covering = cc(covering, covering.empty() ? "" : ", ",
+					names = cc(names, names.empty() ? "" : ", ",
 						allLoaded ? cc(std::string(), order[a].row) : nameOf(order[a]));
 				}
-				bool const one = before.size() == 1;
+				bool const one = covering.size() == 1;
 				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
 					nameOf(B), " is never picked; ", allLoaded ? (one ? "loaded row " : "loaded rows ") : "",
-					covering, one ? " covers it" : " cover it"));
+					names, one ? " covers it" : " cover it"));
 			}
 
 			start = end;

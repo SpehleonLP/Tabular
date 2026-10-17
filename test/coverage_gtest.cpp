@@ -51,3 +51,14 @@ TEST(Coverage, AnEmptyDomainIsCovered)
 	interval const domain[] = {{0.5f, 0.5f}};
 	EXPECT_FALSE(Uncovered(domain, {}, 0).has_value());
 }
+
+TEST(Coverage, DimensionZeroIsMostSignificant)
+{
+	interval const domain[] = {{0.0f, 1.0f}, {0.0f, 1.0f}};
+	// Holes at (0, 0.5) and (0.5, 0): the lowest in dimension 0 first.
+	interval const boxes[] = {{0.0f, 0.5f}, {0.0f, 0.5f},
+	                          {0.5f, 1.0f}, {0.5f, 1.0f}};
+	auto hole = Uncovered(domain, boxes, 2);
+	ASSERT_TRUE(hole.has_value());
+	EXPECT_EQ(*hole, (std::vector<float>{0.0f, 0.5f}));
+}

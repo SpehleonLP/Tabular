@@ -342,5 +342,21 @@ tables:
 	relation_store store(std::move(*s));
 	auto across = LoadGridCsv(store, csv_grid{0, 1, ",n26963,x\nn50336,1,2\n", "g.csv"});
 	ASSERT_FALSE(across.has_value()) << "a row key colliding with a column key";
-	EXPECT_TRUE(across.error().format().find("g.csv:2") != std::string::npos) << across.error().format();
+	std::string const error = across.error().format();
+	EXPECT_TRUE(error.find("g.csv:2") != std::string::npos) << error;
+	EXPECT_TRUE(error.find("'n50336' has the same hash as 'n26963' on line 1") != std::string::npos) << error;
+
+	auto s2 = SchemaFromYaml(R"(
+tables:
+  - name: g
+    grid:
+      rows: {name: r, type: int}
+      columns: {name: c, type: int}
+      cells: hash
+)", "g.yaml");
+	ASSERT_TRUE(s2.has_value()) << s2.error().format();
+	relation_store cells(std::move(*s2));
+	auto inCells = LoadGridCsv(cells, csv_grid{0, 1, ",1,2\n1,n26963,a\n2,b,n50336\n", "g.csv"});
+	ASSERT_FALSE(inCells.has_value()) << "two hash cells colliding";
+	EXPECT_TRUE(inCells.error().format().find("g.csv:3") != std::string::npos) << inCells.error().format();
 }

@@ -533,14 +533,16 @@ tables:
 	EXPECT_TRUE(Mentions(s.error().format(), "starts with its keys")) << s.error().format();
 }
 
-TEST(PickBest, ARangedInputIsClampedAndNanHoldsNothing)
+TEST(PickBest, ARangedInputIsClampedAndNanIsRefused)
 {
 	relation_store store = StoreFrom(kGuarded);
 	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 0.5f, closure{}, 10}, {1, 0.5f, 1.0f, closure{}, 11}}).has_value());
 	EXPECT_EQ(GuardedClip(store, 1, -3.0, 0), 10) << "below lo reads as lo";
 	EXPECT_EQ(GuardedClip(store, 1, 1.0, 0), 11) << "hi reads as the largest float below it";
 	EXPECT_EQ(GuardedClip(store, 1, 7.0, 0), 11);
-	EXPECT_EQ(GuardedClip(store, 1, std::nan(""), 0), -1) << "NaN is not clamped and holds no band";
+	EXPECT_EQ(GuardedClip(store, 1, 1e300, 0), 11) << "past float's range, clamped in double";
+	EXPECT_TRUE(Mentions(RefusalOf(PickGuarded(store, 1, std::nan(""), 0)), "is NaN"))
+		<< "a total table never answers nothing; NaN is refused instead";
 }
 
 TEST(PickBest, ABandOutsideItsInputsRangeIsRefused)
@@ -811,4 +813,107 @@ tables:
 		<< "row 0 covers 0..0.5 and row 1 0.6..1: 0.5 has no row";
 	EXPECT_TRUE(Mentions(RefusalOf(load({{0.0f, 1.0f, 0.0f, 1.0f}, {0.0f, 0.4f, 0.6f, 1.0f}})), "hold for no input"))
 		<< "row 1's bands do not overlap";
+}
+
+// Review: the covering rows named are those whose boxes meet the dead row's,
+// not every row tried before it.
+TEST(PickBest, ADeadRowNamesOnlyTheRowsThatMeetIt)
+{
+	relation_store store = StoreFrom(kGuarded);
+	load_refusal refusal;
+	auto loaded = LoadGuardedWith(store, {{1, 0.5f, 1.0f, closure{}, 10},
+	                                      {1, 0.0f, 0.5f, closure{}, 11},
+	                                      {1, 0.5f, 1.0f, closure{}, 12}}, &refusal);
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "loaded row 2 is never picked; loaded row 0 covers it")) << error;
+	EXPECT_EQ(refusal.row, 2u);
+	EXPECT_EQ(refusal.covered_by, 0u) << "row 1 is 0..0.5 and never takes row 2's place";
+}
+
+TEST(PickBest, ALoadThatKillsAKeptRowIsRefused)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                                     {1, 1, 0.0f, 1.0f, closure{}, 11, 2}}, nullptr, 1)), "(accepted)");
+	load_refusal refusal;
+	auto loaded = LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 21, 1}}, &refusal, 2);
+	ASSERT_FALSE(loaded.has_value()) << "pivot 1 is tried before owner 1's pivot 2 row and covers it";
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "owner 1's row 1 of the current version is never picked; loaded row 0 covers it"))
+		<< error;
+	EXPECT_EQ(refusal.row, 0u) << "the loaded row, since the dead one is not part of the load";
+	EXPECT_EQ(refusal.covered_by, SIZE_MAX);
+	EXPECT_EQ(store.RowCount(0), 2u);
+	EXPECT_EQ(BandClip(store, 1, 1, 0.5), 11);
+}
+
+TEST(PickBest, AnOrderPastTheKeysCanKillAKeptRow)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: prioritised
+    read_only: true
+    pick: best
+    inputs:
+      - {name: t, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: prio, type: int}
+      - {name: window, type: band, input: t}
+      - {name: clip, type: int}
+    order_by: {columns: [label, prio]}
+)");
+	auto load = [&](int64_t prio, uint64_t owner, load_refusal* refusal)
+	{
+		cell const values[] = {cell::Integer(1), cell::Integer(prio), cell::Vector(0.0f, 1.0f), cell::Integer(prio)};
+		return store.Load(load_rows{0, owner, 1, values, {}, refusal});
+	};
+	ASSERT_EQ(RefusalOf(load(5, 1, nullptr)), "(accepted)");
+	load_refusal refusal;
+	auto loaded = load(1, 2, &refusal);
+	ASSERT_FALSE(loaded.has_value()) << "prio 1 sorts first and covers owner 1's row";
+	EXPECT_TRUE(Mentions(loaded.error().format(), "owner 1's row 0 of the current version is never picked"))
+		<< loaded.error().format();
+	EXPECT_EQ(refusal.row, 0u);
+}
+
+TEST(PickBest, TwoBandInputsAreCheckedTogether)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: plane
+    read_only: true
+    pick: best
+    inputs:
+      - {name: x, type: double, range: 0..1}
+      - {name: y, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: bx, type: band, input: x}
+      - {name: by, type: band, input: y}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)");
+	auto load = [&](std::vector<std::array<float, 4>> const& rows)
+	{
+		std::vector<cell> values;
+		for (auto const& r : rows)
+		{
+			values.push_back(cell::Integer(1));
+			values.push_back(cell::Vector(r[0], r[1]));
+			values.push_back(cell::Vector(r[2], r[3]));
+			values.push_back(cell::Integer(0));
+		}
+		return store.Load(load_rows{0, 1, rows.size(), values});
+	};
+	std::string const hole = RefusalOf(load({{0.0f, 0.5f, 0.0f, 1.0f}, {0.5f, 1.0f, 0.0f, 0.5f}}));
+	EXPECT_TRUE(Mentions(hole, "x 0.5, y 0.5 has no row with no script condition")) << hole;
+	EXPECT_EQ(RefusalOf(load({{0.0f, 0.5f, 0.0f, 1.0f}, {0.5f, 1.0f, 0.0f, 0.5f}, {0.5f, 1.0f, 0.5f, 1.0f}})),
+		"(accepted)");
+	cell const keys[]   = {cell::Integer(1)};
+	cell const inputs[] = {cell::Real(0.75), cell::Real(0.75)};
+	auto picked = PickBest(store, 0, pick_query{keys, inputs});
+	ASSERT_TRUE(picked.has_value()) << RefusalOf(picked);
+	EXPECT_EQ(*picked, std::optional<size_t>(2));
 }

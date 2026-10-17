@@ -191,8 +191,10 @@ position or `Location` type: a 2D position is a string column naming the Section
 
 **Input ranges (owner, 2026-10-17).** A double input may declare `range: lo..hi`, half-open;
 a best table's band inputs must. A pick clamps the input into the range (the top end to the
-largest float below `hi`, so the top value is in the top band; NaN is left alone and holds no
-band), and a band reaching outside its input's range is refused.
+largest float below `hi`, so the top value is in the top band), and a band reaching outside its
+input's range is refused. A pick given NaN for a ranged input is refused rather than answering
+nothing, since that would break the totality the load proved (review, 2026-10-17; not an owner
+ruling).
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.

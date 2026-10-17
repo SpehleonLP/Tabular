@@ -111,8 +111,14 @@ tl::expected<void, ErrorContext> hash_names::Note(std::string_view text, int64_t
 	{
 		return tl::make_unexpected(ErrorContext("'", text, "' hashes to 0, which no name may"));
 	}
-	auto [it, added] = _seen.try_emplace(hash, std::string(text), line);
-	if (!added && it->second.first != text)
+	// Looked up first: a key repeats on many lines, and only its first copy is kept.
+	auto it = _seen.find(hash);
+	if (it == _seen.end())
+	{
+		_seen.emplace(hash, std::pair<std::string, uint32_t>(std::string(text), line));
+		return {};
+	}
+	if (it->second.first != text)
 	{
 		return tl::make_unexpected(ErrorContext("'", text, "' has the same hash as '", it->second.first,
 			"' on line ", it->second.second));

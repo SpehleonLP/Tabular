@@ -271,3 +271,24 @@ tables:
 	EXPECT_TRUE(Mentions(error, "'n26963'")) << error;
 	EXPECT_TRUE(Mentions(error, "lookup.csv:3")) << error;
 }
+
+TEST(PivotCsv, HashCellsThatCollideAreRefused)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: clip, type: hash}
+    order_by: {columns: [label]}
+    pivot: {headers: req, cells: clip}
+)");
+	std::string error = Error(LoadPivot(store, "label,None,Injured\n1,n26963,n50336\n"));
+	EXPECT_TRUE(Mentions(error, "'n50336' has the same hash as 'n26963'")) << error;
+	EXPECT_TRUE(Mentions(error, "lookup.csv:2")) << error;
+}

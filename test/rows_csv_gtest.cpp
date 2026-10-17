@@ -365,9 +365,15 @@ TEST(RowsCsv, ABlankConditionCellIsNoConditionAndNeverReachesTheFunction)
 	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
 	EXPECT_EQ(seen, (std::vector<std::string>{"fine"}));
 	int64_t one = 1;
-	EXPECT_FALSE(*store.Holds(0, 0, 1, &one));
-	EXPECT_TRUE(*store.Holds(0, 1, 1, &one));
-	EXPECT_TRUE(*store.Holds(0, 2, 1, &one)) << "cells are trimmed, so spaces are blank";
+	auto holds = [&](size_t row)
+	{
+		auto h = store.Holds(0, row, 1, &one);
+		EXPECT_TRUE(h.has_value()) << (h ? std::string() : h.error().format());
+		return h && *h;
+	};
+	EXPECT_FALSE(holds(0));
+	EXPECT_TRUE(holds(1));
+	EXPECT_TRUE(holds(2)) << "cells are trimmed, so spaces are blank";
 }
 
 TEST(RowsCsv, AHostClosureWithReleaseButNoFunctionNamesItsLine)

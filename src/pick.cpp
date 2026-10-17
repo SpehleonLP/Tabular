@@ -2,6 +2,7 @@
 
 #include "relation_internal.h"
 
+#include <algorithm>
 #include <cmath>
 #include <tuple>
 
@@ -50,6 +51,13 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
 				"' is a flag set, a 32-bit value widened without sign; got ", v));
 		}
+		// A ranged input is clamped into its range, and NaN has no place in
+		// it; answering "nothing holds" would break the totality Load proved.
+		if (def.inputs[i].ranged && std::isnan(query.inputs[i].d))
+		{
+			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
+				"' is NaN; a ranged input is clamped into its range, which has no place for it"));
+		}
 	}
 	if (def.key_count == 0)
 	{
@@ -72,19 +80,19 @@ tl::expected<bool, ErrorContext> RowHolds(TableVersion const& version, size_t ro
 		}
 		cell const  band = rows.cells[row * rows.valueCount + rows.slot[c]];
 		input_def const& in = def.inputs[def.columns[c].input];
-		float            x  = static_cast<float>(query.inputs[def.columns[c].input].d);
-		// Clamped in float, as bands compare; hi is excluded, so the top value
-		// lands in the top band. NaN fails both tests and stays NaN.
+		double const     d  = query.inputs[def.columns[c].input].d;
+		float            x  = 0;
+		// Clamped in double, so a value past float's range never narrows;
+		// hi is excluded, so the top value lands in the top band. NaN was
+		// refused with the query.
 		if (in.ranged)
 		{
-			if (x < in.lo)
-			{
-				x = in.lo;
-			}
-			else if (x >= in.hi)
-			{
-				x = std::nextafter(in.hi, -INFINITY);
-			}
+			double const top = std::nextafter(in.hi, -INFINITY);
+			x = static_cast<float>(std::clamp(d, double(in.lo), top));
+		}
+		else
+		{
+			x = static_cast<float>(d);
 		}
 		if (!(x >= band.v[0] && x < band.v[1]))
 		{

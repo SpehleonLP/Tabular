@@ -234,3 +234,10 @@ Beyond the plan:
 - A dead-row message with one covering row reads "loaded row 2 covers it"; with several, "loaded rows 0, 1 cover it".
 - `range` in YAML is checked by presence, as `input` is: a written `range: ""` is refused rather than read as no range.
 - The old "has a row with no flags" check is gone; totality replaces it, and also runs on best tables with no ranking column.
+
+Review fixes (2026-10-17):
+
+- A dead row's message, `covered_by` and the CSV's "covered by line N" name only the rows tried before it whose boxes meet its own; a row tried earlier but holding elsewhere is not named.
+- A kept row in a refusal is named with its row in the current version ("owner 1's row 1 of the current version").
+- A pick given NaN for a ranged input is refused: clamping has no place for it, and answering nothing would break totality. A ranged input is clamped in double before narrowing to float. (Not an owner ruling; for review.)
+- `FloatText` lives in `relation.cpp`, its only user.
