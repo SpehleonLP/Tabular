@@ -1,5 +1,6 @@
 #include "tabular/relation.h"
 
+#include "coverage.h"
 #include "relation_internal.h"
 
 #include "Support/strings.h"
@@ -1027,12 +1028,63 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		}
 	}
 
-	// A ranked best table answers "nothing matched" with its R == 0 row, so a
-	// key run that gains rows must have one. Runs this load does not touch are
-	// not re-checked: removing rows is never refused (Retract relies on it).
-	if (def.pick == pick_policy::Best && def.ranking != UINT32_MAX)
+	// A best table always picks a row (totality) and every row in it can be
+	// picked (no dead rows). Checked for the key runs this load adds rows to;
+	// runs it does not touch are not re-checked, so removing rows is never
+	// refused (Retract relies on it).
+	if (def.pick == pick_policy::Best)
 	{
-		uint32_t const rankSlot = current.slot[def.ranking];
+		// One axis per ranged input a band reads, in input order.
+		std::vector<uint32_t> axes;
+		for (uint32_t i = 0; i < def.inputs.size(); ++i)
+		{
+			for (column_def const& col : def.columns)
+			{
+				if (col.type == column_type::Band && col.input == i)
+				{
+					axes.push_back(i);
+					break;
+				}
+			}
+		}
+		std::vector<detail::interval> domain;
+		for (uint32_t i : axes)
+		{
+			domain.push_back({def.inputs[i].lo, def.inputs[i].hi});
+		}
+		// A row's box: its input's range, cut down by every band on that input.
+		auto boxOf = [&](source s, std::vector<detail::interval>& out)
+		{
+			std::span<cell const> cells = cellsOf(s);
+			for (size_t a = 0; a < axes.size(); ++a)
+			{
+				detail::interval box = domain[a];
+				for (uint32_t c = 0; c < def.columns.size(); ++c)
+				{
+					if (def.columns[c].type == column_type::Band && def.columns[c].input == axes[a])
+					{
+						box.lo = std::max(box.lo, cells[current.slot[c]].v[0]);
+						box.hi = std::min(box.hi, cells[current.slot[c]].v[1]);
+					}
+				}
+				out.push_back(box);
+			}
+		};
+		// At most one condition column, so a row's condition is its first.
+		auto scripted = [&](source s)
+		{
+			if (current.conditionCount == 0)
+			{
+				return false;
+			}
+			closure const& c = s.loaded ? command.conditions[s.row * current.conditionCount]
+			                            : current.conditions[s.row * current.conditionCount]->get();
+			return c.function != nullptr;
+		};
+		auto flagsOf = [&](source s) -> uint32_t
+		{
+			return def.ranking == UINT32_MAX ? 0u : static_cast<uint32_t>(cellsOf(s)[current.slot[def.ranking]].i);
+		};
 		auto sameKey = [&](source a, source b)
 		{
 			for (uint32_t k = 0; k < def.key_count; ++k)
@@ -1045,6 +1097,19 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			}
 			return true;
 		};
+		auto keyText = [&](source s)
+		{
+			std::string key;
+			for (uint32_t k = 0; k < def.key_count; ++k)
+			{
+				key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
+			}
+			return key;
+		};
+		char const* const noDefault = def.ranking == UINT32_MAX ? "no row with no script condition"
+		                                                        : "no row with no flags and no script condition";
+
+		std::vector<detail::interval> boxes;
 		size_t start = 0;
 		while (start < order.size())
 		{
@@ -1053,31 +1118,49 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			{
 				++end;
 			}
-			bool   hasDefault  = false;
 			size_t firstLoaded = SIZE_MAX;
 			for (size_t i = start; i < end; ++i)
 			{
-				hasDefault = hasDefault || cellsOf(order[i])[rankSlot].i == 0;
 				if (order[i].loaded && firstLoaded == SIZE_MAX)
 				{
 					firstLoaded = order[i].row;
 				}
 			}
-			if (!hasDefault && firstLoaded != SIZE_MAX)
+			if (firstLoaded == SIZE_MAX)
+			{
+				start = end;
+				continue;
+			}
+
+			// Totality: the quiescent rows cover every input. A ranked row
+			// never helps: an input with no flags skips every one.
+			boxes.clear();
+			size_t quiescent = 0;
+			for (size_t i = start; i < end; ++i)
+			{
+				if (!scripted(order[i]) && flagsOf(order[i]) == 0)
+				{
+					boxOf(order[i], boxes);
+					++quiescent;
+				}
+			}
+			auto hole = detail::Uncovered(domain, boxes, quiescent);
+			if (hole)
 			{
 				if (command.refusal)
 				{
 					command.refusal->row = firstLoaded;
 				}
-				std::string key;
-				for (uint32_t k = 0; k < def.key_count; ++k)
+				std::string where;
+				for (size_t a = 0; a < axes.size(); ++a)
 				{
-					key = cc(key, key.empty() ? "" : ", ", cellsOf(order[start])[current.orderSlots[k]].i);
+					where = cc(where, a == 0 ? "" : ", ", def.inputs[axes[a]].name, " ", FloatText((*hole)[a]));
 				}
-				return tl::make_unexpected(ErrorContext("table '", def.name, "' ranks by '",
-					def.columns[def.ranking].name, "', and key (", key,
-					") has no row with no flags, the default for an input that matches nothing"));
+				return tl::make_unexpected(axes.empty()
+					? ErrorContext("table '", def.name, "' key (", keyText(order[start]), ") has ", noDefault)
+					: ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ", where, " has ", noDefault));
 			}
+
 			start = end;
 		}
 	}

@@ -158,10 +158,9 @@ closure Counting(int* calls)
 
 TEST(PickBest, WithoutRankingTakesTheFirstRowThatHolds)
 {
-	int released = 0;
 	relation_store store = StoreFrom(kGuarded);
-	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 0.5f, MakeProbe(0, &released), 10},
-	                                {1, 0.5f, 1.0f, MakeProbe(0, &released), 11}}).has_value());
+	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 0.5f, closure{}, 10},
+	                                {1, 0.5f, 1.0f, closure{}, 11}}).has_value());
 	EXPECT_EQ(GuardedClip(store, 1, 0.25, 0), 10);
 	EXPECT_EQ(GuardedClip(store, 1, 0.75, 0), 11);
 	EXPECT_EQ(GuardedClip(store, 2, 0.25, 0), -1) << "no rows for the key";
@@ -172,18 +171,18 @@ TEST(PickBest, FallsThroughARowWhoseScriptConditionFails)
 	int released = 0;
 	relation_store store = StoreFrom(kGuarded);
 	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(5, &released), 10},
-	                                {1, 0.0f, 1.0f, MakeProbe(0, &released), 11}}).has_value());
+	                                {1, 0.0f, 1.0f, closure{}, 11}}).has_value());
 	EXPECT_EQ(GuardedClip(store, 1, 0.5, 7), 10);
 	EXPECT_EQ(GuardedClip(store, 1, 0.5, 2), 11);
 }
 
 TEST(PickBest, BandsAreTestedBeforeTheScript)
 {
-	int released = 0;
-	int calls    = 0;
+	int calls = 0;
 	relation_store store = StoreFrom(kGuarded);
 	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 0.5f, Counting(&calls), 10},
-	                                {1, 0.5f, 1.0f, MakeProbe(0, &released), 11}}).has_value());
+	                                {1, 0.5f, 1.0f, closure{}, 11},
+	                                {1, 0.0f, 0.5f, closure{}, 12}}).has_value());
 	EXPECT_EQ(GuardedClip(store, 1, 0.75, 0), 11);
 	EXPECT_EQ(calls, 0) << "a script ran for a row whose band does not hold";
 }
@@ -192,7 +191,8 @@ TEST(PickBest, AFailingScriptConditionFailsThePick)
 {
 	int released = 0;
 	relation_store store = StoreFrom(kGuarded);
-	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(0, &released), 10}}).has_value());
+	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(0, &released), 10},
+	                                {1, 0.0f, 1.0f, closure{}, 11}}).has_value());
 	auto picked = PickGuarded(store, 1, 0.5, -1);
 	ASSERT_FALSE(picked.has_value());
 	EXPECT_TRUE(Mentions(picked.error().format(), "negative input")) << picked.error().format();
@@ -553,4 +553,148 @@ TEST(PickBest, ABandOutsideItsInputsRangeIsRefused)
 	std::vector<cell> backwards = {cell::Integer(1), cell::Vector(0.5f, 0.25f), cell::Integer(10)};
 	std::vector<closure> one = {closure{}};
 	EXPECT_FALSE(store.Load(load_rows{0, 1, 1, backwards, {}, nullptr, one}).has_value());
+}
+
+namespace
+{
+
+// label (key), req (ranks by mode), window (band over t in 0..1), when (script), clip.
+constexpr std::string_view kRankedBand = R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+      - {name: t, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: window, type: band, input: t}
+      - {name: when, type: condition}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)";
+
+struct band_row
+{
+	int64_t  label;
+	int64_t  req;
+	float    lo;
+	float    hi;
+	closure  when;
+	int64_t  clip;
+	uint16_t pivot = 0;
+};
+
+tl::expected<void, ErrorContext> LoadBand(relation_store& store, std::vector<band_row> const& rows,
+	load_refusal* refusal = nullptr, uint64_t owner = 1)
+{
+	std::vector<cell>     values;
+	std::vector<closure>  conditions;
+	std::vector<uint16_t> pivot;
+	for (band_row const& r : rows)
+	{
+		values.push_back(cell::Integer(r.label));
+		values.push_back(cell::Integer(r.req));
+		values.push_back(cell::Vector(r.lo, r.hi));
+		values.push_back(cell::Integer(r.clip));
+		conditions.push_back(r.when);
+		pivot.push_back(r.pivot);
+	}
+	return store.Load(load_rows{0, owner, rows.size(), values, {}, refusal, conditions, {}, pivot});
+}
+
+int64_t BandClip(relation_store const& store, int64_t label, int64_t mode, double t)
+{
+	cell const keys[]   = {cell::Integer(label)};
+	cell const inputs[] = {cell::Integer(mode), cell::Real(t)};
+	int64_t    thisIn   = 0;
+	auto picked = PickBest(store, 0, pick_query{keys, inputs, &thisIn});
+	EXPECT_TRUE(picked.has_value()) << RefusalOf(picked);
+	if (!picked || !*picked)
+	{
+		return -1;
+	}
+	auto clip = store.Value(0, **picked, 3);
+	EXPECT_TRUE(clip.has_value()) << RefusalOf(clip);
+	return clip ? clip->i : -1;
+}
+
+closure Never()
+{
+	return closure{[](void*, void const*, ErrorContext*) { return false; }, nullptr, nullptr};
+}
+
+}
+
+TEST(PickBest, TheReactionTableLoads)
+{
+	relation_store store = StoreFrom(kGuarded);
+	ASSERT_EQ(RefusalOf(LoadGuarded(store, {{1, 0.0f, 0.2f, closure{}, 10},
+	                                        {1, 0.2f, 1.0f, Never(), 11},
+	                                        {1, 0.2f, 1.0f, closure{}, 12}})), "(accepted)");
+	EXPECT_EQ(GuardedClip(store, 1, 0.5, 0), 12);
+}
+
+TEST(PickBest, AGapInTheQuiescentRowsIsRefusedNamingAValue)
+{
+	relation_store store = StoreFrom(kGuarded);
+	load_refusal refusal;
+	std::vector<cell> values = {cell::Integer(1), cell::Vector(0.0f, 0.2f), cell::Integer(10),
+	                            cell::Integer(1), cell::Vector(0.2f, 1.0f), cell::Integer(11)};
+	std::vector<closure> conditions = {closure{}, Never()};
+	auto loaded = store.Load(load_rows{0, 1, 2, values, {}, &refusal, conditions});
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "key (1): t 0.2 has no row with no script condition")) << error;
+	EXPECT_EQ(refusal.row, 0u) << "the run's first loaded row";
+	EXPECT_EQ(store.RowCount(0), 0u);
+}
+
+TEST(PickBest, ADefaultWithAScriptConditionIsNotADefault)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	load_refusal refusal;
+	auto loaded = LoadBand(store, {{1, 0, 0.0f, 1.0f, Never(), 10}, {1, 1, 0.0f, 1.0f, closure{}, 11}}, &refusal);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "no row with no flags and no script condition"))
+		<< loaded.error().format();
+}
+
+TEST(PickBest, AnUnrankedTableOfScriptedRowsIsRefused)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: rules
+    read_only: true
+    pick: best
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: when, type: condition}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)", "rules.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	cell const values[] = {cell::Integer(1), cell::Integer(10)};
+	closure const scripted[] = {Never()};
+	auto loaded = store.Load(load_rows{0, 1, 1, values, {}, nullptr, scripted});
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "key (1) has no row with no script condition"))
+		<< loaded.error().format();
+	closure const plain[] = {closure{}};
+	EXPECT_TRUE(store.Load(load_rows{0, 1, 1, values, {}, nullptr, plain}).has_value());
+}
+
+TEST(PickBest, ARunTheLoadDoesNotTouchIsNotRechecked)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 2)), "(accepted)");
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 1)), "(accepted)")
+		<< "owner 1 leaves run 1; the reload adds nothing to it, so it is not refused";
+	EXPECT_EQ(BandClip(store, 1, 0, 0.5), -1) << "run 1 has no default now, and picks nothing";
+	EXPECT_NE(RefusalOf(LoadBand(store, {{1, 2, 0.0f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)")
+		<< "a load adding to run 1 is checked, and run 1 has no default";
 }
