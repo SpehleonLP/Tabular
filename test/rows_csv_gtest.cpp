@@ -256,6 +256,27 @@ TEST(RowsCsv, AnEmptyStringCellIsRefused)
 	EXPECT_TRUE(Mentions(error, "'name'")) << error;
 }
 
+// Padding around a cell is the editor's, not the string's; spaces inside it are the string's.
+// A cell of only whitespace trims to empty and is refused like an empty one.
+TEST(RowsCsv, StringCellsAreTrimmedButKeepInnerSpaces)
+{
+	auto s = SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
+		"      - {name: name, type: string, key: true}\n      - {name: id, type: int}\n", "places.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n  forest  edge \t,1\n", "places.csv"});
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "forest  edge");
+	EXPECT_EQ(*store.Find(0, 0, std::string_view("forest  edge")), std::vector<size_t>{0});
+
+	relation_store blank(SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
+		"      - {name: name, type: string}\n      - {name: id, type: int}\n", "places.yaml").value());
+	auto refused = LoadCsv(blank, csv_rows{0, 1, "name,id\n \t ,1\n", "places.csv"});
+	std::string error = refused ? std::string() : refused.error().format();
+	EXPECT_TRUE(Mentions(error, "'name'")) << error;
+	EXPECT_TRUE(Mentions(error, "places.csv:2")) << error;
+}
+
 namespace
 {
 
