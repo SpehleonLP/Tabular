@@ -99,13 +99,28 @@ TEST(RelationLoadConditions, ARefusedLoadReleasesItsClosures)
 	EXPECT_EQ(store.RowCount(0), 0u);
 }
 
-TEST(RelationLoadConditions, AConditionWithNoFunctionIsRefusedAndNamesItsRow)
+TEST(RelationLoadConditions, ANullFunctionIsNoConditionAndHolds)
+{
+	int released = 0;
+	relation_store store = MakeRules(false);
+	ASSERT_TRUE(LoadRules(store, 1, {{1, MakeProbe(5, &released)}, {2, closure{}}}).has_value());
+	int64_t one = 1;
+	auto first = store.Holds(0, 0, 1, &one);
+	ASSERT_TRUE(first.has_value()) << first.error().format();
+	EXPECT_FALSE(*first);
+	auto second = store.Holds(0, 1, 1, &one);
+	ASSERT_TRUE(second.has_value()) << second.error().format();
+	EXPECT_TRUE(*second) << "a row with no script condition holds";
+}
+
+TEST(RelationLoadConditions, ANullFunctionWithDataIsRefusedAndNamesItsRow)
 {
 	int released = 0;
 	relation_store store = MakeRules(false);
 	load_refusal refusal;
-	auto loaded = LoadRules(store, 1, {{1, MakeProbe(1, &released)}, {2, closure{}}}, &refusal);
+	auto loaded = LoadRules(store, 1, {{1, MakeProbe(1, &released)}, {2, closure{nullptr, &released, nullptr}}}, &refusal);
 	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "no function")) << loaded.error().format();
 	EXPECT_EQ(refusal.row, 1u);
 	EXPECT_EQ(released, 1);
 }

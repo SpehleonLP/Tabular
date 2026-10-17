@@ -483,6 +483,18 @@ TEST(RelationStore, ClosuresAreReleasedOnceOnRetractRefusalAndDestruction)
 	EXPECT_EQ(destroyed, 1);
 }
 
+TEST(RelationStore, InsertTakesANullFunctionAsNoCondition)
+{
+	relation_store store = MakeRules();
+	ASSERT_TRUE(InsertRule(store, 1, 10, closure{}, "(a)").has_value());
+	int64_t one = 1;
+	auto holds = store.Holds(0, 0, 1, &one);
+	ASSERT_TRUE(holds.has_value()) << holds.error().format();
+	EXPECT_TRUE(*holds);
+	EXPECT_FALSE(InsertRule(store, 1, 11, closure{nullptr, nullptr, [](void*) {}}, "(a)").has_value())
+		<< "a release with no function is refused";
+}
+
 TEST(RelationStore, WrongColumnKindIsRefused)
 {
 	int released = 0;

@@ -23,7 +23,8 @@ namespace tabular
 //
 // A condition cell's text is handed to condition, which returns the compiled
 // closure or an error; that is the whole of Tabular's part in compiling
-// conditions. A table with condition columns needs one.
+// conditions. A table with condition columns needs one. A blank condition cell
+// is no condition: it is not handed to condition.
 //
 // A pivoted load reads the table's pivot: the header row names the key
 // columns, in key order, then the flag headers, whose order gives the flag

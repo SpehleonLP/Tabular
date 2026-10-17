@@ -58,6 +58,7 @@ static_assert(sizeof(cell) == 8);
 // A condition the host compiled. function returns whether the row counts for
 // this_in; when it cannot answer it fills error_out. release frees data and is
 // called once, when no table version or writable table holds the row any longer, or when the row is refused.
+// A null function is no condition: the row counts, and data and release are null too.
 struct closure
 {
 	bool (*function)(void* data, void const* this_in, ErrorContext* error_out) = nullptr;

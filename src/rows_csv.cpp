@@ -226,6 +226,13 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 			}
 			if (column.type == column_type::Condition)
 			{
+				// The one blank cell CSV accepts: "no condition", which the
+				// loader must see to prove a table total.
+				if (text.empty())
+				{
+					conditions.list[r * conditionCount + slot[columnOf[h]]] = closure{};
+					continue;
+				}
 				auto built = command.condition(text);
 				if (!built)
 				{

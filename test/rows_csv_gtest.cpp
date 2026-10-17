@@ -350,14 +350,34 @@ TEST(RowsCsv, AConditionTableWithNoFunctionIsRefused)
 	EXPECT_TRUE(Mentions(loaded.error().format(), "condition function")) << loaded.error().format();
 }
 
-TEST(RowsCsv, ANullConditionNamesItsLine)
+TEST(RowsCsv, ABlankConditionCellIsNoConditionAndNeverReachesTheFunction)
+{
+	int released = 0;
+	std::vector<std::string> seen;
+	relation_store store = RuleStore();
+	csv_rows rows{0, 1, "priority,when\n1,fine\n2,\n3,   \n", "rules.csv"};
+	rows.condition = [&](std::string_view text) -> tl::expected<closure, ErrorContext>
+	{
+		seen.emplace_back(text);
+		return MakeProbe(100, &released);
+	};
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	EXPECT_EQ(seen, (std::vector<std::string>{"fine"}));
+	int64_t one = 1;
+	EXPECT_FALSE(*store.Holds(0, 0, 1, &one));
+	EXPECT_TRUE(*store.Holds(0, 1, 1, &one));
+	EXPECT_TRUE(*store.Holds(0, 2, 1, &one)) << "cells are trimmed, so spaces are blank";
+}
+
+TEST(RowsCsv, AHostClosureWithReleaseButNoFunctionNamesItsLine)
 {
 	int released = 0;
 	relation_store store = RuleStore();
-	csv_rows rows{0, 1, "priority,when\n1,fine\n2,empty\n", "rules.csv"};
+	csv_rows rows{0, 1, "priority,when\n1,fine\n2,odd\n", "rules.csv"};
 	rows.condition = [&](std::string_view text) -> tl::expected<closure, ErrorContext>
 	{
-		return text == "empty" ? closure{} : MakeProbe(1, &released);
+		return text == "odd" ? closure{nullptr, nullptr, [](void*) {}} : MakeProbe(1, &released);
 	};
 	auto loaded = LoadCsv(store, rows);
 	ASSERT_FALSE(loaded.has_value());

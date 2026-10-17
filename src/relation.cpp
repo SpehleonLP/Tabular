@@ -481,6 +481,13 @@ void ReleaseAll(std::span<closure const> closures)
 	}
 }
 
+// A null function is "no script condition"; with data or a release it is a
+// closure the host half-built, whose data would leak.
+bool IsMalformed(closure const& c)
+{
+	return c.function == nullptr && (c.data != nullptr || c.release != nullptr);
+}
+
 counted_string Intern(string_in s)
 {
 	return counted_string::MakeShared(s.text);
@@ -675,9 +682,10 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 				return refuse(std::move(fits.error()));
 			}
 		}
-		if (column.type == column_type::Condition && command.conditions[rows.slot[c]].function == nullptr)
+		if (column.type == column_type::Condition && IsMalformed(command.conditions[rows.slot[c]]))
 		{
-			return refuse(ErrorContext("column '", column.name, "' of '", def.name, "' got a condition with no function"));
+			return refuse(ErrorContext("column '", column.name, "' of '", def.name,
+				"' got a condition with no function but data or a release"));
 		}
 	}
 
@@ -873,14 +881,15 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	}
 	for (size_t i = 0; i < command.conditions.size(); ++i)
 	{
-		if (command.conditions[i].function == nullptr)
+		if (IsMalformed(command.conditions[i]))
 		{
 			size_t const r = i / current.conditionCount;
 			if (command.refusal)
 			{
 				command.refusal->row = r;
 			}
-			return tl::make_unexpected(ErrorContext("load into '", def.name, "' got a condition with no function")
+			return tl::make_unexpected(ErrorContext("load into '", def.name,
+				"' got a condition with no function but data or a release")
 				.with("row ", r));
 		}
 	}
@@ -1153,6 +1162,10 @@ tl::expected<bool, ErrorContext> ReadHolds(table_def const& def, table_rows cons
 		return tl::make_unexpected(std::move(checked.error()));
 	}
 	closure const& c     = rows.conditions[row * rows.conditionCount + rows.slot[column]]->get();
+	if (c.function == nullptr)
+	{
+		return true;   // no script condition
+	}
 	ErrorContext   error;
 	bool           holds = c.function(c.data, this_in, &error);
 	// An error may arrive as context alone, from a closure wrapping another's.
