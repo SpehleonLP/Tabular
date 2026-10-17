@@ -105,6 +105,36 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 	}
 }
 
+tl::expected<void, ErrorContext> hash_names::Note(std::string_view text, int64_t hash, uint32_t line)
+{
+	if (hash == 0)
+	{
+		return tl::make_unexpected(ErrorContext("'", text, "' hashes to 0, which no name may"));
+	}
+	auto [it, added] = _seen.try_emplace(hash, std::string(text), line);
+	if (!added && it->second.first != text)
+	{
+		return tl::make_unexpected(ErrorContext("'", text, "' has the same hash as '", it->second.first,
+			"' on line ", it->second.second));
+	}
+	return {};
+}
+
+tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text, hash_names& names,
+	uint32_t line)
+{
+	auto value = ReadCell(column, text);
+	if (value && column.type == column_type::Hash)
+	{
+		auto noted = names.Note(text, value->i, line);
+		if (!noted)
+		{
+			return tl::make_unexpected(std::move(noted.error()));
+		}
+	}
+	return value;
+}
+
 }
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command)
@@ -198,6 +228,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	std::vector<std::string_view> commands(count * commandCount);
 	std::vector<string_in>        strings(count * stringCount);
 	pending_conditions            conditions(count * conditionCount);
+	detail::hash_names            names;
 	for (size_t r = 0; r < count; ++r)
 	{
 		uint32_t line = file.line_of_row(r + 1);
@@ -242,7 +273,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				conditions.list[r * conditionCount + slot[columnOf[h]]] = *built;
 				continue;
 			}
-			auto value = detail::ReadCell(column, text);
+			auto value = detail::ReadCell(column, text, names, line);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));

@@ -248,3 +248,24 @@ TEST(PivotCsv, ARefusedLoadLeavesTheFlagNames)
 	EXPECT_TRUE(Mentions(Error(LoadPivot(store, "label,None,Injured\n7,,c7_injured\n", &names)), "no row with no flags"));
 	EXPECT_EQ(names, (std::vector<std::string>{"kept"}));
 }
+
+TEST(PivotCsv, KeysThatCollideAreRefused)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: label, type: hash, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: clip, type: string}
+    order_by: {columns: [label]}
+    pivot: {headers: req, cells: clip}
+)");
+	std::string error = Error(LoadPivot(store, "label,None,Injured\nn26963,a,b\nn50336,c,d\n"));
+	EXPECT_TRUE(Mentions(error, "'n26963'")) << error;
+	EXPECT_TRUE(Mentions(error, "lookup.csv:3")) << error;
+}

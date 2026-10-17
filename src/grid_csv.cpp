@@ -38,9 +38,10 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 	uint32_t const headerLine = file.line_of_row(0);
 
 	std::vector<cell> columnKeys;
+	detail::hash_names names;
 	for (size_t h = 1; h < width; ++h)
 	{
-		auto key = detail::ReadCell(def.grid_columns, file.cell(h, 0));
+		auto key = detail::ReadCell(def.grid_columns, file.cell(h, 0), names, headerLine);
 		if (!key)
 		{
 			return tl::make_unexpected(std::move(key.error()).with(label(headerLine)));
@@ -61,7 +62,7 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 			return tl::make_unexpected(ErrorContext("row has ", file[r].size(), " cells, but the header has ", width)
 				.with(label(line)));
 		}
-		auto key = detail::ReadCell(def.grid_rows, file.cell(0, r));
+		auto key = detail::ReadCell(def.grid_rows, file.cell(0, r), names, line);
 		if (!key)
 		{
 			return tl::make_unexpected(std::move(key.error()).with(label(line)));
@@ -82,7 +83,7 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 				strings.emplace_back(cellText);
 				continue;
 			}
-			auto value = detail::ReadCell(column, cellText);
+			auto value = detail::ReadCell(column, cellText, names, line);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));

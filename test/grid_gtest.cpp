@@ -327,3 +327,20 @@ tables:
 )");
 	EXPECT_TRUE(Mentions(GridError(rows, "x,1\n1,2\n"), "not a grid"));
 }
+
+TEST(GridCsv, AxisKeysThatCollideAreRefused)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: g
+    grid:
+      rows: {name: r, type: hash}
+      columns: {name: c, type: hash}
+      cells: int
+)", "g.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto across = LoadGridCsv(store, csv_grid{0, 1, ",n26963,x\nn50336,1,2\n", "g.csv"});
+	ASSERT_FALSE(across.has_value()) << "a row key colliding with a column key";
+	EXPECT_TRUE(across.error().format().find("g.csv:2") != std::string::npos) << across.error().format();
+}

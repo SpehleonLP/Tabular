@@ -198,6 +198,7 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 	std::vector<string_in> strings;
 	std::vector<uint16_t>  pivot;
 	std::vector<uint32_t>  lineOf;   // per loaded row
+	hash_names             hashed;
 	for (size_t r = 1; r < file.rows(); ++r)
 	{
 		uint32_t const line = file.line_of_row(r);
@@ -209,7 +210,7 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		std::vector<cell> keys;
 		for (uint32_t k = 0; k < def.key_count; ++k)
 		{
-			auto key = ReadCell(def.columns[def.order[k]], file.cell(k, r));
+			auto key = ReadCell(def.columns[def.order[k]], file.cell(k, r), hashed, line);
 			if (!key)
 			{
 				return tl::make_unexpected(std::move(key.error()).with(label(line)));
@@ -235,7 +236,7 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 			}
 			else
 			{
-				auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText);
+				auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText, hashed, line);
 				if (!value)
 				{
 					return tl::make_unexpected(std::move(value.error()).with(label(line)));

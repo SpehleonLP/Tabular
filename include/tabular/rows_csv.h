@@ -12,7 +12,9 @@ namespace tabular
 
 // CSV text whose header row names the table's columns, in any order; every
 // column appears exactly once. Cells are read by their
-// column's type: a hash is CityHash32 of the text, flags an unsigned decimal
+// column's type: a hash is CityHash32 of the text, and within one load two
+// texts with one hash, or a text hashing to 0, are refused, naming both lines,
+// flags an unsigned decimal
 // or 0x hex below 2^32, an int a signed decimal, a double as from_chars reads
 // it, a vec2 as `a..b`, two floats, a command verbatim, a string as its trimmed text. Cells are trimmed of
 // surrounding whitespace, blank
@@ -48,7 +50,8 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 
 // A grid in CSV: the header row's cells after the first are the column keys,
 // each line's first cell its row key, and every other cell one grid cell.
-// Keys read as key cells (a hash is CityHash32 of the text, an int decimal).
+// Keys read as key cells (a hash is CityHash32 of the text (collisions refused
+// as in LoadCsv), an int decimal).
 // Every cell is filled: a blank one is refused, naming its line and column
 // header. Trimming, '#' lines, blank lines and the BOM are as in LoadCsv.
 struct csv_grid

@@ -384,3 +384,39 @@ TEST(RowsCsv, AHostClosureWithReleaseButNoFunctionNamesItsLine)
 	EXPECT_TRUE(Mentions(loaded.error().format(), "rules.csv:3")) << loaded.error().format();
 	EXPECT_EQ(released, 1);
 }
+
+TEST(RowsCsv, TwoNamesWithOneHashAreRefusedNamingBothLines)
+{
+	ASSERT_EQ(Hash("n26963"), Hash("n50336")) << "the pinned collision no longer collides";
+	relation_store store = Store();
+	std::string error = Load(store,
+		"package,section,mask,x,on_spawn\nn26963,1,0,0,(a)\nother,2,0,0,(b)\nn50336,3,0,0,(c)\n");
+	EXPECT_TRUE(Mentions(error, "'n50336'")) << error;
+	EXPECT_TRUE(Mentions(error, "'n26963'")) << error;
+	EXPECT_TRUE(Mentions(error, "line 2")) << error;
+	EXPECT_TRUE(Mentions(error, "spawn.csv:4")) << error;
+	EXPECT_EQ(store.RowCount(0), 0u);
+}
+
+TEST(RowsCsv, TheSameNameOnManyLinesIsNoCollision)
+{
+	relation_store store = Store();
+	EXPECT_EQ(Load(store, "package,section,mask,x,on_spawn\nbase,1,0,0,(a)\nbase,2,0,0,(b)\n"), "");
+}
+
+TEST(RowsCsv, AHashCollisionAcrossColumnsIsRefused)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: links
+    read_only: true
+    columns:
+      - {name: from, type: hash}
+      - {name: to, type: hash}
+)", "links.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "from,to\nn26963,a\nb,n50336\n", "links.csv"});
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "links.csv:3")) << loaded.error().format();
+}
