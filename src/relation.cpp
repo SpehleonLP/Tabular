@@ -250,6 +250,48 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 	return {};
 }
 
+tl::expected<void, ErrorContext> BuildPivot(create_table const& c, table_def& out)
+{
+	if (!c.pivot)
+	{
+		return {};
+	}
+	pivot_by const& p = *c.pivot;
+	if (out.pick != pick_policy::Best && out.pick != pick_policy::Or)
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' is pivoted; only a best or an or table is"));
+	}
+	uint32_t const headersWanted = out.pick == pick_policy::Best ? out.ranking : out.output;
+	if (p.headers == UINT32_MAX || p.headers != headersWanted)
+	{
+		return tl::make_unexpected(ErrorContext("the pivot headers of table '", c.name, "' are its ",
+			out.pick == pick_policy::Best ? "ranking column" : "output column"));
+	}
+	if (p.cells >= out.columns.size() || p.cells == p.headers || out.columns[p.cells].key)
+	{
+		return tl::make_unexpected(ErrorContext("the pivot cells of table '", c.name,
+			"' are a column that is neither a key nor the headers"));
+	}
+	column_type const cellType = out.columns[p.cells].type;
+	if (cellType == column_type::Condition || cellType == column_type::Command)
+	{
+		return tl::make_unexpected(ErrorContext("the pivot cells of table '", c.name, "' are a ",
+			TypeName(cellType), "; they are a value, a band or a string"));
+	}
+	for (uint32_t i = 0; i < out.columns.size(); ++i)
+	{
+		if (!out.columns[i].key && i != p.headers && i != p.cells)
+		{
+			return tl::make_unexpected(ErrorContext("table '", c.name, "' is pivoted, so it holds only its keys, '",
+				out.columns[p.headers].name, "' and '", out.columns[p.cells].name, "'; it also has '",
+				out.columns[i].name, "'"));
+		}
+	}
+	out.pivot_headers = p.headers;
+	out.pivot_cells   = p.cells;
+	return {};
+}
+
 tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::span<table_def const> earlier)
 {
 	if (c.name.empty())
@@ -291,6 +333,11 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 	if (!picked)
 	{
 		return tl::make_unexpected(std::move(picked.error()));
+	}
+	auto pivoted = BuildPivot(c, out);
+	if (!pivoted)
+	{
+		return tl::make_unexpected(std::move(pivoted.error()));
 	}
 	return out;
 }

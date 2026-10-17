@@ -33,6 +33,12 @@ struct input_yaml
 	int32_t     type = -1;
 };
 
+struct pivot_yaml
+{
+	std::string headers;
+	std::string cells;
+};
+
 struct order_yaml
 {
 	std::vector<std::string> columns;
@@ -48,6 +54,7 @@ struct table_yaml
 	std::vector<input_yaml>  inputs;
 	int32_t                  pick = 0;
 	std::string              output;
+	pivot_yaml               pivot;
 };
 
 struct document_yaml
@@ -77,6 +84,12 @@ YamlField const kInputFields[] = {
 };
 YamlSet const kInputSet{kInputFields, nullptr, "input"};
 
+YamlField const kPivotFields[] = {
+	{"headers", FieldType::String, offsetof(pivot_yaml, headers), true},
+	{"cells",   FieldType::String, offsetof(pivot_yaml, cells), true},
+};
+YamlSet const kPivotSet{kPivotFields, nullptr, "pivot"};
+
 YamlField const kOrderColumn{"", FieldType::String, 0};
 YamlField const kOrderFields[] = {
 	{"columns", FieldType::Sequence, offsetof(order_yaml, columns), true,
@@ -95,6 +108,7 @@ YamlField const kTableFields[] = {
 	 0, &kInputSet, nullptr, nullptr, MakeContainer<std::vector<input_yaml>>()},
 	{"pick",      FieldType::Enum,     offsetof(table_yaml, pick), false, 0, nullptr, nullptr, &kPicks},
 	{"output",    FieldType::String,   offsetof(table_yaml, output)},
+	{"pivot",     FieldType::Nested,   offsetof(table_yaml, pivot), false, 0, &kPivotSet},
 };
 YamlSet const kTableSet{kTableFields, nullptr, "table"};
 
@@ -129,6 +143,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 	std::vector<std::vector<add_input>>  inputs(document.tables.size());
 	std::vector<std::vector<uint32_t>>   orderColumns(document.tables.size());
 	std::vector<order_by>                orders(document.tables.size());
+	std::vector<pivot_by>                pivots(document.tables.size());
 	std::vector<create_table>            commands;
 	commands.reserve(document.tables.size());
 	for (size_t t = 0; t < document.tables.size(); ++t)
@@ -189,14 +204,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 		{
 			for (std::string const& name : in.order_by.columns)
 			{
-				uint32_t found = UINT32_MAX;
-				for (uint32_t c = 0; c < in.columns.size(); ++c)
-				{
-					if (in.columns[c].name == name)
-					{
-						found = c;
-					}
-				}
+				uint32_t const found = columnOf(name);
 				if (found == UINT32_MAX)
 				{
 					return tl::make_unexpected(ErrorContext("the order of table '", in.name, "' names column '", name,
@@ -206,8 +214,18 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 			}
 			orders[t] = order_by{orderColumns[t], in.order_by.unique};
 		}
+		bool const pivoted = tableNodes->as_sequence().items[t]->get("pivot") != nullptr;
+		if (pivoted)
+		{
+			pivots[t] = pivot_by{columnOf(in.pivot.headers), columnOf(in.pivot.cells)};
+			if (pivots[t].headers == UINT32_MAX || pivots[t].cells == UINT32_MAX)
+			{
+				return tl::make_unexpected(ErrorContext("the pivot of table '", in.name, "' names a column the table does not have")
+					.with(std::string(label)));
+			}
+		}
 		commands.push_back(create_table{in.name, columns[t], ordered ? &orders[t] : nullptr, in.read_only,
-			inputs[t], static_cast<pick_policy>(in.pick), output});
+			inputs[t], static_cast<pick_policy>(in.pick), output, pivoted ? &pivots[t] : nullptr});
 	}
 
 	auto built = BuildSchema(commands);

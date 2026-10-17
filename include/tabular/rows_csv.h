@@ -3,7 +3,9 @@
 
 #include "tabular/relation.h"
 #include <functional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace tabular
 {
@@ -22,6 +24,13 @@ namespace tabular
 // A condition cell's text is handed to condition, which returns the compiled
 // closure or an error; that is the whole of Tabular's part in compiling
 // conditions. A table with condition columns needs one.
+//
+// A pivoted load reads the table's pivot: the header row names the key
+// columns, in key order, then the flag headers, whose order gives the flag
+// domain (a best table's first is None, the 0 value; each simple header after
+// takes the next bit; `A|B` ORs headers to its left). Each non-empty cell is
+// one row, its header's flags in the headers column and the cell in the cells
+// column; blank cells give no row.
 struct csv_rows
 {
 	uint32_t         table      = 0;
@@ -30,6 +39,8 @@ struct csv_rows
 	std::string_view label;            // names the source in errors
 	uint32_t         first_line = 1;   // the source line text starts on
 	std::function<tl::expected<closure, ErrorContext>(std::string_view)> condition;
+	bool                      pivoted    = false;     // the table's pivot: keys, then flag headers
+	std::vector<std::string>* flag_names = nullptr;   // filled by a pivoted load: index = bit
 };
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command);

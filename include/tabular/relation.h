@@ -99,6 +99,15 @@ struct order_by
 	bool                      unique = false;
 };
 
+// A table written as a grid in CSV: keys down the side, the members of a flags
+// column across the top, and each non-empty cell one row. Stored as ordinary
+// rows; the pivot is the front end's.
+struct pivot_by
+{
+	uint32_t headers = UINT32_MAX;   // the flags column the headers are members of
+	uint32_t cells   = UINT32_MAX;   // the column each non-empty cell fills
+};
+
 struct create_table
 {
 	std::string_view              name;
@@ -113,6 +122,7 @@ struct create_table
 	std::span<add_input const>    inputs;
 	pick_policy                   pick   = pick_policy::None;
 	uint32_t                      output = UINT32_MAX;   // Or: the Flags value column OR'd
+	pivot_by const*               pivot  = nullptr;
 };
 
 struct column_def
@@ -141,6 +151,8 @@ struct table_def
 	uint32_t                     output    = UINT32_MAX;
 	uint32_t                     ranking   = UINT32_MAX;   // the Flags column with an input
 	uint32_t                     key_count = 0;            // columns with key: true
+	uint32_t                     pivot_headers = UINT32_MAX;
+	uint32_t                     pivot_cells   = UINT32_MAX;
 };
 
 // Immutable once built. Hot reload builds a new one.

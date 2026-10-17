@@ -1,4 +1,5 @@
 #include "tabular/rows_csv.h"
+#include "csv_cells.h"
 #include "Utility/load_csv.h"
 #include "cityhash/src/city.h"
 
@@ -12,23 +13,6 @@ namespace tabular
 
 namespace
 {
-
-// The whole of text as T, or nothing: "12abc" is not 12.
-template<typename T>
-bool ParseWhole(std::string_view text, T& out, int base = 10)
-{
-	char const* end = text.data() + text.size();
-	std::from_chars_result r;
-	if constexpr (std::is_floating_point_v<T>)
-	{
-		r = std::from_chars(text.data(), end, out);
-	}
-	else
-	{
-		r = std::from_chars(text.data(), end, out, base);
-	}
-	return r.ec == std::errc() && r.ptr == end;
-}
 
 // Closures built for the cells read so far. Load adopts them all, refused or
 // not; until it is called they are ours, so an early return releases them.
@@ -55,6 +39,11 @@ struct pending_conditions
 		}
 	}
 };
+
+}
+
+namespace detail
+{
 
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text)
 {
@@ -127,6 +116,10 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		return tl::make_unexpected(ErrorContext("no table ", command.table).with(std::string(command.label)));
 	}
 	table_def const& def = defs[command.table];
+	if (command.pivoted)
+	{
+		return detail::LoadPivotedCsv(store, command);
+	}
 	if (!command.condition)
 	{
 		for (column_def const& column : def.columns)
@@ -242,7 +235,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				conditions.list[r * conditionCount + slot[columnOf[h]]] = *built;
 				continue;
 			}
-			auto value = ReadCell(column, text);
+			auto value = detail::ReadCell(column, text);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));
