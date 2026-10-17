@@ -44,7 +44,69 @@ bool CanBeKey(column_type type)
 	return ComparesByEquality(type) || type == column_type::String;
 }
 
-tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_table const& c)
+tl::expected<immutable_array<input_def>, ErrorContext> BuildInputs(create_table const& c)
+{
+	shared_array<input_def> inputs(c.inputs.size());
+	for (uint32_t i = 0; i < c.inputs.size(); ++i)
+	{
+		add_input const& in = c.inputs[i];
+		if (in.name.empty())
+		{
+			return tl::make_unexpected(ErrorContext("input ", i, " of table '", c.name, "' needs a name"));
+		}
+		for (uint32_t earlier = 0; earlier < i; ++earlier)
+		{
+			if (inputs[earlier].name == in.name)
+			{
+				return tl::make_unexpected(ErrorContext("table '", c.name, "' has input '", in.name, "' twice"));
+			}
+		}
+		if (in.type != column_type::Double && in.type != column_type::Flags)
+		{
+			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name,
+				"' is a ", TypeName(in.type), "; an input is a double or a flag set"));
+		}
+		inputs[i] = input_def{std::string(in.name), in.type};
+	}
+	return immutable_array<input_def>(std::move(inputs));
+}
+
+// A band tests a double; a ranking flags column compares a flag set. Nothing
+// else reads an input.
+tl::expected<void, ErrorContext> CheckInput(create_table const& c, add_column const& in,
+	immutable_array<input_def> const& inputs)
+{
+	if (in.input == UINT32_MAX)
+	{
+		if (in.type == column_type::Band)
+		{
+			return tl::make_unexpected(ErrorContext("band '", in.name, "' of table '", c.name,
+				"' names the double input it tests"));
+		}
+		return {};
+	}
+	if (in.type != column_type::Band && in.type != column_type::Flags)
+	{
+		return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' is a ",
+			TypeName(in.type), "; only a band or a flags column reads an input"));
+	}
+	if (in.input >= inputs.size())
+	{
+		return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' reads input ",
+			in.input, ", but the table has ", inputs.size()));
+	}
+	column_type const wanted = in.type == column_type::Band ? column_type::Double : column_type::Flags;
+	if (inputs[in.input].type != wanted)
+	{
+		return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' reads input '",
+			inputs[in.input].name, "', a ", TypeName(inputs[in.input].type), "; a ", TypeName(in.type),
+			" reads a ", TypeName(wanted)));
+	}
+	return {};
+}
+
+tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_table const& c,
+	immutable_array<input_def> const& inputs)
 {
 	if (c.columns.empty())
 	{
@@ -70,7 +132,12 @@ tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_tabl
 			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' is a ",
 				TypeName(in.type), " and cannot be a key"));
 		}
-		columns[i] = column_def{std::string(in.name), in.type, in.key};
+		auto reads = CheckInput(c, in, inputs);
+		if (!reads)
+		{
+			return tl::make_unexpected(std::move(reads.error()));
+		}
+		columns[i] = column_def{std::string(in.name), in.type, in.key, in.input};
 	}
 	return immutable_array<column_def>(std::move(columns));
 }
@@ -108,6 +175,79 @@ tl::expected<immutable_array<uint32_t>, ErrorContext> BuildOrder(create_table co
 	return immutable_array<uint32_t>::FromArray(order.columns.data(), order.columns.size());
 }
 
+// The pick shape: one ranking column, one script condition, the key prefix,
+// and the output of an or table. Every table gets ranking and key_count, so a
+// later front end reads them without re-deriving.
+tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out)
+{
+	uint32_t conditions = 0;
+	for (uint32_t i = 0; i < out.columns.size(); ++i)
+	{
+		column_def const& col = out.columns[i];
+		if (col.key)
+		{
+			++out.key_count;
+		}
+		if (col.type == column_type::Condition && ++conditions > 1)
+		{
+			return tl::make_unexpected(ErrorContext("table '", c.name,
+				"' has two condition columns; a row carries at most one script condition"));
+		}
+		if (col.type == column_type::Flags && col.input != UINT32_MAX)
+		{
+			if (out.ranking != UINT32_MAX)
+			{
+				return tl::make_unexpected(ErrorContext("table '", c.name, "' ranks by two flags columns, '",
+					out.columns[out.ranking].name, "' and '", col.name, "'"));
+			}
+			out.ranking = i;
+		}
+	}
+	out.pick = c.pick;
+	if (c.pick != pick_policy::Or && c.output != UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' names an output; only an or table has one"));
+	}
+	if (c.pick == pick_policy::None)
+	{
+		return {};
+	}
+	if (!out.read_only)
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' is picked, and a picked table is read-only"));
+	}
+	// A pick's keys are the order's leading columns, found by binary search.
+	uint32_t k = 0;
+	for (uint32_t i = 0; i < out.columns.size(); ++i)
+	{
+		if (!out.columns[i].key)
+		{
+			continue;
+		}
+		if (k >= out.order.size() || out.order[k] != i)
+		{
+			return tl::make_unexpected(ErrorContext("table '", c.name,
+				"' is picked, so its order starts with its keys, in column order"));
+		}
+		++k;
+	}
+	if (c.pick == pick_policy::Or)
+	{
+		if (c.output == UINT32_MAX)
+		{
+			return tl::make_unexpected(ErrorContext("or table '", c.name, "' names its output, a flags column"));
+		}
+		if (c.output >= out.columns.size() || out.columns[c.output].type != column_type::Flags)
+		{
+			return tl::make_unexpected(ErrorContext("output '",
+				c.output < out.columns.size() ? out.columns[c.output].name : std::string("?"),
+				"' is not a flag set, and it is the output of table '", c.name, "'"));
+		}
+		out.output = c.output;
+	}
+	return {};
+}
+
 tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::span<table_def const> earlier)
 {
 	if (c.name.empty())
@@ -122,13 +262,19 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 		}
 	}
 
-	auto columns = BuildColumns(c);
+	auto inputs = BuildInputs(c);
+	if (!inputs)
+	{
+		return tl::make_unexpected(std::move(inputs.error()));
+	}
+	auto columns = BuildColumns(c, *inputs);
 	if (!columns)
 	{
 		return tl::make_unexpected(std::move(columns.error()));
 	}
 
 	table_def out{std::string(c.name), std::move(*columns), {}, false, c.read_only};
+	out.inputs = std::move(*inputs);
 	if (c.ordering)
 	{
 		auto order = BuildOrder(c, out.columns);
@@ -138,6 +284,11 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 		}
 		out.order  = std::move(*order);
 		out.unique = c.ordering->unique;
+	}
+	auto picked = BuildPick(c, out);
+	if (!picked)
+	{
+		return tl::make_unexpected(std::move(picked.error()));
 	}
 	return out;
 }
@@ -198,7 +349,8 @@ namespace
 
 bool IsValueColumn(column_type type)
 {
-	return type != column_type::Condition && type != column_type::Command && type != column_type::String;
+	return type != column_type::Condition && type != column_type::Command && type != column_type::String
+		&& type != column_type::Band;
 }
 
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values

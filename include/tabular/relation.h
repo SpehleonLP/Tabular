@@ -37,6 +37,9 @@ enum class column_type : uint8_t
 	Command,
 	Vec2,
 	String,
+	// A condition stored as a vec2 cell: the row counts when its input x
+	// satisfies start <= x < end, half-open as animation's phase bands are.
+	Band,
 };
 
 // One value in a row. The column's type says which member is live.
@@ -72,7 +75,18 @@ struct add_column
 	std::string_view name;
 	column_type      type = column_type::Int;
 	bool             key  = false;   // a secondary equality index
+	uint32_t         input = UINT32_MAX;   // Band or ranking Flags: index into create_table::inputs
 };
+
+// What a pick is given: a named, typed slot a band or a ranking flags column
+// reads.
+struct add_input
+{
+	std::string_view name;
+	column_type      type = column_type::Double;   // Double or Flags
+};
+
+enum class pick_policy : uint8_t { None, Best, All, Or };
 
 // The order a table's rows are stored in: rows compare by these columns in
 // turn, most significant first, and rows that compare equal keep insertion
@@ -94,6 +108,11 @@ struct create_table
 	// version rather than updating it. A table loaded from files is one of
 	// these; engine data that scripts add rows to is not.
 	bool                          read_only = false;
+	// What a pick is given, in this order. A band names a Double input and a
+	// ranking flags column a Flags one; Tabular resolves no names at pick time.
+	std::span<add_input const>    inputs;
+	pick_policy                   pick   = pick_policy::None;
+	uint32_t                      output = UINT32_MAX;   // Or: the Flags value column OR'd
 };
 
 struct column_def
@@ -101,6 +120,13 @@ struct column_def
 	std::string name;
 	column_type type = column_type::Int;
 	bool        key  = false;
+	uint32_t    input = UINT32_MAX;
+};
+
+struct input_def
+{
+	std::string name;
+	column_type type = column_type::Double;
 };
 
 struct table_def
@@ -110,6 +136,11 @@ struct table_def
 	immutable_array<uint32_t>    order;    // empty: insertion order
 	bool                         unique    = false;
 	bool                         read_only = false;
+	immutable_array<input_def>   inputs;
+	pick_policy                  pick      = pick_policy::None;
+	uint32_t                     output    = UINT32_MAX;
+	uint32_t                     ranking   = UINT32_MAX;   // the Flags column with an input
+	uint32_t                     key_count = 0;            // columns with key: true
 };
 
 // Immutable once built. Hot reload builds a new one.

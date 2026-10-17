@@ -135,3 +135,52 @@ TEST(SchemaYaml, ReadsTheStringType)
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	EXPECT_EQ(s->tables()[0].columns[0].type, column_type::String);
 }
+
+TEST(SchemaYaml, APickedTableIsDeclaredByName)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: phase
+    read_only: true
+    pick: or
+    output: bits
+    inputs:
+      - {name: t, type: double}
+    columns:
+      - {name: clip, type: int, key: true}
+      - {name: bits, type: flags}
+      - {name: window, type: band, input: t}
+    order_by: {columns: [clip]}
+)", "phase.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	table_def const& def = s->tables()[0];
+	EXPECT_EQ(def.pick, pick_policy::Or);
+	EXPECT_EQ(def.output, 1u);
+	EXPECT_EQ(def.columns[2].type, column_type::Band);
+	EXPECT_EQ(def.columns[2].input, 0u);
+}
+
+TEST(SchemaYaml, AnUndeclaredInputOrOutputIsRefused)
+{
+	auto input = SchemaFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    columns:
+      - {name: window, type: band, input: speed}
+)", "t.yaml");
+	ASSERT_FALSE(input.has_value());
+	EXPECT_TRUE(Mentions(input.error().format(), "input 'speed'")) << input.error().format();
+
+	auto output = SchemaFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    pick: or
+    output: bits
+    columns:
+      - {name: clip, type: int}
+)", "t.yaml");
+	ASSERT_FALSE(output.has_value());
+	EXPECT_TRUE(Mentions(output.error().format(), "output 'bits'")) << output.error().format();
+}
