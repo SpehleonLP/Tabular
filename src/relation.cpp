@@ -1085,6 +1085,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		{
 			return def.ranking == UINT32_MAX ? 0u : static_cast<uint32_t>(cellsOf(s)[current.slot[def.ranking]].i);
 		};
+		auto pivotOf = [&](source s) -> uint16_t
+		{
+			return s.loaded ? (command.pivot.empty() ? uint16_t(0) : command.pivot[s.row]) : current.pivots[s.row];
+		};
 		auto sameKey = [&](source a, source b)
 		{
 			for (uint32_t k = 0; k < def.key_count; ++k)
@@ -1159,6 +1163,105 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				return tl::make_unexpected(axes.empty()
 					? ErrorContext("table '", def.name, "' key (", keyText(order[start]), ") has ", noDefault)
 					: ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ", where, " has ", noDefault));
+			}
+
+			// Dead rows: B is never picked when the rows tried before it for
+			// every input, among those with no script condition, cover its box.
+			// Without a ranking column that is row order. With one, only the
+			// same flags can: at input F = R_B, B is a full match with hit R_B,
+			// and any other full match has R a strict subset of R_B, so a
+			// smaller hit. Same flags tie by pivot column, then row; the R == 0
+			// rows come last, in row order, after every ranked row.
+			for (size_t b = start; b < end; ++b)
+			{
+				source const   B  = order[b];
+				uint32_t const RB = flagsOf(B);
+				auto triedBefore = [&](size_t a)
+				{
+					if (a == b || scripted(order[a]) || flagsOf(order[a]) != RB)
+					{
+						return false;
+					}
+					if (RB == 0)
+					{
+						return a < b;
+					}
+					uint16_t const pa = pivotOf(order[a]);
+					uint16_t const pb = pivotOf(B);
+					return pa < pb || (pa == pb && a < b);
+				};
+				// The rows tried before B, in try order, so the last is the one
+				// tried just before it.
+				std::vector<size_t> before;
+				for (size_t a = start; a < end; ++a)
+				{
+					if (triedBefore(a))
+					{
+						before.push_back(a);
+					}
+				}
+				std::stable_sort(before.begin(), before.end(), [&](size_t x, size_t y)
+				{
+					return RB != 0 && pivotOf(order[x]) < pivotOf(order[y]);
+				});
+				std::vector<detail::interval> own;
+				boxOf(B, own);
+				boxes.clear();
+				for (size_t a : before)
+				{
+					boxOf(order[a], boxes);
+				}
+				if (detail::Uncovered(own, boxes, before.size()))
+				{
+					continue;   // some input reaches B
+				}
+				// B is dead. A survivor can be made dead only by a loaded row
+				// ahead of it in tie order, so one of before is loaded.
+				auto nameOf = [&](source s)
+				{
+					return s.loaded ? cc(std::string("loaded row "), s.row)
+					                : cc(std::string("owner "), current.owners[s.row], "'s row");
+				};
+				size_t lastLoaded = SIZE_MAX;
+				for (size_t a : before)
+				{
+					if (order[a].loaded)
+					{
+						lastLoaded = order[a].row;
+					}
+				}
+				if (command.refusal)
+				{
+					command.refusal->row        = B.loaded ? B.row : lastLoaded;
+					command.refusal->covered_by = B.loaded ? lastLoaded : SIZE_MAX;
+				}
+				bool emptyBox = false;
+				for (detail::interval const& in : own)
+				{
+					emptyBox = emptyBox || !(in.lo < in.hi);
+				}
+				if (emptyBox)
+				{
+					return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
+						nameOf(B), " is never picked; its bands hold for no input"));
+				}
+				bool allLoaded = true;
+				for (size_t a : before)
+				{
+					allLoaded = allLoaded && order[a].loaded;
+				}
+				// Every row tried before B, not a minimal cover: these are the
+				// rows that take B's place.
+				std::string covering;
+				for (size_t a : before)
+				{
+					covering = cc(covering, covering.empty() ? "" : ", ",
+						allLoaded ? cc(std::string(), order[a].row) : nameOf(order[a]));
+				}
+				bool const one = before.size() == 1;
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
+					nameOf(B), " is never picked; ", allLoaded ? (one ? "loaded row " : "loaded rows ") : "",
+					covering, one ? " covers it" : " cover it"));
 			}
 
 			start = end;

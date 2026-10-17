@@ -420,3 +420,29 @@ tables:
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().format(), "links.csv:3")) << loaded.error().format();
 }
+
+TEST(RowsCsv, ADeadRowNamesTheLineThatCoversIt)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: reaction
+    read_only: true
+    pick: best
+    inputs:
+      - {name: energy, type: double, range: 0..1}
+    columns:
+      - {name: stimulus, type: hash, key: true}
+      - {name: energy, type: band, input: energy}
+      - {name: reaction, type: string}
+    order_by: {columns: [stimulus]}
+)", "reaction.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1,
+		"stimulus,energy,reaction\npredator,0..1,flee\npredator,0.2..1,fight\n", "reaction.csv"});
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "reaction.csv:3")) << error;
+	EXPECT_TRUE(Mentions(error, "covered by line 2")) << error;
+	EXPECT_FALSE(Mentions(error, "same key as")) << error;
+}

@@ -224,12 +224,14 @@ tables:
 	EXPECT_TRUE(Mentions(Error(LoadCsv(plain, rows)), "has no pivot"));
 }
 
-TEST(PivotCsv, EqualRanksFollowHeaderOrder)
+TEST(PivotCsv, EqualFlagsOnOneLineAreADeadRow)
 {
 	relation_store store = StoreFrom(kLookup);
-	// Two names for the same flags (duplicates are by name); the left header wins.
-	ASSERT_EQ(Error(LoadPivot(store, "label,None,Injured,Crouch,Crouch|Injured,Injured|Crouch\n1,n,,,left,right\n")), "");
-	EXPECT_EQ(Clip(store, 1, 3), "left");
+	// Two names for the same flags; the left one always wins, so the right is dead.
+	std::string error = Error(LoadPivot(store, "label,None,Injured,Crouch,Crouch|Injured,Injured|Crouch\n1,n,,,left,right\n"));
+	EXPECT_TRUE(Mentions(error, "never picked")) << error;
+	EXPECT_TRUE(Mentions(error, "lookup.csv:2")) << error;
+	EXPECT_TRUE(Mentions(error, "covered by line 2")) << error;
 }
 
 TEST(PivotCsv, AHeaderWithNoFlagHeadersIsRefused)

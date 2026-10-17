@@ -122,6 +122,21 @@ tl::expected<void, ErrorContext> LoadGuarded(relation_store& store, std::vector<
 	return store.Load(load_rows{0, 1, rows.size(), values, {}, nullptr, conditions});
 }
 
+tl::expected<void, ErrorContext> LoadGuardedWith(relation_store& store, std::vector<guarded_row> const& rows,
+	load_refusal* refusal)
+{
+	std::vector<cell>    values;
+	std::vector<closure> conditions;
+	for (guarded_row const& r : rows)
+	{
+		values.push_back(cell::Integer(r.label));
+		values.push_back(cell::Vector(r.lo, r.hi));
+		values.push_back(cell::Integer(r.clip));
+		conditions.push_back(r.when);
+	}
+	return store.Load(load_rows{0, 1, rows.size(), values, {}, refusal, conditions});
+}
+
 tl::expected<std::optional<size_t>, ErrorContext> PickGuarded(relation_store const& store, int64_t label, double t,
 	int64_t this_in)
 {
@@ -237,15 +252,6 @@ TEST(PickBest, AFullMatchBeatsALargerPartialOne)
 	ASSERT_TRUE(LoadRanked(store, {{1, 0, 10}, {1, 1, 11}, {1, 14, 12}}).has_value());
 	EXPECT_EQ(BestClip(store, 1, 7), 11) << "R=1 is all in F=7; R=14 hits two of its three bits but needs bit 3";
 	EXPECT_EQ(BestClip(store, 1, 15), 12) << "with bit 3 present R=14 is a full match with the larger hit";
-}
-
-TEST(PickBest, EqualRanksGoToPivotColumnThenRowOrder)
-{
-	relation_store store = StoreFrom(kRanked);
-	ASSERT_TRUE(LoadRanked(store, {{1, 0, 10}, {1, 1, 11}, {1, 1, 12}, {2, 0, 20}, {2, 1, 21}, {2, 1, 22}}, 1,
-		{0, 2, 1, 0, 0, 0}).has_value());
-	EXPECT_EQ(BestClip(store, 1, 1), 12) << "the lower pivot column wins";
-	EXPECT_EQ(BestClip(store, 2, 1), 21) << "equal pivot columns: row order";
 }
 
 TEST(PickBest, AKeyRunWithoutADefaultIsRefusedAtLoad)
@@ -616,7 +622,7 @@ int64_t BandClip(relation_store const& store, int64_t label, int64_t mode, doubl
 	{
 		return -1;
 	}
-	auto clip = store.Value(0, **picked, 3);
+	auto clip = store.Value(0, **picked, 4);
 	EXPECT_TRUE(clip.has_value()) << RefusalOf(clip);
 	return clip ? clip->i : -1;
 }
@@ -697,4 +703,112 @@ TEST(PickBest, ARunTheLoadDoesNotTouchIsNotRechecked)
 	EXPECT_EQ(BandClip(store, 1, 0, 0.5), -1) << "run 1 has no default now, and picks nothing";
 	EXPECT_NE(RefusalOf(LoadBand(store, {{1, 2, 0.0f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)")
 		<< "a load adding to run 1 is checked, and run 1 has no default";
+}
+
+TEST(PickBest, EqualRanksGoToPivotColumnThenRowOrder)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                                     {1, 1, 0.0f, 1.0f, closure{}, 11, 2},
+	                                     {1, 1, 0.0f, 0.5f, closure{}, 12, 1},
+	                                     {2, 0, 0.0f, 1.0f, closure{}, 20},
+	                                     {2, 1, 0.0f, 0.5f, closure{}, 21},
+	                                     {2, 1, 0.0f, 1.0f, closure{}, 22}})), "(accepted)");
+	EXPECT_EQ(BandClip(store, 1, 1, 0.25), 12) << "the lower pivot column wins";
+	EXPECT_EQ(BandClip(store, 1, 1, 0.75), 11);
+	EXPECT_EQ(BandClip(store, 2, 1, 0.25), 21) << "equal pivot columns: row order";
+	EXPECT_EQ(BandClip(store, 2, 1, 0.75), 22);
+}
+
+TEST(PickBest, ARowEarlierRowsCoverIsRefusedNamingThem)
+{
+	relation_store store = StoreFrom(kGuarded);
+	load_refusal refusal;
+	auto loaded = LoadGuardedWith(store, {{1, 0.0f, 0.6f, closure{}, 10},
+	                                      {1, 0.4f, 1.0f, closure{}, 11},
+	                                      {1, 0.2f, 0.8f, closure{}, 12}}, &refusal);
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "loaded row 2 is never picked")) << error;
+	EXPECT_TRUE(Mentions(error, "loaded rows 0, 1 cover it")) << error;
+	EXPECT_EQ(refusal.row, 2u);
+	EXPECT_EQ(refusal.covered_by, 1u);
+}
+
+TEST(PickBest, AScriptedEarlierRowShadowsNothing)
+{
+	relation_store store = StoreFrom(kGuarded);
+	EXPECT_EQ(RefusalOf(LoadGuarded(store, {{1, 0.0f, 1.0f, Never(), 10},
+	                                        {1, 0.0f, 1.0f, closure{}, 11}})), "(accepted)");
+}
+
+TEST(PickBest, APartialOverlapIsPriorityNotDeath)
+{
+	relation_store store = StoreFrom(kGuarded);
+	ASSERT_EQ(RefusalOf(LoadGuarded(store, {{1, 0.0f, 0.6f, closure{}, 10},
+	                                        {1, 0.4f, 1.0f, closure{}, 11}})), "(accepted)");
+	EXPECT_EQ(GuardedClip(store, 1, 0.5, 0), 10);
+	EXPECT_EQ(GuardedClip(store, 1, 0.7, 0), 11);
+}
+
+TEST(PickBest, DifferentFlagsNeverShadow)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                                     {1, 1, 0.0f, 1.0f, closure{}, 11},
+	                                     {1, 3, 0.0f, 1.0f, closure{}, 13},
+	                                     {1, 2, 0.0f, 1.0f, closure{}, 12}})), "(accepted)");
+	EXPECT_EQ(BandClip(store, 1, 1, 0.5), 11);
+	EXPECT_EQ(BandClip(store, 1, 3, 0.5), 13);
+	EXPECT_EQ(BandClip(store, 1, 2, 0.5), 12);
+}
+
+TEST(PickBest, SameFlagsShadowInTieOrder)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	load_refusal refusal;
+	auto loaded = LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                               {1, 1, 0.0f, 0.5f, closure{}, 11, 2},
+	                               {1, 1, 0.0f, 1.0f, closure{}, 12, 1}}, &refusal);
+	ASSERT_FALSE(loaded.has_value()) << "pivot 1 is tried first and covers pivot 2's band";
+	EXPECT_TRUE(Mentions(loaded.error().format(), "loaded row 1 is never picked; loaded row 2 covers it"))
+		<< loaded.error().format();
+	EXPECT_EQ(refusal.row, 1u);
+	EXPECT_EQ(refusal.covered_by, 2u);
+}
+
+TEST(PickBest, TwoBandsOnOneInputIntersect)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: twice
+    read_only: true
+    pick: best
+    inputs:
+      - {name: t, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: a, type: band, input: t}
+      - {name: b, type: band, input: t}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)");
+	auto load = [&](std::vector<std::array<float, 4>> const& rows)
+	{
+		std::vector<cell> values;
+		for (auto const& r : rows)
+		{
+			values.push_back(cell::Integer(1));
+			values.push_back(cell::Vector(r[0], r[1]));
+			values.push_back(cell::Vector(r[2], r[3]));
+			values.push_back(cell::Integer(0));
+		}
+		return store.Load(load_rows{0, 1, rows.size(), values});
+	};
+	EXPECT_EQ(RefusalOf(load({{0.0f, 1.0f, 0.0f, 0.6f}, {0.4f, 1.0f, 0.0f, 1.0f}})), "(accepted)")
+		<< "row 0 holds on 0..0.6 only, so row 1 still owns 0.6..1";
+	EXPECT_TRUE(Mentions(RefusalOf(load({{0.0f, 0.5f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.6f, 1.0f}})), "0.5"))
+		<< "row 0 covers 0..0.5 and row 1 0.6..1: 0.5 has no row";
+	EXPECT_TRUE(Mentions(RefusalOf(load({{0.0f, 1.0f, 0.0f, 1.0f}, {0.0f, 0.4f, 0.6f, 1.0f}})), "hold for no input"))
+		<< "row 1's bands do not overlap";
 }

@@ -293,6 +293,10 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		{
 			error = std::move(error).with("same key as line ", file.line_of_row(refusal.earlier + 1));
 		}
+		if (refusal.covered_by < count)
+		{
+			error = std::move(error).with("covered by line ", file.line_of_row(refusal.covered_by + 1));
+		}
 		if (refusal.row < count)
 		{
 			return tl::make_unexpected(std::move(error).with(label(file.line_of_row(refusal.row + 1))));

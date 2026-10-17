@@ -238,11 +238,14 @@ struct retract_owner
 
 // Which rows of a refused load were at fault, as indices into the load, so a
 // front end can name the lines its author wrote. SIZE_MAX when not a row's
-// fault; earlier is set when two rows of the load clash with each other.
+// fault; earlier is set when two rows of the load clash with each other, and
+// covered_by when row is a best table's dead row: the loaded row tried just
+// before it that covers it.
 struct load_refusal
 {
-	size_t row     = SIZE_MAX;
-	size_t earlier = SIZE_MAX;
+	size_t row        = SIZE_MAX;
+	size_t earlier    = SIZE_MAX;
+	size_t covered_by = SIZE_MAX;
 };
 
 // Replaces every row the owner has in one read-only table with count new

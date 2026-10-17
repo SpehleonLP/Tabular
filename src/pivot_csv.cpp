@@ -259,6 +259,10 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		{
 			error = std::move(error).with("same key as line ", lineOf[refusal.earlier]);
 		}
+		if (refusal.covered_by < lineOf.size())
+		{
+			error = std::move(error).with("covered by line ", lineOf[refusal.covered_by]);
+		}
 		if (refusal.row < lineOf.size())
 		{
 			return tl::make_unexpected(std::move(error).with(label(lineOf[refusal.row])));
