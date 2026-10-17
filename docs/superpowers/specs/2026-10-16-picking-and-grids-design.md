@@ -1,6 +1,6 @@
 # Picking and grids
 
-**Status:** design for owner review (2026-10-16).
+**Status:** approved by the owner 2026-10-16. The plan (`docs/superpowers/plans/2026-10-16-picking-and-grids.md`, "Spec amendments made while planning") amends six points: command structs name inputs, outputs and pivots by column number; the grid shape is one `grid_shape` struct; pivot cells may be strings; bands compare in float; the default-row check covers only key runs a load adds to; at most one script condition applies to every table. Where they differ, the plan wins.
 
 **Contract:** `Spehleon/Tabular/docs/definition.md` ("A row", "Flag matching", "Picking", "Pivot").
 This slice is the first where Tabular answers *which row*, not only *what rows exist*.
