@@ -139,7 +139,9 @@ TEST(PickSchema, ABandIsAConditionNotAValue)
 	cell const row[] = {cell::Integer(1), cell::Integer(0), cell::Vector(0.0f, 1.0f), cell::Integer(7)};
 	ASSERT_TRUE(store.Load(load_rows{0, 1, 1, row}).has_value());
 	EXPECT_FALSE(store.Value(0, 0, 2).has_value()) << "a band is read by a pick, not as a value";
-	EXPECT_EQ(store.Value(0, 0, 1)->i, 0) << "the ranking column is still a value";
+	auto ranking = store.Value(0, 0, 1);
+	ASSERT_TRUE(ranking.has_value()) << ranking.error().message;
+	EXPECT_EQ(ranking->i, 0) << "the ranking column is still a value";
 }
 
 TEST(PickSchema, ABandCellIsWrittenAsARange)

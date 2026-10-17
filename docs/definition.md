@@ -135,6 +135,8 @@ Ties go to the lower pivot column (header order), then row order. A row with `R 
 `R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and
 **must exist** in every key run a load adds rows to: it is the clear default. Every table
 needs a well-defined answer to "what happens if nothing matches".
+Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
+last, but its lookup grid has one None column, so no table it reads has two.
 
 **Picking (owner, 2026-10-12).**
 

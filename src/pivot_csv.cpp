@@ -171,6 +171,18 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 				file.cell(k, 0), "'").with(label(headerLine)));
 		}
 	}
+	// No flag headers would load no rows: a silent retract of the owner.
+	if (width == def.key_count)
+	{
+		return tl::make_unexpected(ErrorContext("the header names no flag headers after the keys of '", def.name, "'")
+			.with(label(headerLine)));
+	}
+	// The pivot column is 16 bits; past that, header order would wrap.
+	if (width - def.key_count > size_t(UINT16_MAX) + 1)
+	{
+		return tl::make_unexpected(ErrorContext("the header names ", width - def.key_count,
+			" flag headers; a pivot holds at most ", size_t(UINT16_MAX) + 1).with(label(headerLine)));
+	}
 	std::vector<std::string_view> names;
 	for (size_t h = def.key_count; h < width; ++h)
 	{
@@ -236,18 +248,6 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		}
 	}
 
-	if (command.flag_names)
-	{
-		command.flag_names->clear();
-		for (flag_header const& h : *headers)
-		{
-			if (h.simple)
-			{
-				command.flag_names->push_back(h.name);
-			}
-		}
-	}
-
 	load_refusal refusal;
 	auto loaded = store.Load(load_rows{command.table, command.owner, pivot.size(), values, {}, &refusal, {},
 		strings, pivot});
@@ -263,6 +263,18 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 			return tl::make_unexpected(std::move(error).with(label(lineOf[refusal.row])));
 		}
 		return tl::make_unexpected(std::move(error).with(std::string(command.label)));
+	}
+	// Only now: a refused load changes nothing, the caller's names included.
+	if (command.flag_names)
+	{
+		command.flag_names->clear();
+		for (flag_header const& h : *headers)
+		{
+			if (h.simple)
+			{
+				command.flag_names->push_back(h.name);
+			}
+		}
 	}
 	return {};
 }

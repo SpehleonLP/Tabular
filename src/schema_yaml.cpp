@@ -204,10 +204,14 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 			}
 			return UINT32_MAX;
 		};
-		for (column_yaml const& c : in.columns)
+		// Presence, not emptiness: `input: ""` is a mistake, not "no input".
+		LF::Yaml::Node const* tableNode   = tableNodes->as_sequence().items[t].get();
+		LF::Yaml::Node const* columnNodes = tableNode->get("columns");
+		for (uint32_t ci = 0; ci < in.columns.size(); ++ci)
 		{
-			uint32_t input = UINT32_MAX;
-			if (!c.input.empty())
+			column_yaml const& c     = in.columns[ci];
+			uint32_t           input = UINT32_MAX;
+			if (columnNodes->as_sequence().items[ci]->get("input") != nullptr)
 			{
 				input = inputOf(c.input);
 				if (input == UINT32_MAX)
@@ -219,7 +223,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 			columns[t].push_back(add_column{c.name, static_cast<column_type>(c.type), c.key, input});
 		}
 		uint32_t output = UINT32_MAX;
-		if (!in.output.empty())
+		if (tableNode->get("output") != nullptr)
 		{
 			output = columnOf(in.output);
 			if (output == UINT32_MAX)

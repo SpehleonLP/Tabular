@@ -69,7 +69,9 @@ std::string Clip(relation_store const& store, int64_t label, int64_t mode)
 	{
 		return "";
 	}
-	return std::string(std::string_view(*store.StringAt(0, **picked, 2)));
+	auto clip = store.StringAt(0, **picked, 2);
+	EXPECT_TRUE(clip.has_value()) << (clip ? std::string() : clip.error().format());
+	return clip ? std::string(std::string_view(*clip)) : std::string();
 }
 
 std::string Error(tl::expected<void, ErrorContext> const& r)
@@ -166,7 +168,9 @@ tables:
 	{
 		cell const keys[]   = {cell::Integer(clip)};
 		cell const inputs[] = {cell::Real(t)};
-		return *PickOr(store, 0, pick_query{keys, inputs});
+		auto picked = PickOr(store, 0, pick_query{keys, inputs});
+		EXPECT_TRUE(picked.has_value()) << (picked ? std::string() : picked.error().format());
+		return picked ? *picked : 0xFFFFFFFFu;
 	};
 	EXPECT_EQ(bits(2, 0.45), 2u);
 	EXPECT_EQ(bits(2, 0.7), 1u);
@@ -226,4 +230,21 @@ TEST(PivotCsv, EqualRanksFollowHeaderOrder)
 	// Two names for the same flags (duplicates are by name); the left header wins.
 	ASSERT_EQ(Error(LoadPivot(store, "label,None,Injured,Crouch,Crouch|Injured,Injured|Crouch\n1,n,,,left,right\n")), "");
 	EXPECT_EQ(Clip(store, 1, 3), "left");
+}
+
+TEST(PivotCsv, AHeaderWithNoFlagHeadersIsRefused)
+{
+	relation_store store = StoreFrom(kLookup);
+	ASSERT_EQ(Error(LoadPivot(store, "label,None\n1,n\n")), "");
+	std::string error = Error(LoadPivot(store, "label\n1\n"));
+	EXPECT_TRUE(Mentions(error, "no flag headers")) << error;
+	EXPECT_EQ(Clip(store, 1, 0), "n") << "the refused load did not retract the owner's rows";
+}
+
+TEST(PivotCsv, ARefusedLoadLeavesTheFlagNames)
+{
+	relation_store store = StoreFrom(kLookup);
+	std::vector<std::string> names = {"kept"};
+	EXPECT_TRUE(Mentions(Error(LoadPivot(store, "label,None,Injured\n7,,c7_injured\n", &names)), "no row with no flags"));
+	EXPECT_EQ(names, (std::vector<std::string>{"kept"}));
 }

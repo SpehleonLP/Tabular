@@ -214,3 +214,47 @@ tables:
 	ASSERT_FALSE(neither.has_value());
 	EXPECT_TRUE(Mentions(neither.error().format(), "no columns")) << neither.error().format();
 }
+
+TEST(SchemaYaml, AnEmptyInputOrOutputIsRefusedNotNone)
+{
+	auto input = SchemaFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: req, type: flags, input: ""}
+)", "t.yaml");
+	ASSERT_FALSE(input.has_value()) << "a flags column with input \"\" became unranked";
+	EXPECT_TRUE(Mentions(input.error().format(), "input ''")) << input.error().format();
+
+	auto output = SchemaFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    pick: or
+    output: ""
+    columns:
+      - {name: clip, type: int, key: true}
+    order_by: {columns: [clip]}
+)", "t.yaml");
+	ASSERT_FALSE(output.has_value());
+	EXPECT_TRUE(Mentions(output.error().format(), "output ''")) << output.error().format();
+}
+
+TEST(SchemaYaml, ABandIsNamedInRefusals)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    inputs:
+      - {name: t, type: double}
+    columns:
+      - {name: window, type: band, input: t, key: true}
+)", "t.yaml");
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "band")) << s.error().format();
+	EXPECT_FALSE(Mentions(s.error().format(), "unknown type")) << s.error().format();
+}

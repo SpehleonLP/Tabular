@@ -2,7 +2,7 @@
 
 #include "relation_internal.h"
 
-#include <algorithm>
+#include <tuple>
 
 namespace tabular
 {
@@ -107,11 +107,15 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 	table_def const&  def  = version_access::Def(version);
 	table_rows const& rows = version_access::Rows(version);
 
-	auto firstHolding = [&](auto const& candidates) -> tl::expected<std::optional<size_t>, ErrorContext>
+	// Each candidate tried is a script call at most; nothing here allocates,
+	// since picks run per frame on a tight budget.
+	auto tryRow = [&](size_t r) -> tl::expected<bool, ErrorContext> { return RowHolds(version, r, query); };
+
+	if (def.ranking == UINT32_MAX)
 	{
-		for (size_t r : candidates)
+		for (size_t r = run->first; r < run->last; ++r)
 		{
-			auto holds = RowHolds(version, r, query);
+			auto holds = tryRow(r);
 			if (!holds)
 			{
 				return tl::make_unexpected(std::move(holds.error()));
@@ -122,59 +126,72 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 			}
 		}
 		return std::optional<size_t>();
-	};
-
-	std::vector<size_t> inOrder;
-	if (def.ranking == UINT32_MAX)
-	{
-		for (size_t r = run->first; r < run->last; ++r)
-		{
-			inOrder.push_back(r);
-		}
-		return firstHolding(inOrder);
 	}
 
 	uint32_t const F        = static_cast<uint32_t>(query.inputs[def.columns[def.ranking].input].i);
 	uint32_t const rankSlot = rows.slot[def.ranking];
-	struct ranked
+	// Larger is better: a full match, then R & F, then R, then the lower pivot
+	// column, then the earlier row. The last two make it a total order, so
+	// rows are tried best first by scanning for the best below the last one
+	// tried; the first try usually holds.
+	using rank = std::tuple<bool, uint32_t, uint32_t, uint32_t, size_t>;
+	auto rankOf = [&](size_t r) -> std::optional<rank>
 	{
-		size_t   row;
-		bool     full;
-		uint32_t hit;
-		uint32_t required;
-		uint16_t pivot;
-	};
-	std::vector<ranked> candidates;
-	std::vector<size_t> defaults;
-	for (size_t r = run->first; r < run->last; ++r)
-	{
-		uint32_t const R = static_cast<uint32_t>(rows.cells[r * rows.valueCount + rankSlot].i);
-		if (R == 0)
-		{
-			defaults.push_back(r);
-			continue;
-		}
+		uint32_t const R   = static_cast<uint32_t>(rows.cells[r * rows.valueCount + rankSlot].i);
 		uint32_t const hit = R & F;
 		if (hit == 0)
 		{
-			continue;   // matches nothing in the input
+			return std::nullopt;   // the default, or a row matching nothing in the input
 		}
-		candidates.push_back({r, hit == R, hit, R, rows.pivots[r]});
-	}
-	// Stable, so rows equal in every rank keep row order.
-	std::stable_sort(candidates.begin(), candidates.end(), [](ranked const& a, ranked const& b)
+		return rank{hit == R, hit, R, UINT16_MAX - uint32_t(rows.pivots[r]), SIZE_MAX - r};
+	};
+	std::optional<rank> below;
+	while (true)
 	{
-		if (a.full != b.full)         { return a.full; }
-		if (a.hit != b.hit)           { return a.hit > b.hit; }
-		if (a.required != b.required) { return a.required > b.required; }
-		return a.pivot < b.pivot;
-	});
-	for (ranked const& c : candidates)
-	{
-		inOrder.push_back(c.row);
+		std::optional<size_t> best;
+		std::optional<rank>   bestRank;
+		for (size_t r = run->first; r < run->last; ++r)
+		{
+			auto k = rankOf(r);
+			if (k && (!below || *k < *below) && (!bestRank || *bestRank < *k))
+			{
+				best     = r;
+				bestRank = k;
+			}
+		}
+		if (!best)
+		{
+			break;
+		}
+		auto holds = tryRow(*best);
+		if (!holds)
+		{
+			return tl::make_unexpected(std::move(holds.error()));
+		}
+		if (*holds)
+		{
+			return best;
+		}
+		below = bestRank;
 	}
-	inOrder.insert(inOrder.end(), defaults.begin(), defaults.end());
-	return firstHolding(inOrder);
+	// The R == 0 rows, in row order.
+	for (size_t r = run->first; r < run->last; ++r)
+	{
+		if (rows.cells[r * rows.valueCount + rankSlot].i != 0)
+		{
+			continue;
+		}
+		auto holds = tryRow(r);
+		if (!holds)
+		{
+			return tl::make_unexpected(std::move(holds.error()));
+		}
+		if (*holds)
+		{
+			return std::optional<size_t>(r);
+		}
+	}
+	return std::optional<size_t>();
 }
 
 tl::expected<std::vector<size_t>, ErrorContext> PickAll(TableVersion const& version, pick_query const& query)

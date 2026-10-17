@@ -28,6 +28,7 @@ char const* TypeName(column_type type)
 	case column_type::Command:   return "command";
 	case column_type::Vec2:      return "vec2";
 	case column_type::String:    return "string";
+	case column_type::Band:      return "band";
 	}
 	return "unknown type";
 }
@@ -596,6 +597,12 @@ schema const& relation_store::definition() const
 
 size_t relation_store::RowCount(uint32_t table) const
 {
+	// A grid's rows live in its GridVersion; the empty row layout beside it
+	// would answer 0 forever.
+	if (_storage->definition.tables()[table].is_grid)
+	{
+		return _storage->grids[table]->Rows();
+	}
 	return _storage->RowsOf(table).RowCount();
 }
 
@@ -606,6 +613,10 @@ uint64_t relation_store::OwnerOf(uint32_t table, size_t row) const
 
 uint64_t relation_store::Generation(uint32_t table) const
 {
+	if (_storage->definition.tables()[table].is_grid)
+	{
+		return _storage->grids[table]->Generation();
+	}
 	return _storage->RowsOf(table).generation;
 }
 
@@ -742,7 +753,8 @@ void relation_store::Retract(retract_owner const& command)
 		if (defs[t].is_grid)
 		{
 			GridVersion::Data const& data = *_storage->grids[t]->_data;
-			if (data.owner == command.owner && data.rows != 0)
+			// A grid of zero rows still holds its owner's column keys.
+			if (data.owner == command.owner && (data.rows != 0 || data.columns != 0))
 			{
 				GridVersion::Data empty{defs[t]};
 				empty.generation = data.generation + 1;
@@ -1089,6 +1101,10 @@ namespace
 tl::expected<column_def const*, ErrorContext> CheckAddress(table_def const& def, size_t rowCount,
 	size_t row, uint32_t column, column_type const* wanted, char const* wantedName)
 {
+	if (def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
+	}
 	if (row >= rowCount)
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no row ", row));
@@ -1161,6 +1177,10 @@ tl::expected<counted_string, ErrorContext> ReadString(table_def const& def, tabl
 tl::expected<std::vector<size_t>, ErrorContext> FindText(table_def const& def, table_rows const& rows, uint32_t column,
 	std::string_view text)
 {
+	if (def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
+	}
 	if (column >= def.columns.size())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
@@ -1183,6 +1203,10 @@ tl::expected<std::vector<size_t>, ErrorContext> FindText(table_def const& def, t
 
 tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, table_rows const& rows, uint32_t column, cell value)
 {
+	if (def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
+	}
 	if (column >= def.columns.size())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
@@ -1215,6 +1239,10 @@ tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, ta
 
 tl::expected<row_range, ErrorContext> FindPrefix(table_def const& def, table_rows const& rows, std::span<cell const> prefix)
 {
+	if (def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
+	}
 	if (rows.orderSlots.empty())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no order to look up by"));

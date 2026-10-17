@@ -22,6 +22,14 @@ static bool Mentions(std::string const& message, std::string_view text)
 namespace
 {
 
+// A wrong answer must fail one test, not abort the run: tl::expected asserts
+// on a bad access, and asserts are live.
+template<typename T>
+std::string RefusalOf(tl::expected<T, ErrorContext> const& e)
+{
+	return e ? std::string("(accepted)") : e.error().format();
+}
+
 relation_store StoreFrom(std::string_view yaml)
 {
 	auto s = SchemaFromYaml(yaml, "pick.yaml");
@@ -70,7 +78,9 @@ int64_t BestClip(relation_store const& store, int64_t label, int64_t mode)
 	{
 		return -1;
 	}
-	return store.Value(0, **picked, 2)->i;
+	auto clip = store.Value(0, **picked, 2);
+	EXPECT_TRUE(clip.has_value()) << RefusalOf(clip);
+	return clip ? clip->i : -1;
 }
 
 // A guarded table: label (key), window (band over t), when (script), clip.
@@ -124,7 +134,13 @@ int64_t GuardedClip(relation_store const& store, int64_t label, double t, int64_
 {
 	auto picked = PickGuarded(store, label, t, this_in);
 	EXPECT_TRUE(picked.has_value()) << (picked ? std::string() : picked.error().format());
-	return picked && *picked ? store.Value(0, **picked, 3)->i : -1;
+	if (!picked || !*picked)
+	{
+		return -1;
+	}
+	auto clip = store.Value(0, **picked, 3);
+	EXPECT_TRUE(clip.has_value()) << RefusalOf(clip);
+	return clip ? clip->i : -1;
 }
 
 bool CountCall(void* data, void const*, ErrorContext*)
@@ -261,8 +277,8 @@ TEST(PickBest, QueriesOfTheWrongShapeAreRefused)
 	cell const oneKey[]   = {cell::Integer(1)};
 	cell const twoKeys[]  = {cell::Integer(1), cell::Integer(2)};
 	cell const oneInput[] = {cell::Integer(1)};
-	EXPECT_TRUE(Mentions(PickBest(store, 0, pick_query{twoKeys, oneInput}).error().format(), "2 keys"));
-	EXPECT_TRUE(Mentions(PickBest(store, 0, pick_query{oneKey, {}}).error().format(), "0 inputs"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickBest(store, 0, pick_query{twoKeys, oneInput})), "2 keys"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickBest(store, 0, pick_query{oneKey, {}})), "0 inputs"));
 	for (int64_t bad : {INT64_C(-1), INT64_C(0x100000000)})
 	{
 		cell const input[] = {cell::Integer(bad)};
@@ -283,7 +299,9 @@ TEST(PickBest, AHeldVersionPicksItsOwnRows)
 	cell const inputs[] = {cell::Integer(0)};
 	auto old = PickBest(**held, pick_query{keys, inputs});
 	ASSERT_TRUE(old.has_value() && *old);
-	EXPECT_EQ((*held)->Value(**old, 2)->i, 10);
+	auto clip = (*held)->Value(**old, 2);
+	ASSERT_TRUE(clip.has_value()) << RefusalOf(clip);
+	EXPECT_EQ(clip->i, 10);
 	EXPECT_EQ(BestClip(store, 1, 0), 20);
 }
 
@@ -415,9 +433,96 @@ TEST(PickPolicy, EachTableIsPickedOneWay)
 	relation_store phase = PhaseStore();
 	cell const keys[]   = {cell::Integer(2)};
 	cell const inputs[] = {cell::Real(0.1)};
-	EXPECT_TRUE(Mentions(PickBest(phase, 0, pick_query{keys, inputs}).error().format(), "not picked with best"));
-	EXPECT_TRUE(Mentions(PickAll(phase, 0, pick_query{keys, inputs}).error().format(), "not picked with all"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickBest(phase, 0, pick_query{keys, inputs})), "not picked with best"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickAll(phase, 0, pick_query{keys, inputs})), "not picked with all"));
 	relation_store ranked = StoreFrom(kRanked);
 	cell const mode[] = {cell::Integer(0)};
-	EXPECT_TRUE(Mentions(PickOr(ranked, 0, pick_query{keys, mode}).error().format(), "not picked with or"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickOr(ranked, 0, pick_query{keys, mode})), "not picked with or"));
+}
+
+namespace
+{
+
+// Two keys, and an order that runs on past them: a key run is (a, b), not
+// (a, b, req) and not (a).
+constexpr std::string_view kTwoKeys = R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: a, type: int, key: true}
+      - {name: b, type: int, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: clip, type: int}
+    order_by: {columns: [a, b, req]}
+)";
+
+tl::expected<void, ErrorContext> LoadTwoKeys(relation_store& store, std::vector<std::array<int64_t, 4>> const& rows,
+	load_refusal* refusal = nullptr)
+{
+	std::vector<cell> values;
+	for (auto const& r : rows)
+	{
+		for (int64_t v : r)
+		{
+			values.push_back(cell::Integer(v));
+		}
+	}
+	return store.Load(load_rows{0, 1, rows.size(), values, {}, refusal});
+}
+
+int64_t TwoKeyClip(relation_store const& store, int64_t a, int64_t b, int64_t mode)
+{
+	cell const keys[]   = {cell::Integer(a), cell::Integer(b)};
+	cell const inputs[] = {cell::Integer(mode)};
+	auto picked = PickBest(store, 0, pick_query{keys, inputs});
+	EXPECT_TRUE(picked.has_value()) << RefusalOf(picked);
+	if (!picked || !*picked)
+	{
+		return -1;
+	}
+	auto clip = store.Value(0, **picked, 3);
+	EXPECT_TRUE(clip.has_value()) << RefusalOf(clip);
+	return clip ? clip->i : -1;
+}
+
+}
+
+TEST(PickBest, AKeyRunIsEveryKeyColumnAndNoMore)
+{
+	relation_store store = StoreFrom(kTwoKeys);
+	// Ordered by req too, so the default sorts first in each run, and (1, 1)'s
+	// ranked rows are each their own (a, b, req) group.
+	ASSERT_EQ(RefusalOf(LoadTwoKeys(store, {{1, 1, 0, 110}, {1, 1, 1, 111}, {1, 1, 2, 112},
+	                                        {1, 2, 0, 120}, {1, 2, 1, 121}})), "(accepted)");
+	EXPECT_EQ(TwoKeyClip(store, 1, 1, 2), 112);
+	EXPECT_EQ(TwoKeyClip(store, 1, 2, 2), 120) << "only (1, 2)'s rows: (1, 1)'s req 2 row is not in the run";
+	EXPECT_EQ(TwoKeyClip(store, 1, 3, 2), -1);
+
+	// (1, 2) without a default, though (1, 1) beside it has one.
+	load_refusal refusal;
+	auto loaded = LoadTwoKeys(store, {{1, 1, 0, 110}, {1, 2, 1, 121}, {1, 2, 2, 122}}, &refusal);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "key (1, 2)")) << loaded.error().format();
+	EXPECT_EQ(refusal.row, 1u) << "the run's first loaded row";
+}
+
+TEST(PickSchema, TwoKeysLeadTheOrderInColumnOrder)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    columns:
+      - {name: a, type: int, key: true}
+      - {name: b, type: int, key: true}
+      - {name: clip, type: int}
+    order_by: {columns: [b, a]}
+)", "two.yaml");
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "starts with its keys")) << s.error().format();
 }
