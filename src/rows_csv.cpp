@@ -53,20 +53,24 @@ bool ParseRange(std::string_view text, float& start, float& end)
 		&& ParseWhole(text.substr(0, dots), start) && ParseWhole(text.substr(dots + 2), end);
 }
 
-tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text)
+tl::expected<void, ErrorContext> RefuseBlank(column_def const& column, std::string_view text)
 {
-	// The one rule for empty cells, for every type including the text ones, so
-	// no front end carries a blank check of its own.
 	if (text.empty())
 	{
 		return tl::make_unexpected(ErrorContext("column '", column.name, "' is empty"));
 	}
+	return {};
+}
+
+tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text)
+{
+	auto present = RefuseBlank(column, text);
+	if (!present)
+	{
+		return tl::make_unexpected(std::move(present.error()));
+	}
 	switch (column.type)
 	{
-	case column_type::Command:
-	case column_type::String:
-		// Text has no cell; the caller keeps the text it already holds.
-		return cell::Integer(0);
 	case column_type::Hash:
 		return cell::Integer(static_cast<int64_t>(CityHash32(text.data(), text.size())));
 	case column_type::Flags:
@@ -263,23 +267,29 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				conditions.list[r * conditionCount + slot[columnOf[h]]] = *built;
 				continue;
 			}
+			if (column.type == column_type::Command || column.type == column_type::String)
+			{
+				auto present = detail::RefuseBlank(column, text);
+				if (!present)
+				{
+					return tl::make_unexpected(std::move(present.error()).with(label(line)));
+				}
+				if (column.type == column_type::Command)
+				{
+					commands[r * commandCount + slot[columnOf[h]]] = text;
+				}
+				else
+				{
+					strings[r * stringCount + slot[columnOf[h]]] = text;
+				}
+				continue;
+			}
 			auto value = detail::ReadCell(column, text, names, line);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));
 			}
-			if (column.type == column_type::Command)
-			{
-				commands[r * commandCount + slot[columnOf[h]]] = text;
-			}
-			else if (column.type == column_type::String)
-			{
-				strings[r * stringCount + slot[columnOf[h]]] = text;
-			}
-			else
-			{
-				values[r * valueCount + slot[columnOf[h]]] = *value;
-			}
+			values[r * valueCount + slot[columnOf[h]]] = *value;
 		}
 	}
 

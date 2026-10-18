@@ -70,7 +70,7 @@ Needed before machines: "a machine is a SELECT checked to always produce exactly
 Whatever the loader checks, an author can know by reading the table [def promise 2].
 
 - [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1; cat §2.6] (built per key run for best tables; key domains wait for machines, which close them)
-- [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables; partial overlaps are priority)
+- [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables; partial overlaps are priority within one owner; between owners, equal-flag overlaps are refused)
 - [ ] Within one step, tables that feed each other form a DAG; a cycle is refused, naming the tables [def promise 2; attach §4]
 - [ ] Two tables writing one state column refused [arc §2.6; attach §4; c3 §5.4]
 
@@ -122,9 +122,9 @@ from are built; a test for one is a test of those. `[x]` when everything it foll
 - [x] A failed rebuild keeps the old version running ← read-only versions replaced only after the new one checks out (§1, RCU) [def promise 5; attach §6]
 - [x] Conditions are `{function, data, release}` closures, released with their row ← the condition function returns the `closure` type `relation.h` already defines (§5) [def Host interface; cat §2.3]
 - [ ] Every query picks a row (totality at run time) ← flags match with its required default row (§3) + ranked fall-through down to the default (§3) + the totality check (§4) [def promise 1; cat §2.6]
-- [x] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked, as totality, for key runs a load adds rows to or that the owner's replaced rows were in; a bare retract is unchecked, so a run it leaves without one picks nothing
+- [x] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked, as totality, for every key run of a version a load that brings rows publishes; a bare retract is unchecked, so a run it leaves without one picks nothing
 - [x] No tie is ever ambiguous ← flags match breaks ties by row order (§3) [def Flag matching]
-- [x] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]; a gap is a totality refusal, a full overlap a dead row, a partial overlap priority
+- [x] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]; a gap is a totality refusal, a full overlap a dead row, a partial overlap priority within one owner; between owners, equal-flag overlaps are refused
 - [ ] Tables run in DAG order within a step, so a phase → lookup → bridge chain settles in one step ← tables that feed each other form a checked DAG (§4) [def A row]
 - [ ] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]
 - [ ] Edges are machine state ← the Instance holds edge history (§6) + edge is a native condition kind (§3) [def Structure; cat §2.6]

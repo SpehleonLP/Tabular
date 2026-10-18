@@ -43,11 +43,14 @@ the feature is wrong, not the rule.
    rows never stop matching. Over finite key domains, totality is checked when a definition
    is built. A table whose rows are guarded by opaque conditions must end in an unconditional
    row or an explicit hold.
-   Built for best tables (2026-10-17): in every key run a load adds rows to, or that the
-   owner's replaced rows were in, the rows with no script condition (and, when the table ranks,
-   no flags) cover every value of the band inputs' declared ranges; a row the rows tried before
-   it always cover is refused as dead. A bare retract is a load of no rows and is never
-   checked, so crash recovery cannot fail.
+   Built for best tables (owner, 2026-10-18): a published version is total. A load that
+   brings rows checks every key run of the version it would publish, not only the runs it adds
+   rows to: the rows with no script condition (and, when the table ranks, no flags) cover every
+   value of the band inputs' declared ranges, and a row the rows tried before it always cover
+   is refused as dead. A run another owner's bare retract stranded therefore refuses the next
+   load that brings rows, and retract-then-load agrees with a one-step reload. A bare retract
+   is a load of no rows and is never checked, so crash recovery cannot fail. Two owners' rows
+   with equal flags may not overlap in one run (see Flag matching).
    Hash key domains are closed by a machine, which relates its keys to each other, so a key
    with no run is not checked until machines exist. An all or an or table may answer nothing.
 2. **Decidability.** Rows are finite, there is no recursion, and within one step the tables
@@ -148,6 +151,13 @@ input: they are the clear default (see promise 1). Every table
 needs a well-defined answer to "what happens if nothing matches".
 Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
 last, but its lookup grid has one None column, so no table it reads has two.
+
+**Equal flags never overlap between owners (owner, 2026-10-18).** In one key run, two rows
+from different owners with equal flags (every row of an unranked table has the same flags)
+whose boxes meet (every band input's intervals intersect; with no band inputs any two rows
+meet) are refused at load, naming both owners and describing a kept row by its key, flags and band values, scripted or not: that is two
+contributors claiming the same inputs, decided only by load order. The check precedes the
+dead-row check. One owner's rows may overlap; row order is their priority.
 
 **The None header (2026-10-18).** A pivoted best table's flag headers are read left to right.
 `None`, in any case, names the 0 value and is only the first header of a best table; spelled

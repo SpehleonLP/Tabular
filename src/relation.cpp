@@ -723,6 +723,11 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 				return refuse(std::move(fits.error()));
 			}
 		}
+		// A row that does nothing is a property of the row, like a band's shape.
+		if (column.type == column_type::Command && command.commands[rows.slot[c]].empty())
+		{
+			return refuse(ErrorContext("column '", column.name, "' of '", def.name, "' got an empty command"));
+		}
 		if (column.type == column_type::Condition && IsMalformed(command.conditions[rows.slot[c]]))
 		{
 			return refuse(ErrorContext("column '", column.name, "' of '", def.name,
@@ -933,6 +938,17 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	{
 		for (uint32_t c = 0; c < def.columns.size(); ++c)
 		{
+			// A row that does nothing is a property of the row, like a band's shape.
+			if (def.columns[c].type == column_type::Command
+				&& command.commands[r * current.commandCount + current.slot[c]].empty())
+			{
+				if (command.refusal)
+				{
+					command.refusal->row = r;
+				}
+				return tl::make_unexpected(ErrorContext("column '", def.columns[c].name, "' of '", def.name,
+					"' got an empty command").with("row ", r));
+			}
 			if (IsValueColumn(def.columns[c].type))
 			{
 				auto fits = Check32(def.columns[c], def, command.values[r * current.valueCount + current.slot[c]].i);
@@ -1048,11 +1064,13 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	}
 
 	// A best table always picks a row (totality) and every row in it can be
-	// picked (no dead rows). Checked for the key runs this load adds rows to
-	// and, when it brings rows, for the runs the owner's replaced rows were
-	// in: a reload can take a run's only default away. A load of no rows is
-	// never refused (Retract relies on it), and other runs are not re-checked.
-	if (def.pick == pick_policy::Best)
+	// picked (no dead rows), and no two owners claim the same inputs with equal
+	// flags. A published version is total, so a load that brings rows checks
+	// every run of the version it would publish: a run it never touches may
+	// have been stranded by a bare Retract, and a reload can take a run's only
+	// default away. A load of no rows is never refused (Retract relies on it,
+	// so crash recovery cannot fail).
+	if (def.pick == pick_policy::Best && command.count > 0)
 	{
 		// One axis per ranged input a band reads, in input order.
 		std::vector<uint32_t> axes;
@@ -1117,28 +1135,39 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			}
 			return true;
 		};
-		// The keys of the runs the owner's rows leave, sorted for lookup.
-		auto keyOf = [&](source s)
+		// A kept row of another owner, described by what its author can find in
+		// the owner's file: key values, ranking flags and band values.
+		auto survivorText = [&](source s)
 		{
-			std::vector<int64_t> key;
-			for (uint32_t k = 0; k < def.key_count; ++k)
+			std::vector<std::string> parts;
+			if (def.key_count > 0)
 			{
-				key.push_back(cellsOf(s)[current.orderSlots[k]].i);
-			}
-			return key;
-		};
-		std::vector<std::vector<int64_t>> vacated;
-		if (command.count > 0)
-		{
-			for (size_t r = 0; r < current.RowCount(); ++r)
-			{
-				if (current.owners[r] == command.owner)
+				std::string key;
+				for (uint32_t k = 0; k < def.key_count; ++k)
 				{
-					vacated.push_back(keyOf({false, r}));
+					key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
+				}
+				parts.push_back(cc(std::string("key ("), key, ")"));
+			}
+			if (def.ranking != UINT32_MAX)
+			{
+				parts.push_back(cc(std::string("flags "), flagsOf(s)));
+			}
+			for (uint32_t c = 0; c < def.columns.size(); ++c)
+			{
+				if (def.columns[c].type == column_type::Band)
+				{
+					cell const& band = cellsOf(s)[current.slot[c]];
+					parts.push_back(cc(def.columns[c].name, " ", FloatText(band.v[0]), "..", FloatText(band.v[1])));
 				}
 			}
-			std::sort(vacated.begin(), vacated.end());
-		}
+			std::string text = cc(std::string("owner "), ownerOf(s), "'s row");
+			for (size_t p = 0; p < parts.size(); ++p)
+			{
+				text = cc(text, p == 0 ? " with " : ", ", parts[p]);
+			}
+			return text;
+		};
 		auto keyText = [&](source s)
 		{
 			std::string key;
@@ -1152,6 +1181,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		                                                        : "no row with no flags and no script condition";
 
 		std::vector<detail::interval> boxes;
+		std::vector<detail::interval> runBoxes;
 		size_t start = 0;
 		while (start < order.size())
 		{
@@ -1168,10 +1198,63 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					firstLoaded = order[i].row;
 				}
 			}
-			if (firstLoaded == SIZE_MAX && !std::binary_search(vacated.begin(), vacated.end(), keyOf(order[start])))
+
+			// A published version holds no dead row and no cross-owner equal-flag
+			// overlap (induction: every version was checked before it was
+			// published, and the empty version holds neither). A kept row is
+			// therefore never dead and never in an overlap with another kept row,
+			// because all kept rows were already in the published version. So the
+			// only pairs left to refuse involve a loaded row, and a run this load
+			// brings no rows to can fail nothing but totality.
+			if (firstLoaded != SIZE_MAX)
 			{
-				start = end;
-				continue;
+				// Two owners' rows with equal flags may not overlap: that is two
+				// contributors claiming the same inputs, decided only by load
+				// order. Checked before the dead rows, which would report the same
+				// pair as a shadowed row. One owner's rows overlapping is priority
+				// by row order. Every row counts, scripted or not.
+				size_t const dims = axes.size();
+				runBoxes.clear();
+				for (size_t i = start; i < end; ++i)
+				{
+					boxOf(order[i], runBoxes);
+				}
+				for (size_t b = start + 1; b < end; ++b)
+				{
+					for (size_t a = start; a < b; ++a)
+					{
+						if (ownerOf(order[a]) == ownerOf(order[b]) || flagsOf(order[a]) != flagsOf(order[b]))
+						{
+							continue;
+						}
+						bool meets = true;
+						for (size_t x = 0; x < dims; ++x)
+						{
+							detail::interval const& boxA = runBoxes[(a - start) * dims + x];
+							detail::interval const& boxB = runBoxes[(b - start) * dims + x];
+							meets = meets && std::max(boxA.lo, boxB.lo) < std::min(boxA.hi, boxB.hi);
+						}
+						if (!meets)
+						{
+							continue;
+						}
+						// All loaded rows belong to one owner, and one owner's rows
+						// never clash with themselves, so at most one of the pair is
+						// loaded.
+						if (command.refusal)
+						{
+							command.refusal->row = order[b].loaded ? order[b].row : order[a].row;
+						}
+						auto claimant = [&](source s)
+						{
+							return s.loaded ? cc(std::string("owner "), ownerOf(s), "'s loaded row ", s.row) : survivorText(s);
+						};
+						return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ",
+							claimant(order[a]), " and ", claimant(order[b]),
+							def.ranking == UINT32_MAX ? " overlap" : " have equal flags and overlap",
+							"; two owners may not claim the same inputs"));
+					}
+				}
 			}
 
 			// Totality: the quiescent rows cover every input. A ranked row
@@ -1198,9 +1281,15 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				{
 					where = cc(where, a == 0 ? "" : ", ", def.inputs[axes[a]].name, " ", FloatText((*hole)[a]));
 				}
+				// A run the load brings no rows to was stranded by an earlier bare
+				// retract, or by this reload vacating the owner's own rows from
+				// it; name a survivor so the author can find it.
+				std::string const stranded = firstLoaded != SIZE_MAX ? std::string()
+					: cc(std::string("; this load brings the key no row, and the version it would publish is not total (its first row is "),
+					     survivorText(order[start]), ")");
 				return tl::make_unexpected(axes.empty()
-					? ErrorContext("table '", def.name, "' key (", keyText(order[start]), ") has ", noDefault)
-					: ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ", where, " has ", noDefault));
+					? ErrorContext("table '", def.name, "' key (", keyText(order[start]), ") has ", noDefault, stranded)
+					: ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ", where, " has ", noDefault, stranded));
 			}
 
 			// Dead rows: B is never picked when the rows tried before it for
@@ -1210,94 +1299,82 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			// and any other full match has R a strict subset of R_B, so a
 			// smaller hit. Same flags tie by row order; the R == 0 rows come
 			// last, in row order, after every ranked row.
-			for (size_t b = start; b < end; ++b)
+			if (firstLoaded != SIZE_MAX)
 			{
-				source const   B  = order[b];
-				uint32_t const RB = flagsOf(B);
-				// The rows tried before B, in try order (row order), so the last
-				// is the one tried just before it.
-				std::vector<size_t> before;
-				for (size_t a = start; a < b; ++a)
+				for (size_t b = start; b < end; ++b)
 				{
-					if (!scripted(order[a]) && flagsOf(order[a]) == RB)
+					source const   B  = order[b];
+					if (!B.loaded)
 					{
-						before.push_back(a);
+						continue;   // a kept row is never dead (see above)
 					}
-				}
-				std::vector<detail::interval> own;
-				boxOf(B, own);
-				boxes.clear();
-				for (size_t a : before)
-				{
-					boxOf(order[a], boxes);
-				}
-				if (detail::Uncovered(own, boxes, before.size()))
-				{
-					continue;   // some input reaches B
-				}
-				// B is dead. A survivor can be made dead by a loaded row ahead
-				// of it only through order columns past the keys, so one of
-				// before is loaded.
-				auto nameOf = [&](source s)
-				{
-					return s.loaded ? cc(std::string("loaded row "), s.row)
-					                : cc(std::string("owner "), current.owners[s.row], "'s row ", s.row,
-					                     " of the current version");
-				};
-				bool emptyBox = false;
-				for (detail::interval const& in : own)
-				{
-					emptyBox = emptyBox || !(in.lo < in.hi);
-				}
-				// The rows that take B's place: those tried before it whose box
-				// meets B's. A row tried earlier on other inputs only does not.
-				std::vector<size_t> covering;
-				for (size_t i = 0; i < before.size() && !emptyBox; ++i)
-				{
-					bool meets = true;
-					for (size_t a = 0; a < own.size(); ++a)
+					uint32_t const RB = flagsOf(B);
+					// The rows tried before B, in try order (row order), so the last
+					// is the one tried just before it.
+					std::vector<size_t> before;
+					for (size_t a = start; a < b; ++a)
 					{
-						detail::interval const& other = boxes[i * own.size() + a];
-						meets = meets && std::max(own[a].lo, other.lo) < std::min(own[a].hi, other.hi);
+						if (!scripted(order[a]) && flagsOf(order[a]) == RB)
+						{
+							before.push_back(a);
+						}
 					}
-					if (meets)
+					std::vector<detail::interval> own;
+					boxOf(B, own);
+					boxes.clear();
+					for (size_t a : before)
 					{
-						covering.push_back(before[i]);
+						boxOf(order[a], boxes);
 					}
-				}
-				size_t lastLoaded = SIZE_MAX;
-				for (size_t a : covering)
-				{
-					if (order[a].loaded)
+					if (detail::Uncovered(own, boxes, before.size()))
 					{
-						lastLoaded = order[a].row;
+						continue;   // some input reaches B
 					}
-				}
-				if (command.refusal)
-				{
-					command.refusal->row        = B.loaded ? B.row : lastLoaded;
-					command.refusal->covered_by = B.loaded ? lastLoaded : SIZE_MAX;
-				}
-				if (emptyBox)
-				{
+					// B is dead. Rows of different owners with equal flags never
+					// overlap (refused above), so B and the rows covering it are one
+					// owner's, and the load brought them.
+					bool emptyBox = false;
+					for (detail::interval const& in : own)
+					{
+						emptyBox = emptyBox || !(in.lo < in.hi);
+					}
+					// The rows that take B's place: those tried before it whose box
+					// meets B's. A row tried earlier on other inputs only does not.
+					std::vector<size_t> covering;
+					for (size_t i = 0; i < before.size() && !emptyBox; ++i)
+					{
+						bool meets = true;
+						for (size_t a = 0; a < own.size(); ++a)
+						{
+							detail::interval const& other = boxes[i * own.size() + a];
+							meets = meets && std::max(own[a].lo, other.lo) < std::min(own[a].hi, other.hi);
+						}
+						if (meets)
+						{
+							covering.push_back(before[i]);
+						}
+					}
+					// Rows covering B are one owner's, so all loaded.
+					size_t const lastLoaded = covering.empty() ? SIZE_MAX : order[covering.back()].row;
+					if (command.refusal)
+					{
+						command.refusal->row        = B.row;
+						command.refusal->covered_by = lastLoaded;
+					}
+					if (emptyBox)
+					{
+						return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
+							cc(std::string("loaded row "), B.row), " is never picked; its bands hold for no input"));
+					}
+					std::string names;
+					for (size_t a : covering)
+					{
+						names = cc(names, names.empty() ? "" : ", ", order[a].row);
+					}
+					bool const one = covering.size() == 1;
 					return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
-						nameOf(B), " is never picked; its bands hold for no input"));
+						cc(std::string("loaded row "), B.row), " is never picked; ", one ? "loaded row " : "loaded rows ", names, one ? " covers it" : " cover it"));
 				}
-				bool allLoaded = true;
-				for (size_t a : covering)
-				{
-					allLoaded = allLoaded && order[a].loaded;
-				}
-				std::string names;
-				for (size_t a : covering)
-				{
-					names = cc(names, names.empty() ? "" : ", ",
-						allLoaded ? cc(std::string(), order[a].row) : nameOf(order[a]));
-				}
-				bool const one = covering.size() == 1;
-				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
-					nameOf(B), " is never picked; ", allLoaded ? (one ? "loaded row " : "loaded rows ") : "",
-					names, one ? " covers it" : " cover it"));
 			}
 
 			start = end;

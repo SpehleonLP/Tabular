@@ -74,15 +74,20 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 			std::string_view const cellText = file.cell(h, r);
 			// The header names the column, so an error points at the cell.
 			column_def const column{std::string(file.cell(h, 0)), def.grid_cells};
+			if (text_cells)
+			{
+				auto present = detail::RefuseBlank(column, cellText);
+				if (!present)
+				{
+					return tl::make_unexpected(std::move(present.error()).with(label(line)));
+				}
+				strings.emplace_back(cellText);
+				continue;
+			}
 			auto value = detail::ReadCell(column, cellText, names, line);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));
-			}
-			if (text_cells)
-			{
-				strings.emplace_back(cellText);
-				continue;
 			}
 			values.push_back(*value);
 		}

@@ -37,10 +37,15 @@ bool ParseWhole(std::string_view text, T& out, int base = 10)
 // refused rather than guessed.
 bool ParseRange(std::string_view text, float& start, float& end);
 
-// A cell of column's type. The one place an empty cell is refused, whatever the
-// type; a condition column's blank cell is "no condition", which the caller
-// accepts before asking. A command or string column has no cell value: it
-// answers a zero cell and the caller keeps the text.
+// The one rule for an empty cell, whatever the column's type: it is refused.
+// Exceptions are the callers' own: a condition column's blank cell is "no
+// condition", and a pivoted table's blank cell is no row; both are accepted
+// before asking. A command or string column holds text and no cell value, so
+// its caller asks this instead of ReadCell and keeps the text.
+tl::expected<void, ErrorContext> RefuseBlank(column_def const& column, std::string_view text);
+
+// A cell of column's type, refusing a blank one through RefuseBlank. A command
+// or string column holds no value, so it is refused here too.
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text);
 
 // Every text one CSV load hashed, in any column, so two names with one hash,

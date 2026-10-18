@@ -238,17 +238,17 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 				row[slot[def.order[k]]] = keys[k];
 			}
 			row[slot[def.pivot_headers]] = cell::Integer((*headers)[h].flags);
-			auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText, hashed, line);
-			if (!value)
-			{
-				return tl::make_unexpected(std::move(value.error()).with(label(line)));
-			}
 			if (cells.type == column_type::String)
 			{
-				strings.emplace_back(cellText);
+				strings.emplace_back(cellText);   // blanks were skipped above
 			}
 			else
 			{
+				auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText, hashed, line);
+				if (!value)
+				{
+					return tl::make_unexpected(std::move(value.error()).with(label(line)));
+				}
 				row[slot[def.pivot_cells]] = *value;
 			}
 			values.insert(values.end(), row.begin(), row.end());

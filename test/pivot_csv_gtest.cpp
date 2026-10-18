@@ -314,8 +314,8 @@ tables:
 }
 
 // The same rows must meet the same verdict whichever front end brings them in.
-// Owner 2's row for label 1 with req A is covered by owner 1's, which has the
-// same flags and sorts first, however the file spelled it.
+// Owner 2's row for label 1 with req A overlaps owner 1's, which has the
+// same flags, however the file spelled it: refused as an overlap between owners.
 TEST(PivotCsv, RowsAndPivotedCsvGiveOneOutcome)
 {
 	constexpr std::string_view kBands = R"(
@@ -346,7 +346,7 @@ tables:
 		{
 			error = Error(LoadCsv(store, csv_rows{0, 2, "label,req,window\n1,1,0..0.5\n", "rows.csv"}));
 		}
-		EXPECT_TRUE(Mentions(error, "loaded row 0 is never picked; owner 1's row 1 of the current version covers it"))
+		EXPECT_TRUE(Mentions(error, "owner 1's row with key (1), flags 1, window 0..1 and owner 2's loaded row 0 have equal flags and overlap"))
 			<< (pivoted ? "pivoted: " : "rows: ") << error;
 		EXPECT_EQ(store.RowCount(0), 2u) << "the refused load changes nothing";
 	}

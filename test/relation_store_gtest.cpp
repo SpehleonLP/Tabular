@@ -511,3 +511,13 @@ TEST(RelationStore, WrongColumnKindIsRefused)
 	EXPECT_FALSE(store.CommandAt(0, 0, 1).has_value());
 	EXPECT_FALSE(store.Value(0, 0, 2).has_value());
 }
+
+TEST(RelationStore, InsertRefusesAnEmptyCommand)
+{
+	relation_store store = MakeRules();
+	auto refused = InsertRule(store, 1, 1, closure{}, "");
+	ASSERT_FALSE(refused.has_value());
+	EXPECT_TRUE(Mentions(refused.error().format(), "empty command")) << refused.error().format();
+	EXPECT_EQ(store.RowCount(0), 0u);
+	EXPECT_TRUE(InsertRule(store, 1, 1, closure{}, "(go)").has_value());
+}

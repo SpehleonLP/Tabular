@@ -767,17 +767,133 @@ TEST(PickBest, AReloadThatStrandsARunIsRefused)
 	EXPECT_EQ(BandClip(store, 1, 0, 0.5), 12);
 }
 
-TEST(PickBest, ARunNeitherLoadedNorLeftIsNotRechecked)
+// A published version is total: a load that brings rows checks every run of
+// the version it would publish, not only the runs it touches.
+TEST(PickBest, ALoadChecksARunItNeitherAddsToNorLeaves)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 3)), "(accepted)");
+	store.Retract(retract_owner{1});   // a bare retract is never refused, and strands run 1
+	EXPECT_EQ(BandClip(store, 1, 0, 0.5), -1) << "run 1 has no default now, and picks nothing";
+	size_t const rows = store.RowCount(0);
+	load_refusal refusal;
+	std::string const refused = RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, &refusal, 2));
+	EXPECT_TRUE(Mentions(refused, "key (1)")) << refused;
+	EXPECT_TRUE(Mentions(refused, "no row with no flags and no script condition")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 3's row with key (1), flags 1, window 0..1")) << refused;
+	EXPECT_EQ(refusal.row, SIZE_MAX) << "no loaded row is in run 1, so no CSV line is named";
+	EXPECT_EQ(store.RowCount(0), rows);
+	store.Retract(retract_owner{3});   // and a bare retract of the stranded rows is still never refused
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 2)), "(accepted)");
+}
+
+// The two-step path (retract, then load) must agree with the one-step reload.
+TEST(PickBest, RetractThenLoadAgreesWithAReload)
 {
 	relation_store store = StoreFrom(kRankedBand);
 	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
 	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 2)), "(accepted)");
-	store.Retract(retract_owner{1});   // a bare retract is never refused, and strands run 1
-	EXPECT_EQ(BandClip(store, 1, 0, 0.5), -1) << "run 1 has no default now, and picks nothing";
-	EXPECT_EQ(RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 3)), "(accepted)")
-		<< "owner 3 has no rows in run 1 and adds none, so run 1 is not looked at";
-	EXPECT_NE(RefusalOf(LoadBand(store, {{1, 2, 0.0f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)")
-		<< "a load adding to run 1 is checked, and run 1 has no default";
+	store.Retract(retract_owner{1});
+	std::string const refused = RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 1));
+	EXPECT_TRUE(Mentions(refused, "key (1)")) << refused;
+	EXPECT_TRUE(Mentions(refused, "no row with no flags")) << refused;
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 12}}, nullptr, 1)), "(accepted)");
+}
+
+// Two owners' rows with equal flags may not overlap in one run: they would be
+// two contributors claiming the same inputs, decided by load order.
+TEST(PickBest, EqualFlagsOverlapBetweenOwnersIsRefused)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 0.5f, closure{}, 11}}, nullptr, 2)), "(accepted)");
+	load_refusal refusal;
+	std::string const refused = RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 12}}, &refusal, 3));
+	EXPECT_TRUE(Mentions(refused, "key (1)")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 2's row with key (1), flags 1, window 0..0.5")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 3's loaded row 0")) << refused;
+	EXPECT_TRUE(Mentions(refused, "overlap")) << refused;
+	EXPECT_EQ(refusal.row, 0u) << "the loaded row, so a CSV front end names its line";
+	EXPECT_EQ(store.RowCount(0), 2u);
+
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.5f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)")
+		<< "bands that only touch do not overlap";
+	EXPECT_EQ(BandClip(store, 1, 1, 0.25), 11);
+	EXPECT_EQ(BandClip(store, 1, 1, 0.75), 12);
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 0.5f, closure{}, 11}}, nullptr, 2)), "(accepted)")
+		<< "an identical reload is idempotent";
+	EXPECT_EQ(BandClip(store, 1, 1, 0.25), 11);
+	EXPECT_EQ(BandClip(store, 1, 1, 0.75), 12);
+	EXPECT_EQ(BandClip(store, 1, 0, 0.25), 10);
+}
+
+TEST(PickBest, EqualFlagsOverlapWithinOneOwnerIsPriority)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                                     {1, 1, 0.0f, 0.6f, closure{}, 11},
+	                                     {1, 1, 0.4f, 1.0f, closure{}, 12}}, nullptr, 1)), "(accepted)");
+	EXPECT_EQ(BandClip(store, 1, 1, 0.5), 11);
+	EXPECT_EQ(BandClip(store, 1, 1, 0.7), 12);
+}
+
+TEST(PickBest, DifferentFlagsOverlapBetweenOwnersIsLegal)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 2)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 2, 0.0f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)");
+	EXPECT_EQ(BandClip(store, 1, 1, 0.5), 11);
+	EXPECT_EQ(BandClip(store, 1, 2, 0.5), 12);
+}
+
+TEST(PickBest, AnUnrankedTableRefusesOverlapBetweenOwners)
+{
+	relation_store store = StoreFrom(kGuarded);
+	auto load = [&](float lo, float hi, uint64_t owner)
+	{
+		cell const values[] = {cell::Integer(1), cell::Vector(lo, hi), cell::Integer(static_cast<int64_t>(owner))};
+		closure const plain[] = {closure{}};
+		return store.Load(load_rows{0, owner, 1, values, {}, nullptr, plain});
+	};
+	ASSERT_EQ(RefusalOf(load(0.0f, 1.0f, 1)), "(accepted)");
+	std::string const refused = RefusalOf(load(0.0f, 0.5f, 2));
+	EXPECT_TRUE(Mentions(refused, "overlap")) << refused;
+	EXPECT_FALSE(Mentions(refused, "equal flags")) << "an unranked table has no flags to be equal: " << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 1's row with key (1), window 0..1")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 2's loaded row 0")) << refused;
+}
+
+// Scripted rows count too: a script condition does not make two owners' claims
+// on the same inputs any less a clash.
+TEST(PickBest, ScriptedRowsOfDifferentOwnersWithEqualFlagsAreRefused)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
+	                                     {1, 1, 0.0f, 0.5f, Never(), 11}}, nullptr, 1)), "(accepted)");
+	load_refusal refusal;
+	std::string const refused = RefusalOf(LoadBand(store, {{1, 1, 0.25f, 1.0f, Never(), 12}}, &refusal, 2));
+	EXPECT_TRUE(Mentions(refused, "have equal flags and overlap")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 1's row with key (1), flags 1, window 0..0.5")) << refused;
+	EXPECT_EQ(refusal.row, 0u);
+	EXPECT_EQ(store.RowCount(0), 2u);
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.5f, 1.0f, Never(), 12}}, nullptr, 2)), "(accepted)")
+		<< "scripted bands that only touch do not overlap";
+}
+
+// With no band input every row meets every other row of its run.
+TEST(PickBest, WithNoBandInputsAnyTwoOwnersRowsOfEqualFlagsClash)
+{
+	relation_store store = StoreFrom(kRanked);
+	ASSERT_EQ(RefusalOf(LoadRanked(store, {{1, 0, 10}, {1, 1, 11}}, 1)), "(accepted)");
+	load_refusal refusal;
+	std::string const refused = RefusalOf(LoadRanked(store, {{1, 1, 12}}, 2, &refusal));
+	EXPECT_TRUE(Mentions(refused, "have equal flags and overlap")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 1's row with key (1), flags 1")) << refused;
+	EXPECT_EQ(refusal.row, 0u);
+	EXPECT_EQ(RefusalOf(LoadRanked(store, {{1, 2, 12}}, 2)), "(accepted)") << "other flags, no clash";
+	EXPECT_EQ(RefusalOf(LoadRanked(store, {{2, 0, 20}}, 2)), "(accepted)") << "another key is another run";
 }
 
 // Rows of equal rank are tried in row order, whichever front end loaded them:
@@ -906,7 +1022,7 @@ TEST(PickBest, ADeadRowNamesOnlyTheRowsThatMeetIt)
 	EXPECT_EQ(refusal.covered_by, 0u) << "row 1 is 0..0.5 and never takes row 2's place";
 }
 
-TEST(PickBest, AnOrderPastTheKeysCanKillAKeptRow)
+TEST(PickBest, AnOverlapWithAnOrderColumnPastTheKeysIsRefusedAsAnOverlap)
 {
 	relation_store store = StoreFrom(R"(
 tables:
@@ -930,9 +1046,9 @@ tables:
 	ASSERT_EQ(RefusalOf(load(5, 1, nullptr)), "(accepted)");
 	load_refusal refusal;
 	auto loaded = load(1, 2, &refusal);
-	ASSERT_FALSE(loaded.has_value()) << "prio 1 sorts first and covers owner 1's row";
-	EXPECT_TRUE(Mentions(loaded.error().format(), "owner 1's row 0 of the current version is never picked"))
-		<< loaded.error().format();
+	ASSERT_FALSE(loaded.has_value()) << "prio 1 sorts first and would cover owner 1's row";
+	EXPECT_TRUE(Mentions(loaded.error().format(), "owner 1's row with key (1), window 0..1")) << loaded.error().format();
+	EXPECT_TRUE(Mentions(loaded.error().format(), "overlap")) << loaded.error().format();
 	EXPECT_EQ(refusal.row, 0u);
 }
 

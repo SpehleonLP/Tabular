@@ -483,3 +483,36 @@ tables:
 	EXPECT_TRUE(Mentions(error, "covered by line 2")) << error;
 	EXPECT_FALSE(Mentions(error, "same key as")) << error;
 }
+
+// A run another owner's bare retract stranded names no loaded row, so the
+// refusal carries the file's label and no line number that is not the author's.
+TEST(RowsCsv, AStrandedRunIsRefusedNamingTheFileAndNoLine)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: clip, type: string}
+    order_by: {columns: [label]}
+)", "lookup.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	ASSERT_TRUE(LoadCsv(store, csv_rows{0, 1, "label,req,clip\n1,0,base\n", "one.csv"}).has_value());
+	ASSERT_TRUE(LoadCsv(store, csv_rows{0, 3, "label,req,clip\n1,1,flagged\n", "three.csv"}).has_value());
+	store.Retract(retract_owner{1});   // key 1 now has no row with no flags
+	auto loaded = LoadCsv(store, csv_rows{0, 2, "label,req,clip\n2,0,other\n", "two.csv"});
+	ASSERT_FALSE(loaded.has_value());
+	std::string const error = loaded.error().format();
+	EXPECT_TRUE(Mentions(error, "two.csv")) << error;
+	for (char digit = '0'; digit <= '9'; ++digit)
+	{
+		EXPECT_FALSE(Mentions(error, std::string("two.csv:") + digit)) << "no loaded row is at fault: " << error;
+	}
+	EXPECT_TRUE(Mentions(error, "owner 3's row with key (1), flags 1")) << error;
+}

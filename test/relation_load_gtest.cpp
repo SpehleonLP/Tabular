@@ -108,8 +108,8 @@ TEST(RelationLoad, LoadRebuildsTheKeyIndex)
 	relation_store store = Store(false, true);
 	std::vector<cell> v1, v2;
 	std::vector<std::string_view> c1, c2;
-	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{7, 1, 0.0, ""}, {8, 2, 0.0, ""}})).has_value());
-	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{8, 5, 0.0, ""}, {7, 6, 0.0, ""}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{7, 1, 0.0, "(n)"}, {8, 2, 0.0, "(n)"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{8, 5, 0.0, "(n)"}, {7, 6, 0.0, "(n)"}})).has_value());
 	auto found = store.Find(0, 0, cell::Integer(8));
 	ASSERT_TRUE(found.has_value()) << found.error().message;
 	ASSERT_EQ(found->size(), 1u);
@@ -124,7 +124,7 @@ TEST(RelationLoad, GenerationChangesOncePerLoadAndNotForAnEmptyOne)
 	std::vector<std::string_view> c, noCommands;
 	ASSERT_TRUE(store.Load(Rows(1, none, noCommands, {})).has_value());
 	EXPECT_EQ(store.Generation(0), before);
-	ASSERT_TRUE(store.Load(Rows(1, v, c, {{1, 1, 0.0, ""}, {1, 2, 0.0, ""}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v, c, {{1, 1, 0.0, "(n)"}, {1, 2, 0.0, "(n)"}})).has_value());
 	EXPECT_EQ(store.Generation(0), before + 1);
 }
 
@@ -136,7 +136,7 @@ TEST(RelationLoad, LoadIsAllOrNothing)
 	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "kept"}})).has_value());
 	uint64_t before = store.Generation(0);
 	// Owner 2's second row clashes with owner 1's row: nothing of owner 2's lands.
-	auto loaded = store.Load(Rows(2, v2, c2, {{1, 5, 0.0, ""}, {1, 1, 0.0, ""}}));
+	auto loaded = store.Load(Rows(2, v2, c2, {{1, 5, 0.0, "(n)"}, {1, 1, 0.0, "(n)"}}));
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().message, "owner 1")) << loaded.error().message;
 	EXPECT_EQ(store.RowCount(0), 1u);
@@ -149,7 +149,7 @@ TEST(RelationLoad, DuplicateKeyWithinOneLoadIsRefused)
 	relation_store store = Store(true, true);
 	std::vector<cell> v;
 	std::vector<std::string_view> c;
-	auto loaded = store.Load(Rows(3, v, c, {{4, 4, 0.0, ""}, {4, 4, 1.0, ""}}));
+	auto loaded = store.Load(Rows(3, v, c, {{4, 4, 0.0, "(n)"}, {4, 4, 1.0, "(n)"}}));
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().message, "owner 3")) << loaded.error().message;
 	EXPECT_EQ(store.RowCount(0), 0u);
@@ -214,7 +214,7 @@ TEST(RelationLoad, AWritableTableHasNoVersionAndRefusesLoad)
 	EXPECT_FALSE(store.Version(0).has_value());
 	std::vector<cell> v;
 	std::vector<std::string_view> c;
-	auto loaded = store.Load(Rows(1, v, c, {{1, 1, 0.0, ""}}));
+	auto loaded = store.Load(Rows(1, v, c, {{1, 1, 0.0, "(n)"}}));
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().message, "not read-only")) << loaded.error().message;
 }
@@ -224,7 +224,7 @@ TEST(RelationLoad, RetractStillRemovesLoadedRows)
 	relation_store store = Store(false, true);
 	std::vector<cell> v;
 	std::vector<std::string_view> c;
-	ASSERT_TRUE(store.Load(Rows(1, v, c, {{1, 1, 0.0, ""}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v, c, {{1, 1, 0.0, "(n)"}})).has_value());
 	store.Retract(retract_owner{1});
 	EXPECT_EQ(store.RowCount(0), 0u);
 }
@@ -247,9 +247,26 @@ TEST(RelationLoad, AUniqueClashReportsTheLoadRows)
 	std::vector<cell> v;
 	std::vector<std::string_view> c;
 	load_refusal refusal;
-	load_rows rows = Rows(1, v, c, {{1, 1, 0.0, ""}, {2, 2, 0.0, ""}, {1, 1, 0.0, ""}});
+	load_rows rows = Rows(1, v, c, {{1, 1, 0.0, "(n)"}, {2, 2, 0.0, "(n)"}, {1, 1, 0.0, "(n)"}});
 	rows.refusal   = &refusal;
 	ASSERT_FALSE(store.Load(rows).has_value());
 	EXPECT_EQ(refusal.row, 2u);
 	EXPECT_EQ(refusal.earlier, 0u);
+}
+
+// "A row that does nothing" is a property of the row, like a band's shape.
+TEST(RelationLoad, AnEmptyCommandIsRefusedNamingTheRow)
+{
+	relation_store store = Store(false, true);
+	std::vector<cell> values;
+	std::vector<std::string_view> commands;
+	load_refusal refusal;
+	load_rows command = Rows(1, values, commands, {{1, 1, 0.0, "(go)"}, {1, 2, 0.0, ""}});
+	command.refusal = &refusal;
+	auto loaded = store.Load(command);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "'note'")) << loaded.error().format();
+	EXPECT_TRUE(Mentions(loaded.error().format(), "empty command")) << loaded.error().format();
+	EXPECT_EQ(refusal.row, 1u);
+	EXPECT_EQ(store.RowCount(0), 0u);
 }
