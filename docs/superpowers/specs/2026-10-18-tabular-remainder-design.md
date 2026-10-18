@@ -43,6 +43,18 @@ states:
 unless a ruling in §7 blocks it. A blocked slice is skipped, and its ruling is put to the
 owner with my recommendation. Merges still need the owner's approval.
 
+## Rulings (owner, 2026-10-18)
+
+- The recommendations in §7 and §10 are accepted (R1-R12).
+- **A machine is one query, prepared once.** `create_machine` is a command struct like
+  `create_table`, written in YAML. `Prepare` proves totality and unambiguity and compiles the
+  query, and `Step` runs that query. Tabular optimizes this one prepared call over general
+  flexibility, which is where it differs from relational libraries. The interpreted picks stay
+  as the oracle the compiled step must match. The design sketch was reviewed as
+  https://claude.ai/artifact/1pMMs25cL7nDEr83XNCVg9 (P6, P7, P10, P11 below).
+- A ranked run using more than 8 flag bits is refused by `Prepare`. There is no interpreted
+  fallback, so there is one code path. (Claude's default; the owner did not pick.)
+
 ## 1. The method: premises and consequences
 
 For each open item, ask whether `definition.md` already implies it from other features. If
@@ -65,12 +77,12 @@ Two kinds of finding go to the owner instead of into the code:
 | P3 | **The suffix is the trailing cells.** A table may declare `suffix: command` instead of a final command column. In CSV, every cell after the declared columns, joined back with their commas, is that row's command text. | §2 quoting; §7 commands | 1 |
 | P4 | **Counter-based draw.** `Draw(seed, site) -> uint64_t` is a pure hash with no stored state. `site` salts each draw site. | §7 randomness | 1 |
 | P5 | **Weighted pick.** `pick: weighted` puts one `double` weight column on a table that has no conditions. `PickWeighted(query, seed, site)` uses P4 to choose among the rows of the key run. A zero or negative weight is refused at load. | §3 weighted | 1 |
-| P6 | **Inputs come from a source.** A key or input column reads either an input or a state column of its machine. A pick inside a step gets its keys and inputs from the instance, not from the caller. | §5 input resolution | 2 |
-| P7 | **Machine definition.** A machine declares a state vector: named columns, each `hash` with an enumerated member set and an initial member, or `int`/`double` with an initial value. It also names its tables, and each table has a trigger: `create`, `entry`, `step` or `changed`. | §6 definition, state vector | 2 |
+| P6 | **Clauses take their keys and inputs from sources.** A clause binds each key and each table input to a source: a state column, a machine input, an earlier clause's answer, or a literal. Inside a step the instance supplies them, not the caller. | §5 input resolution | 2 |
+| P7 | **`create_machine`.** A command struct, written in YAML under `machines:`. It holds a state vector (named columns: `hash` with members and an initial member, or `int`/`double` with an initial value), the machine's inputs, and four ordered clause lists: `create`, `entry`, `step`, `exit`. A clause is `from` a table, `where` key = source, `given` input = source, then `set` state columns from value columns and/or `emit` the suffix. Transition and entry tables are clauses, not table kinds. | §6 definition, state vector, transition/entry tables | 2 |
 | P8 | **Binding and instance.** A binding is definition × host resolver. It resolves every input name to a getter the host supplies, through one function and with no symbol table. An instance holds the current and next state vectors, plus the edge history (P13). | §6 lifetimes | 2 |
 | P9 | **Values write the next vector, which starts as a copy.** A step first copies current to next. Value columns (`writes: <state column>`) write next. At the end, next becomes current. A hash value must name a member of its column's set, checked at load. | §6 next vector | 2 |
-| P10 | **Domain closure.** A key that reads a hash state column has a closed domain: that column's members. The totality and dead-row checks iterate over **every member**, not only over the key runs a load touched. | §4 totality | 2 |
-| P11 | **Step order is a DAG.** Within a step, table T reads table S's write if T reads a column S writes. That edge set must be acyclic, and the load refuses a cycle, naming it. Tables run in a fixed topological order, with ties broken by declaration order. | §4 DAG | 3 |
+| P10 | **`Prepare` proves by laying out.** `Prepare(create_machine, store)` returns an immutable `Machine` holding the table versions it read. For each clause and each tuple of its key domain, it cuts the input ranges at every band edge and stores, per cell, the rows the pick would try, in pick order, ending at the first row with no script. A ranked table adds the input flags to the cell, but only the bits the run uses; a run using more than 8 bits is refused. **Totality** is "every list ends in a row with no script", and **dead rows** are "a row in no list". The load-time checks of 2026-10-17 become this one layout, which `Load` keeps using for tables no machine reads, with the runs present as the domain. **Key domains:** a key reading a state column is closed by its members; a key reading an earlier clause is closed by the values that clause's table can answer; a key reading a host input is open, and its run must have a catch-all row. | §4 totality, shadowed rows; §6 exactly one row | 2 |
+| P11 | **Clauses name only earlier clauses.** The DAG holds by how a machine is written, so there is no cycle check. Two clauses setting one column are ordered by position: the later write wins. | §4 DAG, two writers | 2 |
 | P12 | **Sinks.** The step hands each picked row's suffix text, along with the instance id and table, to a host `sink` callback, in DAG order. Tabular does not interpret it. | §5 sinks; §7 commands | 4 |
 | P13 | **Edge condition.** A band column marked `edge` holds when the input crossed into the band between the previous step's value and this one, so a short band is never skipped. The instance keeps the previous value of every input an edge reads. | §3 edge | 5 |
 | P14 | **Migration by name.** `Rebind(instance, new_binding)` maps each new state column to the old column with the same name. It keeps the value if it is still valid (for a hash, still a member), and otherwise resets it to the initial value. Old columns that are gone are dropped. Then the current state is **entered again** (the `entry` trigger runs). | §6 hot reload | 6 |
@@ -91,7 +103,7 @@ Each row names the premises that must produce it. Its test uses only them.
 | **A failing condition holds the step.** | P15 + P9 | §5 |
 | **Transition tables.** A `step` table keyed on a state column, writing that column. | P6 + P7 + P9 | §6 |
 | **Entry tables.** An `entry` table keyed on the state that was entered. | P7 + P6 | §6 |
-| **Triggers** at creation, on entry, every step and when rows change. | P7 + P2 | Consequences |
+| **Triggers** at creation, on entry, every step and when rows change (a change re-runs `Prepare`, then `Rebind`). | P7 + P2 + P14 | Consequences |
 | **Tables run in DAG order, so a chain settles in one step.** | P11 + P9 (in-step reads see next) | Consequences |
 | **State functions restart on reload.** The binding is dropped, the host aborts what it started, and entering the state again starts it with the new code. | P14 + entry tables + P12 | §6 |
 | **Orthogonal regions.** Several machines on one object are several instances. | P8 | §6 |
@@ -116,17 +128,23 @@ machines:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}      # host wire: bit 0 set when food is in reach
       - {name: message, type: hash}         # 0 on a step with no message (ruling R3)
-    tables:
-      - {name: grazer_brain, on: step}
-      - {name: grazer_enter, on: entry}
+    step:
+      - from:  grazer_brain
+        where: {mode: state.mode, message: input.message}
+        given: {energy: input.energy, near: input.food_near}
+        set:   {mode: next}
+    entry:
+      - from:  grazer_enter
+        where: {mode: state.mode}
+        emit:  command
 
 tables:
   - name: grazer_brain
     read_only: true
     pick: best
     columns:
-      - {name: mode,    type: hash, key: true, state: mode}
-      - {name: message, type: hash, key: true, input: message}
+      - {name: mode,    type: hash, key: true}
+      - {name: message, type: hash, key: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -135,7 +153,7 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: mode, type: hash, key: true, state: mode}
+      - {name: mode, type: hash, key: true}
     suffix: command
 ```
 
