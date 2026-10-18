@@ -221,20 +221,27 @@ message", which is hash 0. That conflicts with the rule refusing hash 0 (ruling 
 
 ## 5. Slices
 
-Each slice is one branch: implementer, reviewer, fixes, nearby tests, then the owner's merge.
+All slices run on one branch, `tabular-slice0`, one after another. Each is implemented,
+independently reviewed with §9, fixed and committed. The owner reviews the whole branch at
+the end (owner, 2026-10-18), and every ruling in §7 is accepted, so no slice is blocked.
 
+0. **Premise repairs** (§10). Done on the branch.
 1. **Relations completions:** P1–P5. These need no machine.
-2. **Machines:** P6–P10. YAML `machines:`, plus `Bind`, `CreateInstance` and `Step` with no
-   sinks. The worked example's brain, without the entry table's commands.
-3. **DAG:** P11 and the two-writer rule (R4).
-4. **Effects:** P12, P15, and messages as step inputs (R3).
+2. **Key domains:** every best table's key declares its domain (members, a relation's column,
+   or `rows`). Totality is checked over the domain, orphans are reported, and mutable best
+   tables are checked on insert and retract. The built per-run checks become one cell layout
+   (the P10 layout), which `Load`, `Insert`/`Retract` and later `Prepare` all use.
+3. **Machines:** P6–P11. `create_machine`, YAML `machines:`, `Prepare` (proof by layout over
+   key domains, including clause outputs), `CreateInstance`, `Step` with the next vector and
+   holds, `host_binding.resolve`. The worked example's brain.
+4. **Effects:** P12, P15, messages as step inputs (R3), and the `exit` trigger (R6).
 5. **Edges:** P13.
-6. **Reload:** P14, the state-function contract (R6), and bridges (R5).
-7. **Evidence:** P16, P17, and the compiled step (R8) with parity tests against the
-   interpreted step, which is the prior version.
-
-Slice 0 (§10) runs first; its B and E wait on R10. Slices 1, 2 and 5 need no rulings. Slice 3 waits on R4, slice 4 on R3, slice 6 on R5 and R6,
-and slice 7's compiled path on R8.
+6. **Reload:** P14. Bridges and state functions are tested as consequences (R5(b), R6).
+7. **Evidence:** P16, P17. The compiled step is `Prepare`'s layout. Parity tests run `Step`
+   against the interpreted picks, which are the prior version. Compiling to machine code is
+   struck if the budgets are met (R8).
+8. **Checklist closure:** move host-adapter items (§8) and the rulings' outcomes into the
+   checklist and `definition.md`. Land this spec with an As-built section.
 
 ## 6. Interfaces (sketch; slice plans fix the details)
 
@@ -345,7 +352,9 @@ Applied with `review-agentic-systems`. For every check, refusal, branch or mode 
 ## 10. Premise repairs found in the built code
 
 Reviewed at Tabular `cf9162b` (2026-10-18), with `review-agentic-systems` plus §9. These are
-**slice 0**, which runs before slice 1. Findings A, B, D and E were re-read against the code.
+**slice 0**, built on `tabular-slice0` (Tabular `1f41590`, `02d3721`) together with the
+version-totality and owner-overlap rulings. Two more reviews ran on it, and the full suite
+passes (6698 passed, 3 skipped). Findings A, B, D and E were re-read against the code.
 Each fix lands with the regression test named.
 
 **Emergence defects: a feature built directly, so a premise stayed wrong.**
