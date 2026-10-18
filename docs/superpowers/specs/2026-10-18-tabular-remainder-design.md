@@ -57,6 +57,15 @@ owner with my recommendation. Merges still need the owner's approval.
   equal flags shadow each other. Each cell stores its rows grouped by flag set, and `Step`
   ranks those groups against the input flags.
 
+- **A published version is total** (slice 0 review). A load that brings rows checks every key
+  run in the version it would publish, not only the runs it touches or left; the special
+  "runs the owner left" path goes. A bare `Retract` stays unchecked, so crash recovery never
+  fails. This replaces R11's narrower check and makes `Retract` + `Load` agree with one `Load`.
+- **Two owners' rows with equal flags may not overlap in one key run.** Two contributors
+  claiming the same inputs is refused, naming both owners and lines. Within one owner, an
+  overlap is still priority by row order. Ties then never depend on load history, so reloading
+  identical rows is idempotent.
+
 ## 1. The method: premises and consequences
 
 For each open item, ask whether `definition.md` already implies it from other features. If
