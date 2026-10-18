@@ -80,6 +80,23 @@ owner with my recommendation. Merges still need the owner's approval.
   domain". Mutable tables get totality on insert and retract the same way, since the
   display tables are where "always picks a row" matters most.
 
+  Applied in slice 2 (coordinator, from the slice 2 review; the owner may overrule at code
+  review):
+  - **`rows` columns name sub-tuples, not a product.** The key columns declared `rows` together
+    contribute the joint sub-tuples the rows name; every other key column contributes its
+    declared domain, and the key's domain is their cross product. All-`rows` is exactly the
+    runs present. A product of per-column `rows` values would close one column's domain from
+    another's values, which is inference no source declared.
+  - **A stranded dependent blocks its source.** A change that brings rows proves every table
+    whose domain it feeds. So a dependent left not total by a bare retract refuses every
+    change to its source that brings rows until it is made total again. The refusal says the
+    dependent is not total; it does not blame the source change.
+  - **The report is the state, not a delta:** every orphan, and after a bare retract every
+    not-total run, of each table the change touched and of their dependents.
+  - **Slice 3:** a dependent's generation does not move when its domain changes (its rows and
+    picks do not). `Prepare` proves over the domain, so a prepared machine must watch the
+    generation of every table its domains read, not only the tables it picks from.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
