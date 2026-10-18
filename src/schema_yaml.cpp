@@ -26,6 +26,15 @@ struct column_yaml
 	int32_t     type = -1;
 	bool        key  = false;
 	std::string input;
+	bool        domain = false;   // never written: the domain is read from its node (see ReadDomain)
+};
+
+// The mapping form of a column's domain: members, or another table's column.
+struct domain_yaml
+{
+	std::vector<std::string> members;
+	std::string              table;
+	std::string              column;
 };
 
 struct input_yaml
@@ -93,8 +102,21 @@ YamlField const kColumnFields[] = {
 	{"type", FieldType::Enum,   offsetof(column_yaml, type), true, 0, nullptr, nullptr, &kTypes},
 	{"key",  FieldType::Bool,   offsetof(column_yaml, key)},
 	{"input", FieldType::String, offsetof(column_yaml, input)},
+	// A domain is the scalar `rows` or a mapping, and the walker has no field
+	// of two kinds. A nested field with no child set accepts either and reads
+	// nothing; ReadDomain reads the node itself.
+	{"domain", FieldType::Nested, offsetof(column_yaml, domain)},
 };
 YamlSet const kColumnSet{kColumnFields, nullptr, "column"};
+
+YamlField const kDomainMember{"", FieldType::String, 0};
+YamlField const kDomainFields[] = {
+	{"members", FieldType::Sequence, offsetof(domain_yaml, members), false,
+	 0, nullptr, &kDomainMember, nullptr, MakeContainer<std::vector<std::string>>()},
+	{"table",   FieldType::String,   offsetof(domain_yaml, table)},
+	{"column",  FieldType::String,   offsetof(domain_yaml, column)},
+};
+YamlSet const kDomainSet{kDomainFields, nullptr, "domain"};
 
 YamlField const kInputFields[] = {
 	{"name", FieldType::String, offsetof(input_yaml, name), true},
@@ -153,6 +175,75 @@ YamlField const kDocumentFields[] = {
 };
 YamlSet const kDocumentSet{kDocumentFields, nullptr, "table definitions"};
 
+// A column's `domain:` as the builder takes it. Hash members are hashed as a
+// CSV cell is, so a member names the same key a row's cell does; the builder
+// refuses members on any key but a hash or an int, so another type's members
+// are passed uninterpreted and never read.
+tl::expected<key_domain, ErrorContext> ReadDomain(LF::Yaml::Node const& node, column_yaml const& column,
+	domain_yaml& mapped, std::vector<cell>& members)
+{
+	char const* const kShapes = "; a domain is rows, {members: [..]} or {table: T, column: C}";
+	if (node.is_scalar())
+	{
+		if (node.as_scalar().value != "rows")
+		{
+			return tl::make_unexpected(ErrorContext("column '", column.name, "' has domain '", node.as_scalar().value,
+				"'", kShapes));
+		}
+		return key_domain::Rows();
+	}
+	if (!node.is_mapping())
+	{
+		return tl::make_unexpected(ErrorContext("column '", column.name, "' has a ", node.kind_name(), " for a domain",
+			kShapes));
+	}
+	TreeErrorContext errors;
+	LF::Yaml::ReadSet(&mapped, node, kDomainSet, errors);
+	if (errors.has_errors())
+	{
+		return tl::make_unexpected(ErrorContext(errors.format()).with("the domain of column '", column.name, "'"));
+	}
+	bool const listed  = node.get("members") != nullptr;
+	bool const foreign = node.get("table") != nullptr || node.get("column") != nullptr;
+	if (listed == foreign)
+	{
+		return tl::make_unexpected(ErrorContext("the domain of column '", column.name,
+			"' names members or a table's column, one of the two", kShapes));
+	}
+	if (foreign)
+	{
+		if (node.get("table") == nullptr || node.get("column") == nullptr)
+		{
+			return tl::make_unexpected(ErrorContext("the domain of column '", column.name,
+				"' names a table and its column, both"));
+		}
+		return key_domain{domain_kind::Column, {}, mapped.table, mapped.column};
+	}
+	auto const type = static_cast<column_type>(column.type);
+	if (type != column_type::Hash && type != column_type::Int)
+	{
+		members.assign(mapped.members.size(), cell::Integer(0));
+		return key_domain{domain_kind::Members, members, {}, {}};
+	}
+	column_def const   asColumn{column.name, type};
+	detail::hash_names names;
+	auto const&        items = node.get("members")->as_sequence().items;
+	for (size_t m = 0; m < mapped.members.size(); ++m)
+	{
+		// The walker skips a null item, so the nodes line up with the texts only
+		// when none was skipped.
+		uint32_t const line = items.size() == mapped.members.size() ? static_cast<uint32_t>(items[m]->mark.line) : 0;
+		auto value = detail::ReadCell(asColumn, mapped.members[m], names, line);
+		if (!value)
+		{
+			return tl::make_unexpected(std::move(value.error()).with("member ", m, " of the domain of column '",
+				column.name, "'"));
+		}
+		members.push_back(*value);
+	}
+	return key_domain{domain_kind::Members, members, {}, {}};
+}
+
 }
 
 tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::string_view label)
@@ -180,6 +271,9 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 	std::vector<order_by>                orders(document.tables.size());
 	std::vector<pivot_by>                pivots(document.tables.size());
 	std::vector<grid_shape>              grids(document.tables.size());
+	// Sized before any view into them is taken, so none moves.
+	std::vector<std::vector<domain_yaml>>       domainTexts(document.tables.size());
+	std::vector<std::vector<std::vector<cell>>> domainMembers(document.tables.size());
 	std::vector<create_table>            commands;
 	commands.reserve(document.tables.size());
 	for (size_t t = 0; t < document.tables.size(); ++t)
@@ -227,10 +321,23 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 		// Presence, not emptiness: `input: ""` is a mistake, not "no input".
 		LF::Yaml::Node const* tableNode   = tableNodes->as_sequence().items[t].get();
 		LF::Yaml::Node const* columnNodes = tableNode->get("columns");
+		domainTexts[t].resize(in.columns.size());
+		domainMembers[t].resize(in.columns.size());
 		for (uint32_t ci = 0; ci < in.columns.size(); ++ci)
 		{
 			column_yaml const& c     = in.columns[ci];
 			uint32_t           input = UINT32_MAX;
+			key_domain         domain;
+			if (LF::Yaml::Node const* domainNode = columnNodes->as_sequence().items[ci]->get("domain"))
+			{
+				auto read = ReadDomain(*domainNode, c, domainTexts[t][ci], domainMembers[t][ci]);
+				if (!read)
+				{
+					return tl::make_unexpected(std::move(read.error()).with("table '", in.name, "'")
+						.with(std::string(label)));
+				}
+				domain = *read;
+			}
 			if (columnNodes->as_sequence().items[ci]->get("input") != nullptr)
 			{
 				input = inputOf(c.input);
@@ -240,7 +347,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 						"' reads input '", c.input, "', which the table does not declare").with(std::string(label)));
 				}
 			}
-			columns[t].push_back(add_column{c.name, static_cast<column_type>(c.type), c.key, input});
+			columns[t].push_back(add_column{c.name, static_cast<column_type>(c.type), c.key, input, domain});
 		}
 		uint32_t output = UINT32_MAX;
 		if (tableNode->get("output") != nullptr)

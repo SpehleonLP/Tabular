@@ -213,7 +213,7 @@ tables:
   - name: plain
     pick: best
     columns:
-      - {name: kind, type: int, key: true}
+      - {name: kind, type: int, key: true, domain: rows}
     order_by: {columns: [kind]}
 )";
 	relation_store plain = StoreFrom(bestSchema);
@@ -503,7 +503,7 @@ tables:
     pick: best
     weight: w
     columns:
-      - {name: kind, type: int, key: true}
+      - {name: kind, type: int, key: true, domain: rows}
       - {name: w, type: double}
     order_by: {columns: [kind]}
 )");

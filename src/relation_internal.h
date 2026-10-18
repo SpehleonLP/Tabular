@@ -79,8 +79,9 @@ struct table_rows : slot_layout
 	std::vector<std::string> commands;   // Command columns, row-major
 	std::vector<counted_string> strings; // String columns, row-major, interned
 	std::vector<uint64_t>    owners;     // one per row
-	// Read-only versions only: a row's index within its owner's load, so a
-	// reload orders the rows it keeps against the rows it brings by (owner, index).
+	// Versions only: a row's index within its owner's load (or, in a mutable
+	// best table, among the owner's inserts), so a change orders the rows it
+	// keeps against the rows it brings by (owner, index).
 	std::vector<uint32_t>    ownerRows;
 	uint64_t                 generation = 0;
 
@@ -150,12 +151,55 @@ struct GridVersion::Data
 	std::vector<counted_string>               strings;      // String or Command grid
 };
 
+namespace detail
+{
+struct key_domains;
+}
+
+// Rows a change brings to one versioned table, laid out as load_rows lays
+// them, with their conditions already held.
+struct incoming_rows
+{
+	uint64_t                                owner = 0;
+	size_t                                  count = 0;
+	std::span<cell const>                   values;
+	std::span<std::string_view const>       commands;
+	std::span<detail::held_condition const> conditions;
+	std::span<string_in const>              strings;
+	// Insert: the owner's rows stay, and these follow them in the owner's
+	// order. Load: these replace the owner's rows.
+	bool                                    keepOwner = false;
+};
+
 struct relation_store::Storage
 {
 	schema                  definition;
-	std::vector<table_rows> tables;     // a read-only table's stays empty
-	std::vector<counted_ptr<TableVersion const>> versions;   // null for a writable table
+	std::vector<table_rows> tables;     // a versioned table's stays empty
+	// A read-only table's, a mutable best table's, or a mutable table's that
+	// some best table's domain comes from; null for any other table.
+	std::vector<counted_ptr<TableVersion const>> versions;
 	std::vector<counted_ptr<GridVersion const>> grids;      // null for a table that is not a grid
+	// Per table: the best tables whose key domain reads one of its columns.
+	std::vector<std::vector<uint32_t>> dependents;
+
+	// relation.cpp. The rows table holds, or candidate when table is the one
+	// being changed: a domain reads the version a change would publish.
+	table_rows const& RowsDuring(uint32_t table, uint32_t changed, table_rows const* candidate) const;
+	void DomainOf(uint32_t table, table_rows const& rows, uint32_t changed, table_rows const* candidate,
+		detail::key_domains& out) const;
+	// Every best table whose domain comes from changed, checked against the
+	// domain candidate gives it; orphans appended to report. change names the
+	// change in a refusal.
+	tl::expected<void, ErrorContext> CheckDependents(uint32_t changed, table_rows const& candidate,
+		std::vector<run_note>* report, char const* change) const;
+	// The tables marked in touched, and every best table depending on one,
+	// surveyed in table order (a change that is never refused).
+	void Survey(std::vector<uint8_t> const& touched, std::vector<run_note>& report) const;
+	// A versioned table's next version: the current one with in's rows merged
+	// in by order, owner and index, checked when in brings rows, then put in
+	// place. False when nothing changed.
+	tl::expected<bool, ErrorContext> Publish(uint32_t table, incoming_rows const& in, load_refusal* refusal,
+		std::vector<run_note>* report, char const* noun, char const* change);
 
 	static counted_ptr<GridVersion const> NewGrid(GridVersion::Data&& data)
 	{

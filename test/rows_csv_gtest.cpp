@@ -468,7 +468,7 @@ tables:
     inputs:
       - {name: energy, type: double, range: 0..1}
     columns:
-      - {name: stimulus, type: hash, key: true}
+      - {name: stimulus, type: hash, key: true, domain: rows}
       - {name: energy, type: band, input: energy}
       - {name: reaction, type: string}
     order_by: {columns: [stimulus]}
@@ -496,7 +496,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: string}
     order_by: {columns: [label]}
@@ -515,4 +515,35 @@ tables:
 		EXPECT_FALSE(Mentions(error, std::string("two.csv:") + digit)) << "no loaded row is at fault: " << error;
 	}
 	EXPECT_TRUE(Mentions(error, "owner 3's row with key (1), flags 1")) << error;
+}
+
+TEST(RowsCsv, ALoadFillsTheReportWithItsOrphans)
+{
+	auto s = SchemaFromYaml(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    columns:
+      - {name: label, type: int, key: true, domain: {members: [1]}}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)", "lookup.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store        store(std::move(*s));
+	std::vector<run_note> report;
+	csv_rows rows{0, 1, "label,clip\n1,10\n2,20\n", "lookup.csv"};
+	rows.report = &report;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	ASSERT_EQ(report.size(), 1u);
+	EXPECT_EQ(report[0].status, run_status::Orphan);
+	ASSERT_EQ(report[0].key.size(), 1u);
+	EXPECT_EQ(report[0].key[0].i, 2);
+
+	report.push_back(run_note{});
+	csv_rows bad{0, 1, "label,clip\n1,x\n", "lookup.csv"};
+	bad.report = &report;
+	EXPECT_FALSE(LoadCsv(store, bad).has_value());
+	EXPECT_TRUE(report.empty()) << "a refused load, refused before the store sees it, leaves the report empty too";
 }

@@ -47,7 +47,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: int}
     order_by: {columns: [label]}
@@ -93,7 +93,7 @@ tables:
     inputs:
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: window, type: band, input: t}
       - {name: when, type: condition}
       - {name: clip, type: int}
@@ -555,8 +555,8 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: a, type: int, key: true}
-      - {name: b, type: int, key: true}
+      - {name: a, type: int, key: true, domain: rows}
+      - {name: b, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: int}
     order_by: {columns: [a, b, req]}
@@ -620,8 +620,8 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: a, type: int, key: true}
-      - {name: b, type: int, key: true}
+      - {name: a, type: int, key: true, domain: rows}
+      - {name: b, type: int, key: true, domain: rows}
       - {name: clip, type: int}
     order_by: {columns: [b, a]}
 )", "two.yaml");
@@ -672,7 +672,7 @@ tables:
       - {name: mode, type: flags}
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: window, type: band, input: t}
       - {name: when, type: condition}
@@ -771,7 +771,7 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: when, type: condition}
       - {name: clip, type: int}
     order_by: {columns: [label]}
@@ -1019,7 +1019,7 @@ tables:
     inputs:
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: a, type: band, input: t}
       - {name: b, type: band, input: t}
       - {name: clip, type: int}
@@ -1071,7 +1071,7 @@ tables:
     inputs:
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: prio, type: int}
       - {name: window, type: band, input: t}
       - {name: clip, type: int}
@@ -1102,7 +1102,7 @@ tables:
       - {name: x, type: double, range: 0..1}
       - {name: y, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: bx, type: band, input: x}
       - {name: by, type: band, input: y}
       - {name: clip, type: int}

@@ -51,6 +51,7 @@ struct csv_rows
 	std::function<tl::expected<closure, ErrorContext>(std::string_view)> condition;
 	bool                      pivoted    = false;     // the table's pivot: keys, then flag headers
 	std::vector<std::string>* flag_names = nullptr;   // filled by a pivoted load: index = bit
+	std::vector<run_note>*    report     = nullptr;   // the load's report (see relation_store); empty on a refusal
 };
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command);

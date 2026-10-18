@@ -161,6 +161,12 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command)
 {
+	// A refusal leaves the report empty, and most refusals here come before
+	// the store sees the load.
+	if (command.report)
+	{
+		command.report->clear();
+	}
 	auto label = [&](uint32_t line) { return cc(std::string(), command.label, ":", line); };
 	auto defs  = store.definition().tables();
 	if (command.table >= defs.size())
@@ -311,7 +317,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	load_refusal refusal;
 	conditions.handedOver = true;   // Load adopts them, whatever it decides
 	auto loaded = store.Load(load_rows{command.table, command.owner, count, values, commands, &refusal,
-		conditions.list, strings});
+		conditions.list, strings, command.report});
 	if (!loaded)
 	{
 		return tl::make_unexpected(detail::LocateRefusal(std::move(loaded.error()), refusal, count, command.label,

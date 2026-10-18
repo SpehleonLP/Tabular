@@ -28,7 +28,7 @@ Sources, cited in brackets:
 - [x] Every row carries its owner; retract every row an owner has [def First version; arc §6.2; cat D1]
 - [x] Key columns are equality and indexed: candidates are a lookup, not a scan [def A row]
 - [x] A sorted order with prefix lookup, optionally unique; a unique clash is refused [def order 1]
-- [x] Two kinds of table, each refusing the other's writes: read-only and mutable [def Two kinds]
+- [x] Two kinds of table, each refusing the other's writes: read-only and mutable; a best table may be mutable, held as versions and checked on insert [def Two kinds]
 - [x] Read-only tables are immutable versions, replaced whole only after the new one checks out (RCU); a held version stays consistent [def Two kinds]
 - [x] Hash = `CityHash32` of the bytes as written, matching a script literal's `NameHash` [CONTEXT.md Hash; sr §3.1]
 - [x] Runs with no world, no threads, no script engine, no files [def What Tabular is]
@@ -69,8 +69,8 @@ Needed before machines: "a machine is a SELECT checked to always produce exactly
 
 Whatever the loader checks, an author can know by reading the table [def promise 2].
 
-- [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1; cat §2.6] (built per key run for best tables; key domains wait for machines, which close them)
-- [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables; partial overlaps are priority within one owner; between owners, equal-flag overlaps are refused)
+- [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1, Key domains; cat §2.6] (built for best tables, read-only and mutable: every key declares its domain (members, another table's column, or rows), every tuple of the domain has a total run, orphans are reported, a foreign domain re-checks its dependents when its table changes, and a bare retract reports instead of refusing; key domains closed by machine clauses wait for slice 3)
+- [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables, on load and on insert; a row in no list of the run layout; partial overlaps are priority within one owner; between owners, equal-flag overlaps are refused)
 - [ ] Within one step, tables that feed each other form a DAG; a cycle is refused, naming the tables [def promise 2; attach §4]
 - [ ] Two tables writing one state column refused [arc §2.6; attach §4; c3 §5.4]
 

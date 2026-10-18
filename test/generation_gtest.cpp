@@ -40,7 +40,7 @@ tables:
     inputs:
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: id, type: int, key: true}
+      - {name: id, type: int, key: true, domain: rows}
       - {name: window, type: band, input: t}
     order_by: {columns: [id]}
 )";

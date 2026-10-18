@@ -33,10 +33,20 @@ std::vector<add_column> Columns()
 uint32_t const kByLabel[] = {0};
 order_by const kOrder{kByLabel, false};
 
-tl::expected<schema, ErrorContext> Build(std::vector<add_column> const& columns,
+tl::expected<schema, ErrorContext> Build(std::vector<add_column> const& declared,
 	std::span<add_input const> inputs = kInputs, pick_policy pick = pick_policy::Best,
 	uint32_t output = UINT32_MAX, order_by const* order = &kOrder, bool read_only = true)
 {
+	// A best table's keys say their domain, and only a best table's may. These
+	// tests are about other rules, so a best table's keys range over its rows.
+	std::vector<add_column> columns = declared;
+	for (add_column& c : columns)
+	{
+		if (c.key && pick == pick_policy::Best)
+		{
+			c.domain = key_domain::Rows();
+		}
+	}
 	create_table const t{"lookup", columns, order, read_only, inputs, pick, output};
 	return BuildSchema(std::span<create_table const>(&t, 1));
 }
@@ -101,10 +111,15 @@ TEST(PickSchema, OneRankingColumnAndOneScriptCondition)
 	EXPECT_TRUE(Mentions(Refusal(Build(columns)), "one script condition")) << Refusal(Build(columns));
 }
 
-TEST(PickSchema, APickedTableIsReadOnlyAndOrderedByItsKeys)
+TEST(PickSchema, OnlyABestTableMayBeMutableAndAPickIsOrderedByItsKeys)
 {
-	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), kInputs, pick_policy::Best, UINT32_MAX, &kOrder, false)),
-		"read-only"));
+	// A best table may be mutable (the display relations, slice 2); the other
+	// picks stay read-only.
+	EXPECT_EQ(Refusal(Build(Columns(), kInputs, pick_policy::Best, UINT32_MAX, &kOrder, false)), "");
+	auto unranked = Columns();
+	unranked[1].input = UINT32_MAX;
+	EXPECT_TRUE(Mentions(Refusal(Build(unranked, kInputs, pick_policy::All, UINT32_MAX, &kOrder, false)),
+		"read-only")) << Refusal(Build(unranked, kInputs, pick_policy::All, UINT32_MAX, &kOrder, false));
 	uint32_t const byClip[] = {3};
 	order_by const clipOrder{byClip, false};
 	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), kInputs, pick_policy::Best, UINT32_MAX, &clipOrder)),

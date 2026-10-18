@@ -71,12 +71,41 @@ struct closure
 // builder copies what it keeps. Tables are numbered by their position in the
 // list given to BuildSchema.
 
+// Where a best table's key column takes its domain: the key values every
+// published version must be total over. Nothing is inferred, so a best
+// table's key that declares none is refused; a run whose key falls outside the
+// domain is an orphan, reported and never checked.
+enum class domain_kind : uint8_t
+{
+	None,      // not declared
+	Members,   // a literal list
+	Column,    // the distinct values another table's column holds in its current rows
+	Rows,      // the table's own rows: the keys over their rows together take the sub-tuples the rows name
+	// A machine clause's output closes a key the same way; it is a fourth kind.
+};
+
+struct key_domain
+{
+	domain_kind           kind = domain_kind::None;
+	std::span<cell const> members;   // Members: a hash key's as their CityHash32, an int key's as values
+	std::string_view      table;     // Column: the table, by name; it may come later in the list
+	std::string_view      column;    // Column: that table's column, by name
+
+	static key_domain Rows()
+	{
+		key_domain d;
+		d.kind = domain_kind::Rows;
+		return d;
+	}
+};
+
 struct add_column
 {
 	std::string_view name;
 	column_type      type = column_type::Int;
 	bool             key  = false;   // a secondary equality index
 	uint32_t         input = UINT32_MAX;   // Band or ranking Flags: index into create_table::inputs
+	key_domain       domain;               // a best table's key: required; any other column: refused
 };
 
 // What a pick is given: a named, typed slot a band or a ranking flags column
@@ -168,6 +197,16 @@ struct input_def
 	float       hi     = 0;
 };
 
+// A key column's domain, resolved: members sorted and distinct, a foreign
+// column as table and column numbers.
+struct domain_def
+{
+	domain_kind              kind   = domain_kind::None;
+	immutable_array<int64_t> members;
+	uint32_t                 table  = UINT32_MAX;
+	uint32_t                 column = UINT32_MAX;
+};
+
 struct table_def
 {
 	std::string                  name;
@@ -188,6 +227,7 @@ struct table_def
 	column_type                  grid_cells    = column_type::Int;
 	bool                         suffix        = false;   // the last column is the suffix command
 	uint32_t                     weight        = UINT32_MAX;
+	immutable_array<domain_def>  domains;                 // a best table: one per key column, in column order
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -228,6 +268,23 @@ struct string_in
 	std::string_view text;
 };
 
+// How a best table's key run stands after a change the store accepted. An
+// orphan's key is outside its table's domain, so nothing about it is checked;
+// a run that is not total is in the domain and some input picks no row from
+// it, which only a bare retract (or a load of no rows) is allowed to leave.
+enum class run_status : uint8_t
+{
+	Orphan,
+	NotTotal,
+};
+
+struct run_note
+{
+	uint32_t          table  = 0;
+	run_status        status = run_status::Orphan;
+	std::vector<cell> key;   // the run's key values, in key column order
+};
+
 struct insert_row
 {
 	uint32_t                          table = 0;
@@ -236,13 +293,15 @@ struct insert_row
 	std::span<closure const>          conditions;   // one per Condition column, in column order
 	std::span<std::string_view const> commands;     // one per Command column, in column order
 	std::span<string_in const>        strings;      // one per String column, in column order
+	std::vector<run_note>*            report = nullptr;   // if given, see relation_store
 };
 
 // Removes the owner's rows from every table, because one contributor (a
 // package, a file) usually owns rows in several.
 struct retract_owner
 {
-	uint64_t owner = 0;
+	uint64_t               owner  = 0;
+	std::vector<run_note>* report = nullptr;   // if given, see relation_store
 };
 
 // Which rows of a refused load were at fault, as indices into the load, so a
@@ -271,6 +330,7 @@ struct load_rows
 	load_refusal*                     refusal = nullptr;   // filled on a refusal, if given
 	std::span<closure const>          conditions; // count * Condition columns
 	std::span<string_in const>        strings;    // count * String columns
+	std::vector<run_note>*            report = nullptr;   // if given, see relation_store
 };
 
 // Which keys of a refused grid load clash, as indices into the load's key spans.
@@ -306,10 +366,11 @@ struct row_range
 struct version_access;
 class GridVersion;
 
-// One version of a read-only table. Load and Retract build a whole new
-// version, check it, and only then put it in place of the one before; a
-// version is never modified once built. Its row numbers are valid for as long
-// as it is held.
+// One version of a read-only table or of a mutable best table. Load, Insert
+// and Retract build a whole new version, check it, and only then put it in
+// place of the one before; a version is never modified once built. Its row
+// numbers are valid for as long as it is held, so a pick of a best table reads
+// one version whichever kind of table it is.
 class TableVersion
 {
 public:
@@ -346,11 +407,24 @@ private:
 // Live rows for every table of a schema.
 //
 // Rows keep their table's order, or insertion order without one; a retract
-// keeps the survivors' order. A read-only table's rows with equal order keys sit
-// by owner id, then by index within the owner's load, so a version does not
-// depend on which owner loaded last. Row indices are valid only until the next
-// Insert, Load or Retract, because each moves rows; a reader that must keep
-// its rows across them holds a read-only table's Version.
+// keeps the survivors' order. A versioned table (a read-only one, a mutable
+// best one, or a mutable one some best table's key domain comes from) keeps
+// rows with equal order keys by owner id, then by index within the owner's
+// load (or, mutable, the owner's inserts), so a version does not depend on
+// which owner wrote last. Row indices are valid only until the next Insert, Load or
+// Retract, because each moves rows; a reader that must keep its rows across
+// them holds the table's Version.
+//
+// A best table's published version is total over its key domain. A change
+// that brings rows (an Insert, a Load of one row or more) is refused unless the
+// version it would publish is total, has no dead row and no two owners' rows
+// with equal flags overlapping, and unless every best table whose domain comes
+// from the changed table stays so against its new domain. A bare Retract, or a
+// Load of no rows, is never refused. A command's report, when given, is
+// cleared and, if the change is accepted, filled with every orphan run of each
+// table the change touched and of their dependents, and after a bare retract
+// with every run of theirs that is not total too: their state, not what the
+// change altered. By table index, then key.
 //
 // One thread at a time: a Load or Retract replacing a version while another
 // thread takes it from Version is a race.
@@ -367,7 +441,7 @@ public:
 	schema const& definition() const;
 
 	// Adopts the row's closures whether or not it succeeds: a refused row's
-	// closures are released, so a caller never has to.
+	// closures are released, so a caller never has to. Mutable tables only.
 	tl::expected<void, ErrorContext> Insert(insert_row const& command);
 	void                             Retract(retract_owner const& command);
 	// Builds the table's next version, checks it, and only then puts it in
@@ -380,8 +454,9 @@ public:
 	// A grid's current version; refused for a table that is not a grid.
 	tl::expected<counted_ptr<GridVersion const>, ErrorContext> Grid(uint32_t table) const;
 
-	// The current version of a read-only table, for a reader that holds it
-	// across loads; refused for a writable table.
+	// The current version of a versioned table (a read-only table, a mutable
+	// best table, or a mutable table a best table's key domain comes from), for
+	// a reader that holds it across changes; refused for any other table.
 	tl::expected<counted_ptr<TableVersion const>, ErrorContext> Version(uint32_t table) const;
 
 	size_t   RowCount(uint32_t table) const;

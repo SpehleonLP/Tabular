@@ -258,7 +258,7 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 
 	load_refusal refusal;
 	auto loaded = store.Load(load_rows{command.table, command.owner, lineOf.size(), values, {}, &refusal, {},
-		strings});
+		strings, command.report});
 	if (!loaded)
 	{
 		return tl::make_unexpected(LocateRefusal(std::move(loaded.error()), refusal, lineOf.size(), command.label,

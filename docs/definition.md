@@ -43,16 +43,18 @@ the feature is wrong, not the rule.
    rows never stop matching. Over finite key domains, totality is checked when a definition
    is built. A table whose rows are guarded by opaque conditions must end in an unconditional
    row or an explicit hold.
-   Built for best tables (owner, 2026-10-18): a published version is total. A load that
-   brings rows checks every key run of the version it would publish, not only the runs it adds
-   rows to: the rows with no script condition (and, when the table ranks, no flags) cover every
-   value of the band inputs' declared ranges, and a row the rows tried before it always cover
-   is refused as dead. A run another owner's bare retract stranded therefore refuses the next
-   load that brings rows, and retract-then-load agrees with a one-step reload. A bare retract
-   is a load of no rows and is never checked, so crash recovery cannot fail. Two owners' rows
-   with equal flags may not overlap in one run (see Flag matching).
-   Hash key domains are closed by a machine, which relates its keys to each other, so a key
-   with no run is not checked until machines exist. An all or an or table may answer nothing.
+   Built for best tables (owner, 2026-10-18): a published version is total over its key
+   domain (see Key domains). A change that brings rows (a load of one row or more, or an insert
+   into a mutable best table) checks every key tuple in the domain of the version it would
+   publish, not only the runs it adds rows to: the rows with no script condition (and, when the
+   table ranks, no flags) cover every value of the band inputs' declared ranges, a tuple with no
+   run is refused, and a row the rows tried before it always cover is refused as dead. A run
+   another owner's bare retract stranded therefore refuses the next change that brings rows,
+   and retract-then-load agrees with a one-step reload. A bare retract (or a load of no rows)
+   is never checked, so crash recovery cannot fail; it reports what it leaves instead. Two
+   owners' rows with equal flags may not overlap in one run (see Flag matching).
+   A key closed by a machine clause's output waits for machines. An all or an or table may
+   answer nothing.
 2. **Decidability.** Rows are finite, there is no recursion, and within one step the tables
    that feed each other form a DAG. Whatever the loader checks about a table, an author can
    also know by reading it.
@@ -161,8 +163,8 @@ Pivot headers are distinct flag sets (two spellings of one set, such as `A|B` an
 refused by value), so rows tie only when their flags are equal, and **ties go to row order**,
 whichever front end loaded them. A row with `R != 0` and
 `R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and in
-every key run a load checks the `R == 0` rows with no script condition must cover every
-input: they are the clear default (see promise 1). Every table
+every key run of the domain a change checks the `R == 0` rows with no script condition must
+cover every input: they are the clear default (see promise 1). Every table
 needs a well-defined answer to "what happens if nothing matches".
 Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
 last, but its lookup grid has one None column, so no table it reads has two.
@@ -170,7 +172,7 @@ last, but its lookup grid has one None column, so no table it reads has two.
 **Equal flags never overlap between owners (owner, 2026-10-18).** In one key run, two rows
 from different owners with equal flags (every row of an unranked table has the same flags)
 whose boxes meet (every band input's intervals intersect; with no band inputs any two rows
-meet) are refused at load, naming both owners and describing a kept row by its key, flags and band values, scripted or not: that is two
+meet) are refused at load or insert, naming both owners and describing a kept row by its key, flags and band values, scripted or not: that is two
 contributors claiming the same inputs, which only an order among owners could decide. The check precedes the
 dead-row check. One owner's rows may overlap; their order within the owner's load is their priority.
 
@@ -179,7 +181,9 @@ idempotent: a version depends on which owners hold which rows, never on who load
 sort by the table's order columns, then by owner id, then by index within that owner's load.
 So rows with equal order keys sit grouped by ascending owner id, and an owner reloading the
 same rows leaves every row where it was; PickAll's order, a weighted run's cumulative order and
-the order rows are tried in all follow it.
+the order rows are tried in all follow it. In a versioned mutable table (a best one, or one a
+best table's key domain comes from) an insert takes the index after the owner's other rows, so an owner's rows keep its insertion order, and a retract
+followed by the same inserts gives the same version.
 
 **The None header (2026-10-18).** A pivoted best table's flag headers are read left to right.
 `None`, in any case, names the 0 value and is only the first header of a best table; spelled
@@ -192,7 +196,63 @@ through an input, and only a best table ranks:
 - a table with no pick that declares `inputs` (or a band or ranking column that would need
   one) is refused: it is written and never read;
 - an all or an or table with a ranking column (a flags column reading an input) is refused;
-- a picked table or a grid declared writable (`read_only: false`) is refused.
+- an all, or or weighted table, or a grid, declared writable (`read_only: false`) is refused.
+  A best table may be mutable (2026-10-18): the display relations are engine data that
+  contributors insert into and that a pick must always answer (R2). No case is known for a
+  mutable table of the other picks, and lifting the refusal later breaks no file.
+- a domain on a column that is not a key, or on a key of a table that is not best, is refused,
+  and a best table's key that declares none is refused (see Key domains).
+
+**Key domains (owner, 2026-10-18).** Every key column of a best table says where its domain
+comes from; nothing is inferred. The builder takes `add_column::domain` (`key_domain`), YAML
+the column's `domain:`:
+
+- `members` (`domain: {members: [idle, walk]}`): a literal list, on a hash key (texts, hashed
+  as a CSV cell is) or an int key (integers). A duplicate, an empty list, or members on any
+  other key type are refused.
+- a foreign column (`domain: {table: display, column: display}`): the distinct values that
+  column holds in the other table's current rows, read-only or mutable. A missing table or
+  column, or a column of another type than the key, is refused. Tables whose domains come from
+  other tables form a DAG; a cycle, a table naming itself included, is refused naming it.
+- `rows` (`domain: rows`): the key's own table's rows name its values.
+- A machine clause's output is the fourth kind, built with machines.
+
+A key's domain is a set of key tuples. The key columns declared `rows` together contribute
+the distinct joint sub-tuples the table's rows hold in them, never a product of each column's
+values, which would close one column's domain from another's values; every other key column
+contributes its declared domain (its members, or the foreign column's values). The domain is
+the cross product of the `rows` sub-tuples with the other columns' domains. So a key all of
+whose columns are `rows` is exactly the runs present: no tuple is missing and no run is an
+orphan. With `a` over its rows and `b` with members 1 and 2, every `a` the rows name demands a
+run for (a, 1) and (a, 2). A run whose key tuple is outside the domain is an **orphan**: it is
+not checked, never refused, and reported, so a retract needs no refuse or cascade rule.
+When a table changes, every best table whose domain comes from it is checked again against
+the domain the change would leave, and a change that would leave one of them not total (or
+with a dead row or an overlap in a run that just entered the domain) is refused, naming the
+dependent table and key and the change that found it; a bare retract is not, and reports
+instead. So a display is added by inserting its default owner row first (an orphan, allowed),
+then the display row. A change that brings rows proves the whole version, including the
+tables whose domain it feeds, so a dependent left not total by a bare retract refuses every
+change to its domain's source that brings rows, until it is made total again; the refusal
+says the dependent is not total, since its gap may be older than the change. A mutable table
+some best table's domain comes from is versioned like a mutable best table, so a refused
+insert into it is a version never published, as every refused change is.
+
+**The layout is the proof (2026-10-18).** The checks read one layout of each key run: its rows
+grouped by flag set, each group's band inputs cut at every band edge of the group and at the
+ranges' ends, and per cell the group's rows whose bands contain it, in try order (owner, then
+index), ending at the first row with no script. Totality is "every list of the default group
+(flags 0) ends in a row with no script"; a dead row is "a row in no list of its group". The
+lists are flat arrays and offsets, the form a machine's `Prepare` keeps as its compiled pick.
+
+**The report.** `load_rows`, `insert_row`, `retract_owner` and `csv_rows` take an optional
+`std::vector<run_note>* report`. It is cleared, and if the change is accepted filled with
+every orphan run of each table the change touched and of their dependents, and after a bare
+retract (or a load of no rows) every in-domain run of those tables that is not total too. It
+is the state of those tables, not a delta: an orphan the change did not make is listed again.
+Notes are ordered by table index, then key, whichever change made them. A refused change
+leaves it empty: the refusal says why. One list of one note type (table, status, key) is all
+a caller needs to find what to fix or retract; there is no callback.
 
 **Picking (owner, 2026-10-12).**
 
@@ -368,11 +428,12 @@ changed through the table's generation counter (see Generation).
    each table has `name`, `columns` (`{name, type, key, input}`, type one of hash, flags, int,
    double, condition, command, vec2, string, band), an optional `order_by: {columns: [names],
    unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range}`),
-   `pick` (none, best, all, or, weighted), `output` (an or table's flags column), `weight` (a
+   `pick` (none, best, all, or, weighted), a key column's `domain` (see Key domains),
+   `output` (an or table's flags column), `weight` (a
    weighted table's double column), `suffix` (the name of a trailing command column, see Suffix)
    and `pivot: {headers, cells}`. A grid is `grid: {rows, columns, cells}` instead of columns. A grid and a picked
-   table are always read-only: the key may be left out (it is read as `true`), and
-   `read_only: false` on either is refused. The builder takes `read_only` explicitly. Any diagnostic fails the definition, an unknown key included, because a
+   table are read-only when the key is left out (it is read as `true`); `read_only: false` is
+   refused on either, except on a best table, which may be mutable. The builder takes `read_only` explicitly. Any diagnostic fails the definition, an unknown key included, because a
    misspelled `unique` silently ignored is a table that is not unique.
 3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
    table. The header names the columns in any order, every non-condition column exactly once.
@@ -406,7 +467,11 @@ changed through the table's generation counter (see Generation).
 - **Mutable tables** are engine data that script expressions and s-expressions add to:
   who owns the main screen's state, programmable gambits, spawn tables. They are never loaded
   from CSV. No case is known for a table that is both loaded from CSV and mutated, so each
-  kind refuses the other's writes.
+  kind refuses the other's writes. A mutable best table is held as versions too, so a pick
+  holds one while contributors insert: an insert is the owner's rows so far plus the new one,
+  merged and checked exactly as a load is (2026-10-18). So is a mutable table some best
+  table's key domain comes from, so a refused insert into it is never published rather than
+  undone. A retract stays unchecked.
 
 **A machine is a SELECT** over read-only tables, checked to always produce exactly one row,
 then compiled to run fast (possibly to machine code; undecided). Immutability is what makes

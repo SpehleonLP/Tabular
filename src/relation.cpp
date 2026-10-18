@@ -1,13 +1,13 @@
 #include "tabular/relation.h"
 
-#include "coverage.h"
+#include "float_text.h"
 #include "relation_internal.h"
+#include "version_checks.h"
 
 #include "Support/strings.h"
 
 #include <algorithm>
 #include <atomic>
-#include <charconv>
 #include <cmath>
 #include <iterator>
 #include <unordered_map>
@@ -18,21 +18,6 @@ namespace tabular
 
 namespace
 {
-
-// cc refuses floats; messages spell them the shortest way that reads back.
-std::string FloatText(float v)
-{
-	char buffer[32];
-	auto r = std::to_chars(buffer, buffer + sizeof buffer, v);
-	return std::string(buffer, r.ptr);
-}
-
-std::string DoubleText(double v)
-{
-	char buffer[32];
-	auto r = std::to_chars(buffer, buffer + sizeof buffer, v);
-	return std::string(buffer, r.ptr);
-}
 
 char const* TypeName(column_type type)
 {
@@ -293,9 +278,14 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 			" table, and its flags column '", out.columns[out.ranking].name,
 			"' ranks by an input; only a best table ranks"));
 	}
-	if (!out.read_only)
+	// A best table may be mutable: the display relations are engine data that
+	// contributors insert into and that a pick must always answer (R2). The
+	// other picks keep the narrower rule; no case for a mutable one is known,
+	// and lifting it later breaks no file.
+	if (!out.read_only && c.pick != pick_policy::Best)
 	{
-		return tl::make_unexpected(ErrorContext("table '", c.name, "' is picked, and a picked table is read-only"));
+		return tl::make_unexpected(ErrorContext("table '", c.name,
+			"' is picked, and only a best table may be mutable; an all, or or weighted table is read-only"));
 	}
 	// Totality covers a best table's band inputs, so each needs a finite domain.
 	if (c.pick == pick_policy::Best)
@@ -533,6 +523,178 @@ tl::expected<uint32_t, ErrorContext> schema::FindColumn(uint32_t table, std::str
 	return tl::make_unexpected(ErrorContext("table '", _tables[table].name, "' has no column '", name, "'"));
 }
 
+namespace
+{
+
+// A best table's key domains, resolved against every table of the schema: a
+// foreign column may name a table later in the list. Only a best table's keys
+// have one, and every one of them must say which: nothing is inferred, and a
+// declaration nothing reads is refused like any other.
+tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_table const& c, table_def const& def,
+	std::span<table_def const> all)
+{
+	std::vector<domain_def> out;
+	for (uint32_t i = 0; i < c.columns.size(); ++i)
+	{
+		add_column const& in     = c.columns[i];
+		key_domain const& domain = in.domain;
+		if (domain.kind != domain_kind::None && !in.key)
+		{
+			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name,
+				"' declares a domain, and only a key has one"));
+		}
+		if (!in.key || def.pick != pick_policy::Best)
+		{
+			if (domain.kind != domain_kind::None)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
+					"' declares a domain, and only a best table's keys are checked over one"));
+			}
+			continue;
+		}
+		domain_def resolved{domain.kind};
+		switch (domain.kind)
+		{
+		case domain_kind::None:
+			return tl::make_unexpected(ErrorContext("key '", in.name, "' of best table '", c.name,
+				"' declares no domain; a key's domain is its members, another table's column, or its rows"));
+		case domain_kind::Members:
+		{
+			if (in.type != column_type::Hash && in.type != column_type::Int)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' is a ",
+					TypeName(in.type), "; only a hash or an int key lists its members"));
+			}
+			if (domain.members.empty())
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' lists no members"));
+			}
+			std::vector<int64_t> members;
+			for (cell const& m : domain.members)
+			{
+				auto fits = Check32(def.columns[i], def, m.i);
+				if (!fits)
+				{
+					return tl::make_unexpected(std::move(fits.error()));
+				}
+				members.push_back(m.i);
+			}
+			std::sort(members.begin(), members.end());
+			auto twice = std::adjacent_find(members.begin(), members.end());
+			if (twice != members.end())
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' lists member ",
+					*twice, " twice"));
+			}
+			resolved.members = immutable_array<int64_t>::FromArray(members.data(), members.size());
+			break;
+		}
+		case domain_kind::Column:
+		{
+			for (uint32_t t = 0; t < all.size() && resolved.table == UINT32_MAX; ++t)
+			{
+				if (all[t].name == domain.table)
+				{
+					resolved.table = t;
+				}
+			}
+			if (resolved.table == UINT32_MAX)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
+					"' takes its domain from table '", domain.table, "', which the schema does not have"));
+			}
+			table_def const& source = all[resolved.table];
+			for (uint32_t col = 0; col < source.columns.size() && resolved.column == UINT32_MAX; ++col)
+			{
+				if (source.columns[col].name == domain.column)
+				{
+					resolved.column = col;
+				}
+			}
+			if (resolved.column == UINT32_MAX)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
+					"' takes its domain from column '", domain.column, "' of table '", source.name,
+					"', which has no such column"));
+			}
+			column_type const sourceType = source.columns[resolved.column].type;
+			if (sourceType != in.type)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' is a ",
+					TypeName(in.type), ", and the column '", domain.column, "' of table '", source.name,
+					"' its domain comes from is a ", TypeName(sourceType)));
+			}
+			break;
+		}
+		case domain_kind::Rows:
+			break;
+		}
+		out.push_back(std::move(resolved));
+	}
+	return immutable_array<domain_def>(shared_array<domain_def>::FromArray(out.data(), out.size()));
+}
+
+// Tables whose key domains come from other tables form a DAG, so a table's
+// domain is decided by tables whose own domains never wait on it: a change
+// re-checks its dependents one step deep, and a machine's proof has an order
+// to read domains in.
+tl::expected<void, ErrorContext> CheckDomainCycles(std::span<table_def const> tables)
+{
+	enum : uint8_t { Unseen, Open, Done };
+	std::vector<uint8_t>  state(tables.size(), Unseen);
+	std::vector<uint32_t> path;
+	// Depth first; a table met again while still open closes a cycle.
+	auto visit = [&](auto& self, uint32_t t) -> tl::expected<void, ErrorContext>
+	{
+		state[t] = Open;
+		path.push_back(t);
+		for (domain_def const& d : tables[t].domains)
+		{
+			if (d.kind != domain_kind::Column)
+			{
+				continue;
+			}
+			if (state[d.table] == Open)
+			{
+				std::string cycle;
+				auto from = std::find(path.begin(), path.end(), d.table);
+				for (auto it = from; it != path.end(); ++it)
+				{
+					cycle = cc(cycle, "'", tables[*it].name, "' -> ");
+				}
+				cycle = cc(cycle, "'", tables[d.table].name, "'");
+				return tl::make_unexpected(ErrorContext("key domains form a cycle: ", cycle,
+					"; a key over its own table's rows says rows"));
+			}
+			if (state[d.table] == Unseen)
+			{
+				auto ok = self(self, d.table);
+				if (!ok)
+				{
+					return ok;
+				}
+			}
+		}
+		path.pop_back();
+		state[t] = Done;
+		return {};
+	};
+	for (uint32_t t = 0; t < tables.size(); ++t)
+	{
+		if (state[t] == Unseen)
+		{
+			auto ok = visit(visit, t);
+			if (!ok)
+			{
+				return ok;
+			}
+		}
+	}
+	return {};
+}
+
+}
+
 tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables)
 {
 	shared_array<table_def> out(tables.size());
@@ -544,6 +706,21 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tab
 			return tl::make_unexpected(ErrorContext("table ", t, ": ", built.error().message));
 		}
 		out[t] = std::move(*built);
+	}
+	// After every table is built, since a domain may name a later one.
+	for (uint32_t t = 0; t < tables.size(); ++t)
+	{
+		auto domains = BuildDomains(tables[t], out[t], std::span<table_def const>(out.begin(), out.size()));
+		if (!domains)
+		{
+			return tl::make_unexpected(ErrorContext("table ", t, ": ", domains.error().message));
+		}
+		out[t].domains = std::move(*domains);
+	}
+	auto acyclic = CheckDomainCycles(std::span<table_def const>(out.begin(), out.size()));
+	if (!acyclic)
+	{
+		return tl::make_unexpected(std::move(acyclic.error()));
 	}
 	return schema(immutable_array<table_def>(std::move(out)));
 }
@@ -558,20 +735,11 @@ namespace
 
 using detail::held_condition;
 using detail::Hold;
-using detail::ReleaseClosure;
 
 bool IsValueColumn(column_type type)
 {
 	return type != column_type::Condition && type != column_type::Command && type != column_type::String
 		&& type != column_type::Band;
-}
-
-void ReleaseAll(std::span<closure const> closures)
-{
-	for (closure const& c : closures)
-	{
-		ReleaseClosure(c);
-	}
 }
 
 // A null function is "no script condition"; with data or a release it is a
@@ -675,9 +843,25 @@ relation_store::relation_store(schema&& definition)
 	_storage->tables.reserve(defs.size());
 	_storage->versions.resize(defs.size());
 	_storage->grids.resize(defs.size());
+	_storage->dependents.resize(defs.size());
 	for (size_t t = 0; t < defs.size(); ++t)
 	{
 		_storage->tables.emplace_back(defs[t]);
+	}
+	for (size_t t = 0; t < defs.size(); ++t)
+	{
+		for (domain_def const& d : defs[t].domains)
+		{
+			if (d.kind != domain_kind::Column)
+			{
+				continue;
+			}
+			auto& list = _storage->dependents[d.table];
+			if (std::find(list.begin(), list.end(), t) == list.end())
+			{
+				list.push_back(static_cast<uint32_t>(t));
+			}
+		}
 	}
 	for (size_t t = 0; t < defs.size(); ++t)
 	{
@@ -685,7 +869,13 @@ relation_store::relation_store(schema&& definition)
 		{
 			_storage->grids[t] = Storage::NewGrid(GridVersion::Data{defs[t]});
 		}
-		else if (defs[t].read_only)
+		// A mutable best table is versioned too, so a pick holds one version of
+		// it while contributors insert, and its insert is checked like a load.
+		// So is a mutable table some best table's domain comes from: an insert
+		// into it is refused when a dependent would not stay total, and only a
+		// version built beside the current one is refused without undoing
+		// anything.
+		else if (defs[t].read_only || defs[t].pick == pick_policy::Best || !_storage->dependents[t].empty())
 		{
 			_storage->versions[t] = Storage::NewVersion(defs[t], table_rows(defs[t]));
 		}
@@ -731,73 +921,153 @@ uint64_t relation_store::Generation(uint32_t table) const
 	return _storage->RowsOf(table).generation;
 }
 
+namespace
+{
+
+// What one row must be, whichever change brings it: a value fits its type, a
+// command does something, a weight can be drawn, and a band is well formed and
+// inside its input's range. A property of the row alone, so Load and Insert
+// ask the same question.
+tl::expected<void, ErrorContext> CheckRow(table_def const& def, slot_layout const& slots, std::span<cell const> values,
+	std::span<std::string_view const> commands)
+{
+	for (uint32_t c = 0; c < def.columns.size(); ++c)
+	{
+		column_def const& column = def.columns[c];
+		// A row that does nothing is a property of the row, like a band's shape.
+		if (column.type == column_type::Command && commands[slots.slot[c]].empty())
+		{
+			return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name, "' got an empty command"));
+		}
+		if (IsValueColumn(column.type))
+		{
+			auto fits = Check32(column, def, values[slots.slot[c]].i);
+			if (!fits)
+			{
+				return fits;
+			}
+		}
+		if (c == def.weight)
+		{
+			// Every key run then has a positive total by construction (R7),
+			// and a zero would be a row that can never be drawn. A subnormal
+			// weight is refused too: a subnormal total lets the draw's product
+			// round up to the total, and PickWeighted's fallback would run.
+			double const weight = values[slots.slot[c]].d;
+			if (!(std::isnormal(weight) && weight > 0))
+			{
+				return tl::make_unexpected(ErrorContext("weight '", column.name, "' of '", def.name, "' is ",
+					FloatText(weight), "; a weight is a normal positive number"));
+			}
+		}
+		if (column.type == column_type::Band)
+		{
+			cell const band = values[slots.slot[c]];
+			if (!IsWellFormedBand(band))
+			{
+				return tl::make_unexpected(MalformedBand(column, def, band));
+			}
+			input_def const& in = def.inputs[column.input];
+			// Clamped inputs never reach past the range, so a band that does
+			// is partly dead.
+			if (in.ranged && !(in.lo <= band.v[0] && band.v[1] <= in.hi))
+			{
+				return tl::make_unexpected(ErrorContext("band '", column.name, "' of '", def.name, "' is ",
+					FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it lies inside the range ",
+					FloatText(in.lo), "..", FloatText(in.hi), " of input '", in.name, "'"));
+			}
+		}
+	}
+	return {};
+}
+
+std::vector<held_condition> HoldAll(std::span<closure const> closures)
+{
+	std::vector<held_condition> held;
+	held.reserve(closures.size());
+	for (closure const& c : closures)
+	{
+		held.push_back(Hold(c));
+	}
+	return held;
+}
+
+}
+
 tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& command)
 {
-	// The row's closures are ours from here on, so every refusal releases them.
-	auto refuse = [&](ErrorContext&& error) -> tl::expected<void, ErrorContext>
+	if (command.report)
 	{
-		ReleaseAll(command.conditions);
-		return tl::make_unexpected(std::move(error));
-	};
+		command.report->clear();
+	}
+	// The row's closures are ours from here on: a refusal releases them when
+	// held goes out of scope, and a success moves them into the rows.
+	std::vector<held_condition> held = HoldAll(command.conditions);
 
 	auto defs = _storage->definition.tables();
 	if (command.table >= defs.size())
 	{
-		return refuse(ErrorContext("insert into table ", command.table, ", but the schema has ", defs.size(), " tables"));
+		return tl::make_unexpected(ErrorContext("insert into table ", command.table, ", but the schema has ", defs.size(), " tables"));
 	}
 	table_def const& def  = defs[command.table];
 	auto&            rows = _storage->tables[command.table];
 	if (_storage->GridOf(command.table))
 	{
-		return refuse(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
 	}
 	if (def.read_only)
 	{
-		return refuse(ErrorContext("table '", def.name, "' is read-only; its rows come only from Load"));
+		return tl::make_unexpected(ErrorContext("table '", def.name, "' is read-only; its rows come only from Load"));
 	}
 	if (command.values.size() != rows.valueCount)
 	{
-		return refuse(ErrorContext("insert into '", def.name, "' has ", command.values.size(),
+		return tl::make_unexpected(ErrorContext("insert into '", def.name, "' has ", command.values.size(),
 			" values, but the table has ", rows.valueCount, " value columns"));
 	}
 	if (command.conditions.size() != rows.conditionCount)
 	{
-		return refuse(ErrorContext("insert into '", def.name, "' has ", command.conditions.size(),
+		return tl::make_unexpected(ErrorContext("insert into '", def.name, "' has ", command.conditions.size(),
 			" conditions, but the table has ", rows.conditionCount, " condition columns"));
 	}
 	if (command.commands.size() != rows.commandCount)
 	{
-		return refuse(ErrorContext("insert into '", def.name, "' has ", command.commands.size(),
+		return tl::make_unexpected(ErrorContext("insert into '", def.name, "' has ", command.commands.size(),
 			" commands, but the table has ", rows.commandCount, " command columns"));
 	}
 	if (command.strings.size() != rows.stringCount)
 	{
-		return refuse(ErrorContext("insert into '", def.name, "' has ", command.strings.size(),
+		return tl::make_unexpected(ErrorContext("insert into '", def.name, "' has ", command.strings.size(),
 			" strings, but the table has ", rows.stringCount, " string columns"));
 	}
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
-		column_def const& column = def.columns[c];
-		// No band case: a band must name an input, only a pick has inputs, and a
-		// picked table is read-only, so a writable table never holds one.
-		if (IsValueColumn(column.type))
+		if (def.columns[c].type == column_type::Condition && IsMalformed(command.conditions[rows.slot[c]]))
 		{
-			auto fits = Check32(column, def, command.values[rows.slot[c]].i);
-			if (!fits)
-			{
-				return refuse(std::move(fits.error()));
-			}
-		}
-		// A row that does nothing is a property of the row, like a band's shape.
-		if (column.type == column_type::Command && command.commands[rows.slot[c]].empty())
-		{
-			return refuse(ErrorContext("column '", column.name, "' of '", def.name, "' got an empty command"));
-		}
-		if (column.type == column_type::Condition && IsMalformed(command.conditions[rows.slot[c]]))
-		{
-			return refuse(ErrorContext("column '", column.name, "' of '", def.name,
+			return tl::make_unexpected(ErrorContext("column '", def.columns[c].name, "' of '", def.name,
 				"' got a condition with no function but data or a release"));
 		}
+	}
+	auto shaped = CheckRow(def, rows, command.values, command.commands);
+	if (!shaped)
+	{
+		return tl::make_unexpected(std::move(shaped.error()));
+	}
+
+	// A versioned table: an insert is the owner's rows so far plus this one,
+	// merged and checked exactly as a load is.
+	if (_storage->versions[command.table])
+	{
+		incoming_rows const in{command.owner, 1, command.values, command.commands, held, command.strings, true};
+		auto published = _storage->Publish(command.table, in, nullptr, command.report, "inserted row", "this insert");
+		if (!published)
+		{
+			if (command.report)
+			{
+				command.report->clear();
+			}
+			return tl::make_unexpected(std::move(published.error()));
+		}
+		return {};
 	}
 
 	size_t count = rows.owners.size();
@@ -814,18 +1084,12 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 		pos          = OrderBound(rows.cells, count, rows.valueCount, rows.orderSlots, key, true);
 		if (def.unique && lower != pos)
 		{
-			return refuse(ErrorContext("table '", def.name, "' has a unique order, and owner ",
+			return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
 				rows.owners[lower], " already has a row with this key"));
 		}
 	}
 
 	rows.cells.insert(rows.cells.begin() + pos * rows.valueCount, command.values.begin(), command.values.end());
-	std::vector<held_condition> held;
-	held.reserve(command.conditions.size());
-	for (closure const& c : command.conditions)
-	{
-		held.push_back(Hold(c));
-	}
 	rows.conditions.insert(rows.conditions.begin() + pos * rows.conditionCount,
 		std::make_move_iterator(held.begin()), std::make_move_iterator(held.end()));
 	rows.commands.insert(rows.commands.begin() + pos * rows.commandCount,
@@ -860,13 +1124,20 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 			: rows.index[c][command.values[rows.slot[c]].i];
 		list.insert(std::lower_bound(list.begin(), list.end(), row), row);
 	}
+
 	++rows.generation;
 	return {};
 }
 
 void relation_store::Retract(retract_owner const& command)
 {
+	if (command.report)
+	{
+		command.report->clear();
+	}
 	auto defs = _storage->definition.tables();
+	// Which tables lost rows: their dependents' domains changed with them.
+	std::vector<uint8_t> touched(defs.size(), 0);
 	for (uint32_t t = 0; t < defs.size(); ++t)
 	{
 		if (_storage->GridOf(t))
@@ -884,10 +1155,10 @@ void relation_store::Retract(retract_owner const& command)
 		if (_storage->versions[t])
 		{
 			// The version without the owner's rows, put in place like any load.
-			// Removing rows cannot clash or carry a bad cell, so this load is
-			// never refused, and there is nothing to report.
-			auto removed = Load(load_rows{t, command.owner, 0, {}, {}});
-			(void)removed;
+			// A change that brings no rows is never checked, so this is never
+			// refused: crash recovery cannot fail.
+			auto removed = _storage->Publish(t, incoming_rows{command.owner}, nullptr, nullptr, "", "");
+			touched[t] = removed && *removed ? 1 : 0;
 			continue;
 		}
 		auto&  rows = _storage->tables[t];
@@ -930,19 +1201,25 @@ void relation_store::Retract(retract_owner const& command)
 		// indexes is cheaper to get right than patching shifted row numbers.
 		rows.RebuildIndex(defs[t]);
 		++rows.generation;
+		touched[t] = 1;
+	}
+	// Surveyed once every table is retracted, so a dependent reads the domain
+	// the whole retract leaves.
+	if (command.report)
+	{
+		_storage->Survey(touched, *command.report);
 	}
 }
 
 tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 {
+	if (command.report)
+	{
+		command.report->clear();
+	}
 	// Every closure the load carries is ours from here on: a refusal releases
 	// them when held goes out of scope, and a success moves them into rows.
-	std::vector<held_condition> held;
-	held.reserve(command.conditions.size());
-	for (closure const& c : command.conditions)
-	{
-		held.push_back(Hold(c));
-	}
+	std::vector<held_condition> held = HoldAll(command.conditions);
 
 	auto defs = _storage->definition.tables();
 	if (command.table >= defs.size())
@@ -1001,109 +1278,186 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	}
 	for (size_t r = 0; r < command.count; ++r)
 	{
-		for (uint32_t c = 0; c < def.columns.size(); ++c)
+		auto shaped = CheckRow(def, current, command.values.subspan(r * current.valueCount, current.valueCount),
+			command.commands.subspan(r * current.commandCount, current.commandCount));
+		if (!shaped)
 		{
-			// A row that does nothing is a property of the row, like a band's shape.
-			if (def.columns[c].type == column_type::Command
-				&& command.commands[r * current.commandCount + current.slot[c]].empty())
+			if (command.refusal)
 			{
-				if (command.refusal)
-				{
-					command.refusal->row = r;
-				}
-				return tl::make_unexpected(ErrorContext("column '", def.columns[c].name, "' of '", def.name,
-					"' got an empty command").with("row ", r));
+				command.refusal->row = r;
 			}
-			if (IsValueColumn(def.columns[c].type))
-			{
-				auto fits = Check32(def.columns[c], def, command.values[r * current.valueCount + current.slot[c]].i);
-				if (!fits)
-				{
-					if (command.refusal)
-					{
-						command.refusal->row = r;
-					}
-					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
-				}
-			}
-			if (c == def.weight)
-			{
-				// Every key run then has a positive total by construction (R7),
-				// and a zero would be a row that can never be drawn. A subnormal
-				// weight is refused too: a subnormal total lets the draw's product
-				// round up to the total, and PickWeighted's fallback would run.
-				double const weight = command.values[r * current.valueCount + current.slot[c]].d;
-				if (!(std::isnormal(weight) && weight > 0))
-				{
-					if (command.refusal)
-					{
-						command.refusal->row = r;
-					}
-					return tl::make_unexpected(ErrorContext("weight '", def.columns[c].name, "' of '", def.name, "' is ",
-						DoubleText(weight), "; a weight is a normal positive number").with("row ", r));
-				}
-			}
-			if (def.columns[c].type == column_type::Band)
-			{
-				cell const band = command.values[r * current.valueCount + current.slot[c]];
-				if (!IsWellFormedBand(band))
-				{
-					if (command.refusal)
-					{
-						command.refusal->row = r;
-					}
-					return tl::make_unexpected(MalformedBand(def.columns[c], def, band).with("row ", r));
-				}
-				input_def const& in = def.inputs[def.columns[c].input];
-				// Clamped inputs never reach past the range, so a band that does
-				// is partly dead.
-				if (in.ranged && !(in.lo <= band.v[0] && band.v[1] <= in.hi))
-				{
-					if (command.refusal)
-					{
-						command.refusal->row = r;
-					}
-					return tl::make_unexpected(ErrorContext("band '", def.columns[c].name, "' of '", def.name, "' is ",
-						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it lies inside the range ",
-						FloatText(in.lo), "..", FloatText(in.hi), " of input '", in.name, "'").with("row ", r));
-				}
-			}
+			return tl::make_unexpected(std::move(shaped.error()).with("row ", r));
 		}
 	}
 
-	// Every row the next version holds, as (from the load?, row). The version
-	// is a function of the owners' loads, not of their order, so rows sort by
-	// the order columns, then owner id, then index within the owner's load:
-	// an owner reloading identical rows leaves every row where it was.
+	incoming_rows const in{command.owner, command.count, command.values, command.commands, held, command.strings, false};
+	auto published = _storage->Publish(command.table, in, command.refusal, command.report, "loaded row", "this load");
+	if (!published)
+	{
+		if (command.report)
+		{
+			command.report->clear();
+		}
+		return tl::make_unexpected(std::move(published.error()));
+	}
+	// A load of no rows is a bare retract from this table: never refused, and
+	// what it leaves is reported instead.
+	if (command.count == 0 && *published && command.report)
+	{
+		std::vector<uint8_t> touched(defs.size(), 0);
+		touched[command.table] = 1;
+		_storage->Survey(touched, *command.report);
+	}
+	return {};
+}
+
+table_rows const& relation_store::Storage::RowsDuring(uint32_t table, uint32_t changed, table_rows const* candidate) const
+{
+	return table == changed && candidate ? *candidate : RowsOf(table);
+}
+
+void relation_store::Storage::DomainOf(uint32_t table, table_rows const& rows, uint32_t changed,
+	table_rows const* candidate, detail::key_domains& out) const
+{
+	table_def const& def = definition.tables()[table];
+	out.overRows.assign(def.domains.size(), 0);
+	out.values.resize(def.domains.size());
+	uint32_t k = 0;
+	for (uint32_t c = 0; c < def.columns.size() && k < def.domains.size(); ++c)
+	{
+		if (!def.columns[c].key)
+		{
+			continue;
+		}
+		domain_def const&     d      = def.domains[k];
+		std::vector<int64_t>& values = out.values[k];
+		values.clear();
+		switch (d.kind)
+		{
+		case domain_kind::Members:
+			values.assign(d.members.begin(), d.members.end());
+			break;
+		case domain_kind::Rows:
+			out.overRows[k] = 1;
+			break;
+		case domain_kind::Column:
+		{
+			table_rows const& from = RowsDuring(d.table, changed, candidate);
+			for (size_t r = 0; r < from.RowCount(); ++r)
+			{
+				values.push_back(from.cells[r * from.valueCount + from.slot[d.column]].i);
+			}
+			std::sort(values.begin(), values.end());
+			values.erase(std::unique(values.begin(), values.end()), values.end());
+			break;
+		}
+		case domain_kind::None:
+			break;   // the schema refuses a best table's key with no domain
+		}
+		++k;
+	}
+	detail::ResolveDomain(rows, out);
+}
+
+tl::expected<void, ErrorContext> relation_store::Storage::CheckDependents(uint32_t changed, table_rows const& candidate,
+	std::vector<run_note>* report, char const* change) const
+{
+	auto defs = definition.tables();
+	detail::key_domains domains;
+	for (uint32_t dependent : dependents[changed])
+	{
+		table_rows const&   rows = RowsOf(dependent);
+		DomainOf(dependent, rows, changed, &candidate, domains);
+		std::vector<size_t> kept(rows.RowCount(), SIZE_MAX);
+		auto checked = detail::CheckBest(
+			detail::check_subject{dependent, defs[dependent], rows, kept, "row", change, defs[changed].name},
+			domains, nullptr, report);
+		if (!checked)
+		{
+			// Which change found it: the dependent may have been left so by an
+			// earlier bare retract, which nothing refused.
+			return tl::make_unexpected(std::move(checked.error()).with(change, " changes table '", defs[changed].name, "'"));
+		}
+	}
+	return {};
+}
+
+void relation_store::Storage::Survey(std::vector<uint8_t> const& touched, std::vector<run_note>& report) const
+{
+	auto defs = definition.tables();
+	std::vector<uint8_t> surveyed(defs.size(), 0);
+	for (uint32_t t = 0; t < defs.size(); ++t)
+	{
+		if (!touched[t])
+		{
+			continue;
+		}
+		surveyed[t] = defs[t].pick == pick_policy::Best ? 1 : 0;
+		for (uint32_t dependent : dependents[t])
+		{
+			surveyed[dependent] = 1;
+		}
+	}
+	detail::key_domains domains;
+	for (uint32_t t = 0; t < defs.size(); ++t)
+	{
+		if (!surveyed[t])
+		{
+			continue;
+		}
+		DomainOf(t, RowsOf(t), UINT32_MAX, nullptr, domains);
+		detail::check_subject survey{t, defs[t], RowsOf(t), {}, "", "", "", true};
+		auto surveyed = detail::CheckBest(survey, domains, nullptr, &report);
+		(void)surveyed;   // a survey refuses nothing
+	}
+}
+
+tl::expected<bool, ErrorContext> relation_store::Storage::Publish(uint32_t table, incoming_rows const& in,
+	load_refusal* refusal, std::vector<run_note>* report, char const* noun, char const* change)
+{
+	table_def const&  def     = definition.tables()[table];
+	table_rows const& current = version_access::Rows(*versions[table]);
+
+	// Every row the next version holds, as (from the change?, row). The version
+	// is a function of the owners' rows, not of the order they arrived in, so
+	// rows sort by the order columns, then owner id, then index within the
+	// owner's rows: an owner reloading identical rows leaves every row where it
+	// was, and an insert lands after the owner's rows with an equal order key.
 	struct source
 	{
 		bool   loaded;
 		size_t row;
 	};
 	std::vector<source> order;
-	order.reserve(current.RowCount() + command.count);
+	order.reserve(current.RowCount() + in.count);
+	uint32_t firstNew = 0;
 	for (size_t r = 0; r < current.RowCount(); ++r)
 	{
-		if (current.owners[r] != command.owner)
+		if (current.owners[r] != in.owner)
 		{
 			order.push_back({false, r});
 		}
+		else if (in.keepOwner)
+		{
+			order.push_back({false, r});
+			firstNew = std::max(firstNew, current.ownerRows[r] + 1);
+		}
 	}
-	if (order.size() == current.RowCount() && command.count == 0)
+	if (order.size() == current.RowCount() && in.count == 0)
 	{
-		return {};   // nothing of this owner's here and nothing new: no change
+		return false;   // nothing of this owner's here and nothing new: no change
 	}
-	for (size_t r = 0; r < command.count; ++r)
+	for (size_t r = 0; r < in.count; ++r)
 	{
 		order.push_back({true, r});
 	}
 	auto cellsOf = [&](source s) -> std::span<cell const>
 	{
-		return s.loaded ? command.values.subspan(s.row * current.valueCount, current.valueCount)
+		return s.loaded ? in.values.subspan(s.row * current.valueCount, current.valueCount)
 		                : std::span<cell const>(current.cells).subspan(s.row * current.valueCount, current.valueCount);
 	};
-	auto ownerOf = [&](source s) { return s.loaded ? command.owner : current.owners[s.row]; };
-	auto ownerRowOf = [&](source s) -> size_t { return s.loaded ? s.row : current.ownerRows[s.row]; };
+	auto ownerOf = [&](source s) { return s.loaded ? in.owner : current.owners[s.row]; };
+	auto ownerRowOf = [&](source s) -> size_t { return s.loaded ? firstNew + s.row : current.ownerRows[s.row]; };
 	auto keyCompare = [&](source a, source b) -> int
 	{
 		std::span<cell const> ac = cellsOf(a);
@@ -1139,16 +1493,16 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			if (keyCompare(order[i - 1], order[i]) == 0)
 			{
 				// Survivors are unique among themselves, so at least one of a
-				// clashing pair is a loaded row; name the loaded one, and the
-				// other as the row it clashes with.
+				// clashing pair is a new row; name the new one, and the other as
+				// the row it clashes with.
 				source const earlier = order[i - 1];
 				source const later   = order[i];
 				source const mine    = later.loaded ? later : earlier;
 				source const other   = later.loaded ? earlier : later;
-				if (command.refusal)
+				if (refusal)
 				{
-					command.refusal->row     = mine.row;
-					command.refusal->earlier = other.loaded ? other.row : SIZE_MAX;
+					refusal->row     = mine.row;
+					refusal->earlier = other.loaded ? other.row : SIZE_MAX;
 				}
 				std::string key;
 				for (uint32_t s : current.orderSlots)
@@ -1156,42 +1510,31 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					key = cc(key, key.empty() ? "" : ", ", cellsOf(mine)[s].i);
 				}
 				return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
-					ownerOf(other), " already has a row with key (", key, ") of loaded row ", mine.row));
+					ownerOf(other), " already has a row with key (", key, ") of ", noun, " ", mine.row));
 			}
 		}
 	}
 
-	// A key run is the rows sharing the table's key columns, which lead its order.
-	auto sameKey = [&](source a, source b)
-	{
-		for (uint32_t k = 0; k < def.key_count; ++k)
-		{
-			uint32_t const s = current.orderSlots[k];
-			if (cellsOf(a)[s].i != cellsOf(b)[s].i)
-			{
-				return false;
-			}
-		}
-		return true;
-	};
-	auto keyText = [&](source s)
-	{
-		std::string key;
-		for (uint32_t k = 0; k < def.key_count; ++k)
-		{
-			key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
-		}
-		return key;
-	};
-
 	// A weighted run is drawn from by laying its weights end to end, so its total
-	// must be a number. Each weight is normal and positive (checked per row
-	// above), so the total can only fail by overflowing; a run no loaded row
-	// joins was summed when it was published.
-	if (def.pick == pick_policy::Weighted && command.count > 0)
+	// must be a number. Each weight is normal and positive (checked per row),
+	// so the total can only fail by overflowing; a run no new row joins was
+	// summed when it was published.
+	if (def.pick == pick_policy::Weighted && in.count > 0)
 	{
 		uint32_t const weightSlot = current.slot[def.weight];
-		size_t         start      = 0;
+		auto sameKey = [&](source a, source b)
+		{
+			for (uint32_t k = 0; k < def.key_count; ++k)
+			{
+				uint32_t const s = current.orderSlots[k];
+				if (cellsOf(a)[s].i != cellsOf(b)[s].i)
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		size_t start = 0;
 		while (start < order.size())
 		{
 			size_t end        = start;
@@ -1208,318 +1551,24 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			}
 			if (!std::isfinite(total))
 			{
-				if (command.refusal)
+				if (refusal)
 				{
-					command.refusal->row = lastLoaded;
+					refusal->row = lastLoaded;
 				}
-				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(order[start]),
+				std::string key;
+				for (uint32_t k = 0; k < def.key_count; ++k)
+				{
+					key = cc(key, key.empty() ? "" : ", ", cellsOf(order[start])[current.orderSlots[k]].i);
+				}
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", key,
 					"): the weights total more than a double holds"));
 			}
 			start = end;
 		}
 	}
 
-	// A best table always picks a row (totality) and every row in it can be
-	// picked (no dead rows), and no two owners claim the same inputs with equal
-	// flags. A published version is total, so a load that brings rows checks
-	// every run of the version it would publish: a run it never touches may
-	// have been stranded by a bare Retract, and a reload can take a run's only
-	// default away. A load of no rows is never refused (Retract relies on it,
-	// so crash recovery cannot fail).
-	if (def.pick == pick_policy::Best && command.count > 0)
-	{
-		// One axis per ranged input a band reads, in input order.
-		std::vector<uint32_t> axes;
-		for (uint32_t i = 0; i < def.inputs.size(); ++i)
-		{
-			for (column_def const& col : def.columns)
-			{
-				if (col.type == column_type::Band && col.input == i)
-				{
-					axes.push_back(i);
-					break;
-				}
-			}
-		}
-		std::vector<detail::interval> domain;
-		for (uint32_t i : axes)
-		{
-			domain.push_back({def.inputs[i].lo, def.inputs[i].hi});
-		}
-		// A row's box: its input's range, cut down by every band on that input.
-		auto boxOf = [&](source s, std::vector<detail::interval>& out)
-		{
-			std::span<cell const> cells = cellsOf(s);
-			for (size_t a = 0; a < axes.size(); ++a)
-			{
-				detail::interval box = domain[a];
-				for (uint32_t c = 0; c < def.columns.size(); ++c)
-				{
-					if (def.columns[c].type == column_type::Band && def.columns[c].input == axes[a])
-					{
-						box.lo = std::max(box.lo, cells[current.slot[c]].v[0]);
-						box.hi = std::min(box.hi, cells[current.slot[c]].v[1]);
-					}
-				}
-				out.push_back(box);
-			}
-		};
-		// At most one condition column, so a row's condition is its first.
-		auto scripted = [&](source s)
-		{
-			if (current.conditionCount == 0)
-			{
-				return false;
-			}
-			closure const& c = s.loaded ? command.conditions[s.row * current.conditionCount]
-			                            : current.conditions[s.row * current.conditionCount]->get();
-			return c.function != nullptr;
-		};
-		auto flagsOf = [&](source s) -> uint32_t
-		{
-			return def.ranking == UINT32_MAX ? 0u : static_cast<uint32_t>(cellsOf(s)[current.slot[def.ranking]].i);
-		};
-		// A kept row of another owner, described by what its author can find in
-		// the owner's file: key values, ranking flags and band values.
-		auto survivorText = [&](source s)
-		{
-			std::vector<std::string> parts;
-			if (def.key_count > 0)
-			{
-				std::string key;
-				for (uint32_t k = 0; k < def.key_count; ++k)
-				{
-					key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
-				}
-				parts.push_back(cc(std::string("key ("), key, ")"));
-			}
-			if (def.ranking != UINT32_MAX)
-			{
-				parts.push_back(cc(std::string("flags "), flagsOf(s)));
-			}
-			for (uint32_t c = 0; c < def.columns.size(); ++c)
-			{
-				if (def.columns[c].type == column_type::Band)
-				{
-					cell const& band = cellsOf(s)[current.slot[c]];
-					parts.push_back(cc(def.columns[c].name, " ", FloatText(band.v[0]), "..", FloatText(band.v[1])));
-				}
-			}
-			std::string text = cc(std::string("owner "), ownerOf(s), "'s row");
-			for (size_t p = 0; p < parts.size(); ++p)
-			{
-				text = cc(text, p == 0 ? " with " : ", ", parts[p]);
-			}
-			return text;
-		};
-		char const* const noDefault = def.ranking == UINT32_MAX ? "no row with no script condition"
-		                                                        : "no row with no flags and no script condition";
-
-		std::vector<detail::interval> boxes;
-		std::vector<detail::interval> runBoxes;
-		size_t start = 0;
-		while (start < order.size())
-		{
-			size_t end = start + 1;
-			while (end < order.size() && sameKey(order[start], order[end]))
-			{
-				++end;
-			}
-			size_t firstLoaded = SIZE_MAX;
-			for (size_t i = start; i < end; ++i)
-			{
-				if (order[i].loaded && firstLoaded == SIZE_MAX)
-				{
-					firstLoaded = order[i].row;
-				}
-			}
-
-			// A published version holds no dead row and no cross-owner equal-flag
-			// overlap (induction: every version was checked before it was
-			// published, and the empty version holds neither). A kept row is
-			// therefore never dead and never in an overlap with another kept row,
-			// because all kept rows were already in the published version. So the
-			// only pairs left to refuse involve a loaded row, and a run this load
-			// brings no rows to can fail nothing but totality.
-			if (firstLoaded != SIZE_MAX)
-			{
-				// Two owners' rows with equal flags may not overlap: that is two
-				// contributors claiming the same inputs, decided only by load
-				// order. Checked before the dead rows, which would report the same
-				// pair as a shadowed row. One owner's rows overlapping is priority
-				// by row order. Every row counts, scripted or not.
-				size_t const dims = axes.size();
-				runBoxes.clear();
-				for (size_t i = start; i < end; ++i)
-				{
-					boxOf(order[i], runBoxes);
-				}
-				for (size_t b = start + 1; b < end; ++b)
-				{
-					for (size_t a = start; a < b; ++a)
-					{
-						if (ownerOf(order[a]) == ownerOf(order[b]) || flagsOf(order[a]) != flagsOf(order[b]))
-						{
-							continue;
-						}
-						bool meets = true;
-						for (size_t x = 0; x < dims; ++x)
-						{
-							detail::interval const& boxA = runBoxes[(a - start) * dims + x];
-							detail::interval const& boxB = runBoxes[(b - start) * dims + x];
-							meets = meets && std::max(boxA.lo, boxB.lo) < std::min(boxA.hi, boxB.hi);
-						}
-						if (!meets)
-						{
-							continue;
-						}
-						// All loaded rows belong to one owner, and one owner's rows
-						// never clash with themselves, so at most one of the pair is
-						// loaded.
-						if (command.refusal)
-						{
-							command.refusal->row = order[b].loaded ? order[b].row : order[a].row;
-						}
-						auto claimant = [&](source s)
-						{
-							return s.loaded ? cc(std::string("owner "), ownerOf(s), "'s loaded row ", s.row) : survivorText(s);
-						};
-						return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ",
-							claimant(order[a]), " and ", claimant(order[b]),
-							def.ranking == UINT32_MAX ? " overlap" : " have equal flags and overlap",
-							"; two owners may not claim the same inputs"));
-					}
-				}
-			}
-
-			// Totality: the quiescent rows cover every input. A ranked row
-			// never helps: an input with no flags skips every one.
-			boxes.clear();
-			size_t quiescent = 0;
-			for (size_t i = start; i < end; ++i)
-			{
-				if (!scripted(order[i]) && flagsOf(order[i]) == 0)
-				{
-					boxOf(order[i], boxes);
-					++quiescent;
-				}
-			}
-			auto hole = detail::Uncovered(domain, boxes, quiescent);
-			if (hole)
-			{
-				if (command.refusal)
-				{
-					command.refusal->row = firstLoaded;
-				}
-				std::string where;
-				for (size_t a = 0; a < axes.size(); ++a)
-				{
-					where = cc(where, a == 0 ? "" : ", ", def.inputs[axes[a]].name, " ", FloatText((*hole)[a]));
-				}
-				// A run the load brings no rows to was stranded by an earlier bare
-				// retract, or by this reload vacating the owner's own rows from
-				// it; name a survivor so the author can find it.
-				std::string const stranded = firstLoaded != SIZE_MAX ? std::string()
-					: cc(std::string("; this load brings the key no row, and the version it would publish is not total (its first row is "),
-					     survivorText(order[start]), ")");
-				return tl::make_unexpected(axes.empty()
-					? ErrorContext("table '", def.name, "' key (", keyText(order[start]), ") has ", noDefault, stranded)
-					: ErrorContext("table '", def.name, "' key (", keyText(order[start]), "): ", where, " has ", noDefault, stranded));
-			}
-
-			// Dead rows: B is never picked when the rows tried before it for
-			// every input, among those with no script condition, cover its box.
-			// Without a ranking column that is row order. With one, only the
-			// same flags can: at input F = R_B, B is a full match with hit R_B,
-			// and any other full match has R a strict subset of R_B, so a
-			// smaller hit. Same flags tie by row order; the R == 0 rows come
-			// last, in row order, after every ranked row. Row order across owners
-			// is by owner id, not by who loaded last, so a kept row can sort after
-			// a loaded one; that cannot kill it, because a loaded row that covers
-			// a kept row of equal flags would overlap it, and was refused above.
-			if (firstLoaded != SIZE_MAX)
-			{
-				for (size_t b = start; b < end; ++b)
-				{
-					source const   B  = order[b];
-					if (!B.loaded)
-					{
-						continue;   // a kept row is never dead (see above)
-					}
-					uint32_t const RB = flagsOf(B);
-					// The rows tried before B, in try order (row order: owner id, then load index), so the last
-					// is the one tried just before it.
-					std::vector<size_t> before;
-					for (size_t a = start; a < b; ++a)
-					{
-						if (!scripted(order[a]) && flagsOf(order[a]) == RB)
-						{
-							before.push_back(a);
-						}
-					}
-					std::vector<detail::interval> own;
-					boxOf(B, own);
-					boxes.clear();
-					for (size_t a : before)
-					{
-						boxOf(order[a], boxes);
-					}
-					if (detail::Uncovered(own, boxes, before.size()))
-					{
-						continue;   // some input reaches B
-					}
-					// B is dead. Rows of different owners with equal flags never
-					// overlap (refused above), so B and the rows covering it are one
-					// owner's, and the load brought them.
-					bool emptyBox = false;
-					for (detail::interval const& in : own)
-					{
-						emptyBox = emptyBox || !(in.lo < in.hi);
-					}
-					// The rows that take B's place: those tried before it whose box
-					// meets B's. A row tried earlier on other inputs only does not.
-					std::vector<size_t> covering;
-					for (size_t i = 0; i < before.size() && !emptyBox; ++i)
-					{
-						bool meets = true;
-						for (size_t a = 0; a < own.size(); ++a)
-						{
-							detail::interval const& other = boxes[i * own.size() + a];
-							meets = meets && std::max(own[a].lo, other.lo) < std::min(own[a].hi, other.hi);
-						}
-						if (meets)
-						{
-							covering.push_back(before[i]);
-						}
-					}
-					// Rows covering B are one owner's, so all loaded.
-					size_t const lastLoaded = covering.empty() ? SIZE_MAX : order[covering.back()].row;
-					if (command.refusal)
-					{
-						command.refusal->row        = B.row;
-						command.refusal->covered_by = lastLoaded;
-					}
-					if (emptyBox)
-					{
-						return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
-							cc(std::string("loaded row "), B.row), " is never picked; its bands hold for no input"));
-					}
-					std::string names;
-					for (size_t a : covering)
-					{
-						names = cc(names, names.empty() ? "" : ", ", order[a].row);
-					}
-					bool const one = covering.size() == 1;
-					return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(B), "): ",
-						cc(std::string("loaded row "), B.row), " is never picked; ", one ? "loaded row " : "loaded rows ", names, one ? " covers it" : " cover it"));
-				}
-			}
-
-			start = end;
-		}
-	}
-
 	// The current version may be held, so survivors are copied, never moved.
+	// Built before the checks, which read the version it would publish.
 	table_rows next(def);
 	next.cells.reserve(order.size() * next.valueCount);
 	next.commands.reserve(order.size() * next.commandCount);
@@ -1527,20 +1576,22 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	next.strings.reserve(order.size() * next.stringCount);
 	next.owners.reserve(order.size());
 	next.ownerRows.reserve(order.size());
+	std::vector<size_t> fresh;
+	fresh.reserve(order.size());
 	for (source s : order)
 	{
 		std::span<cell const> from = cellsOf(s);
 		next.cells.insert(next.cells.end(), from.begin(), from.end());
 		for (uint32_t k = 0; k < next.conditionCount; ++k)
 		{
-			next.conditions.push_back(s.loaded ? held[s.row * next.conditionCount + k]
+			next.conditions.push_back(s.loaded ? in.conditions[s.row * next.conditionCount + k]
 			                                   : current.conditions[s.row * next.conditionCount + k]);
 		}
 		for (uint32_t k = 0; k < next.commandCount; ++k)
 		{
 			if (s.loaded)
 			{
-				next.commands.emplace_back(command.commands[s.row * next.commandCount + k]);
+				next.commands.emplace_back(in.commands[s.row * next.commandCount + k]);
 			}
 			else
 			{
@@ -1549,16 +1600,50 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		}
 		for (uint32_t k = 0; k < next.stringCount; ++k)
 		{
-			next.strings.push_back(s.loaded ? Intern(command.strings[s.row * next.stringCount + k])
+			next.strings.push_back(s.loaded ? Intern(in.strings[s.row * next.stringCount + k])
 			                                : current.strings[s.row * next.stringCount + k]);
 		}
 		next.owners.push_back(ownerOf(s));
 		next.ownerRows.push_back(static_cast<uint32_t>(ownerRowOf(s)));
+		fresh.push_back(s.loaded ? s.row : SIZE_MAX);
 	}
 	next.RebuildIndex(def);
+
+	// A published version is total, so a change that brings rows checks every
+	// key tuple of the domain of the version it would publish: a run it never
+	// touches may have been stranded by a bare Retract, and a reload can take a
+	// run's only default away. A change of no rows is never refused (Retract
+	// relies on it, so crash recovery cannot fail).
+	if (in.count > 0)
+	{
+		if (def.pick == pick_policy::Best)
+		{
+			detail::key_domains domains;
+			DomainOf(table, next, table, &next, domains);
+			auto checked = detail::CheckBest(detail::check_subject{table, def, next, fresh, noun, change}, domains,
+				refusal, report);
+			if (!checked)
+			{
+				return tl::make_unexpected(std::move(checked.error()));
+			}
+		}
+		auto dependent = CheckDependents(table, next, report, change);
+		if (!dependent)
+		{
+			return tl::make_unexpected(std::move(dependent.error()));
+		}
+		// The changed table was checked before its dependents; a report reads
+		// by table index, as a survey's does.
+		if (report)
+		{
+			std::stable_sort(report->begin(), report->end(),
+				[](run_note const& a, run_note const& b) { return a.table < b.table; });
+		}
+	}
+
 	next.generation = current.generation + 1;
-	_storage->versions[command.table] = Storage::NewVersion(def, std::move(next));
-	return {};
+	versions[table] = NewVersion(def, std::move(next));
+	return true;
 }
 
 tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Version(uint32_t table) const
@@ -1574,7 +1659,7 @@ tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Vers
 	}
 	if (!_storage->versions[table])
 	{
-		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is not read-only, so it has no version"));
+		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is mutable, not a best table, and no domain comes from it, so it has no version"));
 	}
 	return _storage->versions[table];
 }

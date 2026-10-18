@@ -30,7 +30,7 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: mode, type: hash, key: true}
+      - {name: mode, type: hash, key: true, domain: rows}
     order_by: {columns: [mode]}
     suffix: command
 )";
@@ -244,7 +244,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: int}
     order_by: {columns: [label]}

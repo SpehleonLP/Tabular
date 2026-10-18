@@ -26,7 +26,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: string}
     order_by: {columns: [label]}
@@ -187,7 +187,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: string}
       - {name: extra, type: int}
@@ -203,7 +203,7 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags}
       - {name: clip, type: string}
     order_by: {columns: [label]}
@@ -281,7 +281,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: hash, key: true}
+      - {name: label, type: hash, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: string}
     order_by: {columns: [label]}
@@ -302,7 +302,7 @@ tables:
     inputs:
       - {name: mode, type: flags}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: clip, type: hash}
     order_by: {columns: [label]}
@@ -327,7 +327,7 @@ tables:
       - {name: mode, type: flags}
       - {name: t, type: double, range: 0..1}
     columns:
-      - {name: label, type: int, key: true}
+      - {name: label, type: int, key: true, domain: rows}
       - {name: req, type: flags, input: mode}
       - {name: window, type: band, input: t}
     order_by: {columns: [label]}
@@ -350,4 +350,31 @@ tables:
 			<< (pivoted ? "pivoted: " : "rows: ") << error;
 		EXPECT_EQ(store.RowCount(0), 2u) << "the refused load changes nothing";
 	}
+}
+
+TEST(PivotCsv, APivotedLoadFillsTheReportWithItsOrphans)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+    columns:
+      - {name: label, type: int, key: true, domain: {members: [1]}}
+      - {name: req, type: flags, input: mode}
+      - {name: clip, type: string}
+    order_by: {columns: [label]}
+    pivot: {headers: req, cells: clip}
+)");
+	std::vector<run_note> report;
+	csv_rows rows{0, 1, "label,None,A\n1,c1,c1a\n2,c2,\n", "lookup.csv"};
+	rows.pivoted = true;
+	rows.report  = &report;
+	ASSERT_EQ(Error(LoadCsv(store, rows)), "");
+	ASSERT_EQ(report.size(), 1u);
+	EXPECT_EQ(report[0].status, run_status::Orphan);
+	ASSERT_EQ(report[0].key.size(), 1u);
+	EXPECT_EQ(report[0].key[0].i, 2);
 }
