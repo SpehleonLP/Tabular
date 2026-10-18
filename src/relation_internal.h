@@ -132,6 +132,25 @@ struct table_rows : slot_layout
 	}
 };
 
+namespace detail
+{
+
+// The one call of a row's script condition: whether it holds for this_in,
+// any failure the closure reports left in error (which stays empty when it
+// answers). A row with no script condition holds. Adds nothing to error, so a
+// caller that drops it allocates nothing the host did not.
+inline bool CallCondition(table_rows const& rows, size_t row, uint32_t column, void const* this_in, ErrorContext& error)
+{
+	closure const& c = rows.conditions[row * rows.conditionCount + rows.slot[column]]->get();
+	if (c.function == nullptr)
+	{
+		return true;
+	}
+	return c.function(c.data, this_in, &error);
+}
+
+}
+
 struct TableVersion::Data
 {
 	table_def  def;

@@ -1,11 +1,12 @@
 #include "tabular/pick.h"
 
+#include "pick_internal.h"
 #include "relation_internal.h"
 #include "tabular/draw.h"
 
 #include <algorithm>
 #include <cmath>
-#include <tuple>
+#include <utility>
 
 namespace tabular
 {
@@ -45,21 +46,16 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 		return tl::make_unexpected(ErrorContext("a pick of '", def.name, "' with ", query.inputs.size(),
 			" inputs; the table declares ", def.inputs.size()));
 	}
-	for (uint32_t i = 0; i < def.inputs.size(); ++i)
+	detail::bad_input const bad = detail::FirstBadInput(def, query.inputs);
+	if (bad.index != UINT32_MAX && bad.nan)
 	{
-		int64_t const v = query.inputs[i].i;
-		if (def.inputs[i].type == column_type::Flags && !Fits32(v))
-		{
-			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
-				"' is a flag set, a 32-bit value widened without sign; got ", v));
-		}
-		// A clamp has no place for NaN, in any policy: the range declaration
-		// is what refuses it, not the pick.
-		if (def.inputs[i].ranged && std::isnan(query.inputs[i].d))
-		{
-			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
-				"' is NaN; a ranged input is clamped into its range, which has no place for it"));
-		}
+		return tl::make_unexpected(ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
+			"' is NaN; a ranged input is clamped into its range, which has no place for it"));
+	}
+	if (bad.index != UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
+			"' is a flag set, a 32-bit value widened without sign; got ", query.inputs[bad.index].i));
 	}
 	if (def.key_count == 0)
 	{
@@ -69,8 +65,8 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 }
 
 // Bands first, so a script runs only for a row whose native conditions hold.
-// Floats, as animation's phase bands compare.
-tl::expected<bool, ErrorContext> RowHolds(TableVersion const& version, size_t row, pick_query const& query)
+// Floats, as animation's phase bands compare. error_out as ScriptHolds.
+detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query const& query, ErrorContext* error_out)
 {
 	table_def const&  def  = version_access::Def(version);
 	table_rows const& rows = version_access::Rows(version);
@@ -81,43 +77,144 @@ tl::expected<bool, ErrorContext> RowHolds(TableVersion const& version, size_t ro
 			continue;
 		}
 		cell const  band = rows.cells[row * rows.valueCount + rows.slot[c]];
-		input_def const& in = def.inputs[def.columns[c].input];
-		double const     d  = query.inputs[def.columns[c].input].d;
-		float            x  = 0;
-		// Clamped in double, so a value past float's range never narrows;
-		// hi is excluded, so the top value lands in the top band. NaN was
-		// refused with the query.
-		if (in.ranged)
-		{
-			double const top = std::nextafter(in.hi, -INFINITY);
-			x = static_cast<float>(std::clamp(d, double(in.lo), top));
-		}
-		else
-		{
-			x = static_cast<float>(d);
-		}
+		float const x    = detail::ClampedInput(def.inputs[def.columns[c].input], query.inputs[def.columns[c].input].d);
 		if (!(x >= band.v[0] && x < band.v[1]))
 		{
-			return false;
+			return detail::row_test::Misses;
 		}
 	}
+	return detail::ScriptHolds(version, row, query.this_in, error_out);
+}
+
+// The interpreted picks' test of a row: a failure is an error naming the
+// table and row.
+tl::expected<bool, ErrorContext> CheckRow(TableVersion const& version, size_t row, pick_query const& query)
+{
+	ErrorContext           error;
+	detail::row_test const test = RowHolds(version, row, query, &error);
+	if (test == detail::row_test::Failed)
+	{
+		return tl::make_unexpected(std::move(error));
+	}
+	return test == detail::row_test::Holds;
+}
+
+}
+
+namespace detail
+{
+
+float ClampedInput(input_def const& in, double value)
+{
+	if (!in.ranged)
+	{
+		return static_cast<float>(value);
+	}
+	double const top = std::nextafter(in.hi, -INFINITY);
+	return static_cast<float>(std::clamp(value, double(in.lo), top));
+}
+
+bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs)
+{
+	for (uint32_t i = 0; i < def.inputs.size(); ++i)
+	{
+		if (def.inputs[i].type == column_type::Flags && !Fits32(inputs[i].i))
+		{
+			return bad_input{i, false};
+		}
+		// A clamp has no place for NaN, in any policy: the range declaration
+		// is what refuses it, not the pick.
+		if (def.inputs[i].ranged && std::isnan(inputs[i].d))
+		{
+			return bad_input{i, true};
+		}
+	}
+	return {};
+}
+
+row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext* error_out)
+{
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		if (def.columns[c].type != column_type::Condition)
 		{
 			continue;
 		}
-		auto holds = version.Holds(row, c, query.this_in);
+		ErrorContext  dropped;
+		ErrorContext& error = error_out ? *error_out : dropped;
+		bool const    holds = CallCondition(rows, row, c, this_in, error);
+		// An error may arrive as context alone, from a closure wrapping another's.
+		if (!error.empty())
+		{
+			if (error_out)
+			{
+				error_out->context.push_back(cc(std::string("table '"), def.name, "' row ", row));
+			}
+			return row_test::Failed;
+		}
 		if (!holds)
 		{
-			return tl::make_unexpected(std::move(holds.error()).with("table '", def.name, "' row ", row));
-		}
-		if (!*holds)
-		{
-			return false;
+			return row_test::Misses;
 		}
 	}
-	return true;
+	return row_test::Holds;
+}
+
+std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size_t last, pick_query const& query,
+	ErrorContext* error_out)
+{
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	uint32_t const    slot = rows.slot[def.output];
+	uint32_t          bits = 0;
+	for (size_t r = first; r < last; ++r)
+	{
+		row_test const test = RowHolds(version, r, query, error_out);
+		if (test == row_test::Failed)
+		{
+			return std::nullopt;
+		}
+		if (test == row_test::Holds)
+		{
+			bits |= static_cast<uint32_t>(rows.cells[r * rows.valueCount + slot].i);
+		}
+	}
+	return bits;
+}
+
+size_t DrawRow(TableVersion const& version, size_t first, size_t last, uint64_t seed, uint64_t site)
+{
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	uint32_t const    slot = rows.slot[def.weight];
+	auto weightOf = [&](size_t r) { return rows.cells[r * rows.valueCount + slot].d; };
+
+	// Summed in row order, as Load summed it to prove the total finite.
+	double total = 0;
+	for (size_t r = first; r < last; ++r)
+	{
+		total += weightOf(r);
+	}
+	double const target = DrawUnit(Draw(seed, site)) * total;
+	double       edge   = 0;
+	for (size_t r = first; r < last; ++r)
+	{
+		edge += weightOf(r);
+		if (target < edge)
+		{
+			return r;
+		}
+	}
+	// Not reached: Load admits only normal positive weights, so total is a normal
+	// double, and the unit is at most 1 - 2^-53, which puts the exact product at
+	// least half an ulp below total and rounds it below total. The loop above
+	// sums in the order that built total, so its last edge is total and some
+	// row takes the target. A subnormal total could round the product up to
+	// total, which is why Load refuses subnormal weights. The return keeps a
+	// corrupt version from running off the run.
+	return last - 1;
 }
 
 }
@@ -134,7 +231,7 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 
 	// Each candidate tried is a script call at most; nothing here allocates,
 	// since picks run per frame on a tight budget.
-	auto tryRow = [&](size_t r) -> tl::expected<bool, ErrorContext> { return RowHolds(version, r, query); };
+	auto tryRow = [&](size_t r) { return CheckRow(version, r, query); };
 
 	if (def.ranking == UINT32_MAX)
 	{
@@ -155,20 +252,18 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 
 	uint32_t const F        = static_cast<uint32_t>(query.inputs[def.columns[def.ranking].input].i);
 	uint32_t const rankSlot = rows.slot[def.ranking];
-	// Larger is better: a full match, then R & F, then R, then the earlier
-	// row. The last makes it a total order, so rows are tried best first by
-	// scanning for the best below the last one tried; the first try usually
-	// holds.
-	using rank = std::tuple<bool, uint32_t, uint32_t, size_t>;
+	// Larger is better: the shared flag rank, then the earlier row. The last
+	// makes it a total order, so rows are tried best first by scanning for the
+	// best below the last one tried; the first try usually holds.
+	using rank = std::pair<detail::flag_rank, size_t>;
 	auto rankOf = [&](size_t r) -> std::optional<rank>
 	{
-		uint32_t const R   = static_cast<uint32_t>(rows.cells[r * rows.valueCount + rankSlot].i);
-		uint32_t const hit = R & F;
-		if (hit == 0)
+		uint32_t const R = static_cast<uint32_t>(rows.cells[r * rows.valueCount + rankSlot].i);
+		if (!detail::Ranked(R, F))
 		{
 			return std::nullopt;   // the default, or a row matching nothing in the input
 		}
-		return rank{hit == R, hit, R, SIZE_MAX - r};
+		return rank{detail::RankOf(R, F), SIZE_MAX - r};
 	};
 	std::optional<rank> below;
 	while (true)
@@ -229,7 +324,7 @@ tl::expected<std::vector<size_t>, ErrorContext> PickAll(TableVersion const& vers
 	std::vector<size_t> out;
 	for (size_t r = run->first; r < run->last; ++r)
 	{
-		auto holds = RowHolds(version, r, query);
+		auto holds = CheckRow(version, r, query);
 		if (!holds)
 		{
 			return tl::make_unexpected(std::move(holds.error()));
@@ -249,23 +344,13 @@ tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_qu
 	{
 		return tl::make_unexpected(std::move(run.error()));
 	}
-	table_def const&  def  = version_access::Def(version);
-	table_rows const& rows = version_access::Rows(version);
-	uint32_t const    slot = rows.slot[def.output];
-	uint32_t          bits = 0;
-	for (size_t r = run->first; r < run->last; ++r)
+	ErrorContext error;
+	auto         bits = detail::OrOfRows(version, run->first, run->last, query, &error);
+	if (!bits)
 	{
-		auto holds = RowHolds(version, r, query);
-		if (!holds)
-		{
-			return tl::make_unexpected(std::move(holds.error()));
-		}
-		if (*holds)
-		{
-			bits |= static_cast<uint32_t>(rows.cells[r * rows.valueCount + slot].i);
-		}
+		return tl::make_unexpected(std::move(error));
 	}
-	return bits;
+	return *bits;
 }
 
 tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(TableVersion const& version, pick_query const& query,
@@ -280,35 +365,7 @@ tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(TableVersion cons
 	{
 		return std::optional<size_t>();
 	}
-	table_def const&  def  = version_access::Def(version);
-	table_rows const& rows = version_access::Rows(version);
-	uint32_t const    slot = rows.slot[def.weight];
-	auto weightOf = [&](size_t r) { return rows.cells[r * rows.valueCount + slot].d; };
-
-	// Summed in row order, as Load summed it to prove the total finite.
-	double total = 0;
-	for (size_t r = run->first; r < run->last; ++r)
-	{
-		total += weightOf(r);
-	}
-	double const target = DrawUnit(Draw(seed, site)) * total;
-	double       edge   = 0;
-	for (size_t r = run->first; r < run->last; ++r)
-	{
-		edge += weightOf(r);
-		if (target < edge)
-		{
-			return std::optional<size_t>(r);
-		}
-	}
-	// Not reached: Load admits only normal positive weights, so total is a normal
-	// double, and the unit is at most 1 - 2^-53, which puts the exact product at
-	// least half an ulp below total and rounds it below total. The loop above
-	// sums in the order that built total, so its last edge is total and some
-	// row takes the target. A subnormal total could round the product up to
-	// total, which is why Load refuses subnormal weights. The return keeps a
-	// corrupt version from running off the run.
-	return std::optional<size_t>(run->last - 1);
+	return std::optional<size_t>(detail::DrawRow(version, run->first, run->last, seed, site));
 }
 
 tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(relation_store const& store, uint32_t table,

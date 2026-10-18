@@ -1680,13 +1680,8 @@ tl::expected<bool, ErrorContext> ReadHolds(table_def const& def, table_rows cons
 	{
 		return tl::make_unexpected(std::move(checked.error()));
 	}
-	closure const& c     = rows.conditions[row * rows.conditionCount + rows.slot[column]]->get();
-	if (c.function == nullptr)
-	{
-		return true;   // no script condition
-	}
-	ErrorContext   error;
-	bool           holds = c.function(c.data, this_in, &error);
+	ErrorContext error;
+	bool const   holds = detail::CallCondition(rows, row, column, this_in, error);
 	// An error may arrive as context alone, from a closure wrapping another's.
 	if (!error.empty())
 	{

@@ -259,7 +259,7 @@ Notes are ordered by table index, then key, whichever change made them. A refuse
 leaves it empty: the refusal says why. One list of one note type (table, status, key) is all
 a caller needs to find what to fix or retract; there is no callback.
 
-**Machines (built 2026-10-18: definition and `Prepare`).** A machine is one query, prepared
+**Machines (built 2026-10-18: definition, `Prepare`, `Bind`, instances and `Step`).** A machine is one query, prepared
 once. `create_machine` (`tabular/machine.h`) is a command struct like `create_table`; YAML
 writes it under `machines:` beside `tables:`, read by `DocumentFromYaml` (`SchemaFromYaml`
 refuses a document with machines rather than drop them). It holds:
@@ -291,7 +291,11 @@ bound twice; a `where` naming a column that is not a key; a source whose type is
 target's; a `set` from a column that is not a value, or of another type than its state column;
 an `emit` on a table with no command column, or naming one that is not a command; a literal
 outside its ranged input's range, or not finite; on an or table, a `set` from, or a later
-clause reading, any column but its output, and any `emit` (several rows may hold); a hash
+clause reading, any column but its output, and any `emit` (several rows may hold); an `entry`
+clause setting a hash state column (entry runs once per step, after the step list, so a state
+an entry write moved to would get no entry of its own and its R6 state function would never
+start: a transition belongs in the step list; int and double writes are data and stay
+allowed); a hash
 state with no members, a duplicate member, or an initial value that is not a member. Both the
 YAML front end and the definition build name a clause the same way: `machine 'grazer' step
 clause 0 (table 'grazer_brain')`. In YAML, members
@@ -350,9 +354,97 @@ foreign column behind an input key), since a
 dependent's generation does not move when its domain changes. `Machine::Stale(store)` says
 whether any of them has moved, so the machine must be prepared again.
 
-Not built yet: binding to a host, instances, `Step`, the next vector and its swap, sinks, edges
-and reload (later slices). A clause's table inputs are open over their declared ranges even
-when the source is a literal in range.
+A clause's table inputs are open over their declared ranges even when the source is a literal
+in range.
+
+**`Bind(machine, host_binding&&)`** (`tabular/instance.h`) makes a `Binding`: the machine
+plus one `input_getter` per machine input, shared by every instance of an object type and
+held by `counted_ptr`. `host_binding::resolve(name)` is called once per input, in declaration
+order, and is the only place a name meets the host: there is no symbol table and no per-step
+lookup. A getter is `{read, data, release}`, like a closure: `read(data, self, error_out)`
+returns the input as a cell (`i` for a hash, flag set or int, `d` for a double), and `self` is
+the host object the instance belongs to, which the host passes to every `CreateInstance` and
+`Step` call, so a getter reads that object's own state with one indirect call and no lookup by
+id, and the instance keeps no pointer that a moved host object would leave dangling. The same
+`self` is the `this_in` a row's script condition is tested against. `release` runs once, when
+the binding is dropped. `Bind` refuses, naming the machine and the input, when `resolve` is
+missing (a machine with no inputs needs none), refuses an input, or returns a getter with no
+`read`; it adopts every getter `resolve` returns, so a refusal releases those already
+returned. The sink (P12) and report (P15) will be further members of `host_binding`. A
+binding keeps its `Machine`, and so the versions it was proved against: a store change never
+reaches a running binding. The host asks `binding.machine().Stale(store)` (an instance gives
+its `binding()`), and a stale machine is prepared again and its instances rebound (slice 6).
+
+**An `instance`** (snake_case: composited into the host's object, never `new`ed; move-only)
+holds its binding, its id, the current state vector, the next one, and what each clause last
+answered (`Answer(list, clause)`: `Answered` with the row picked, or for an or clause its OR;
+`NoRun`, `Failed` or `SourceHeld` when it held; `NotRun` when its list did not run). Every
+buffer is sized at creation, so **a step allocates nothing**, holds included: a step builds
+no `ErrorContext` of its own and adds no context to a getter's or a condition's failure, which
+it drops (the interpreted picks, and slice 4's report, are the callers that name the table and
+row). Tests count the global `operator new` calls of steps that answer, raise in a script
+condition, see NaN, lose a getter, find no run, and run an or → best → weighted chain: zero.
+A host's own failure message longer than the small-string size allocates on the host's side,
+when the host writes it; Tabular adds nothing. `CreateInstance(binding, id, seed, self)`
+returns the instance (it cannot be refused: a clause that cannot answer holds, as in a step),
+with every state column at its initial value, after running the `create` list and the
+`entry` list as a step runs a list (creation enters the initial state).
+
+**`Step(instance, self, seed)`** runs the prepared query:
+
+1. Every input is read once, so every clause of the step sees one value of it. A getter that
+   fills `error_out` leaves its input without a value this step.
+2. Next is set to a copy of current. **A column no clause writes holds** because of this copy,
+   and a clause that holds writes nothing; neither needs a path of its own.
+3. The `step` clauses run in order. Each reads its sources: a state column from **next**, as
+   the step has written it so far; an earlier clause's answer from this step; an input from
+   the step's read; a literal. So a chain settles in one step from clause order and in-step
+   reads of next, with no settling loop. A clause then finds its run by binary search over its
+   sorted key tuples and picks: a **best** clause clamps each band input as a pick does (the
+   shared clamp), ranks the run's flag groups against the input flags as `PickBest` ranks rows
+   (full match, then `R & F`, then `R`; a group matching nothing skipped, the `R == 0` group
+   last; an unranked table has only that group), finds the input's cell in each group tried by
+   binary search over its cuts, and walks the cell's list calling script conditions until one
+   holds; an **or** clause ORs the output of its run's holding rows (0 for an empty run); a
+   **weighted** clause draws `Draw(seed, site)` over its run. Script conditions, bands, the
+   clamp, the input checks, the flag rank, the OR and the draw are the interpreted picks' own
+   code, so the
+   compiled step and its oracle cannot drift apart there. The clause's `set`s then write next;
+   within a list a later write of a column wins (R4).
+4. **Holds.** A clause writes nothing this step, and its dependents that read it hold too,
+   when a source has no value (`SourceHeld`: an input whose getter failed, an earlier clause
+   that held), when an input is one a pick refuses (`Failed`: NaN for a ranged input (R12), a
+   flag set wider than 32 bits), when its key tuple has no run (`NoRun`: an input-bound key's
+   value outside the domain `Prepare` proved), or when a script condition cannot answer
+   (`Failed`). Inputs are checked before the run is found, as a pick checks its query first.
+   Slice 4 reports a failing pick once per (table, row) from these answers (P15).
+5. **Entry.** "Entered" means a hash state column of next differs from current at the end of
+   the step list, so A → B → A within one step enters nothing. Then the `entry` list runs once
+   against next, its writes landing on top of the step list's (so across lists, step writes,
+   then entry writes). An entry clause may not set a hash state column (the definition build
+   refuses it), so entry never enters again. Int and double state columns are data the machine
+   keeps, not states: a change to one enters nothing, and entry may write them. Slice 4's exit
+   list (R6) will run here, before entry, on the same test.
+6. Next becomes current (the two vectors are swapped).
+
+A weighted clause's draw site is `DrawSite(machine name, list, clause)`: the machine name's
+CityHash32 in the high word, then the list and the clause's position. Two weighted clauses in
+one step, or two machines on one object stepped with one seed, draw different numbers, and a
+reload that keeps the names and places keeps the sites; the host varies the seed per instance
+and step. The picked row of every clause stays readable through `Answer`, which is where slice
+4 takes an `emit` clause's suffix for the sink.
+
+The interpreted picks are the oracle: randomized parity tests step the spec's grazer (keys from
+a state and a message input, a ranked flags input, scripted rows), the sketch's grazer (two
+band inputs, a script condition) and an or → best → weighted chain through thousands of
+inputs, including cuts, the range's top, values outside it, NaN and over-wide flags, and
+compare every clause's answer with `PickBest`, `PickOr` and `PickWeighted` on the same version.
+Further parity cases make each term of the shared flag rank the deciding one, and walk signed
+two-key int tuples where key 0 ties and key 1 decides. What parity tests is Step's own code:
+the tuple search, the laid-out groups, cells and lists. It does not test the helpers Step
+shares with the picks (the clamp, the input checks, the condition test, the OR, the draw, the
+flag rank), since both sides run the same code; those rest on the Pick suites, so the
+checklist's parity item stays `[~]`.
 
 **Picking (owner, 2026-10-12).**
 
@@ -451,13 +543,15 @@ The host supplies:
   Query's `where`, `random`, `count`, `find`, `closest`, `min`, `max` and `sortBy`. As declared
   they run arbitrary script. To allow them, a function's footprint would have to depend on the
   function passed to it. That is the script engine's problem, not Tabular's.
-- **Input resolution** for every name a table reads that Tabular does not own.
+- **Input resolution** for every name a table reads that Tabular does not own (built: a
+  machine's inputs, through `host_binding::resolve` once per input at `Bind`; see Machines).
 - **Sinks** for emitted commands and messages.
-- **A seed** per instance and step.
+- **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
 - **Running state functions:** start a named function for an instance, report when it returns,
   and abort it.
 
-Closures are `{function, data, release}`. `release` is called when a binding is dropped.
+Closures are `{function, data, release}`. A condition's `release` is called when no version
+holds its row; an input getter's (the same shape) when its binding is dropped.
 
 ## State functions (owner, 2026-10-15)
 
@@ -556,8 +650,9 @@ changed through the table's generation counter (see Generation).
    hold conditions, each released once when the last version holding its row lets go.
    **Picking and grids** (built: `tabular/pick.h`, `tabular/grid.h`): inputs, bands and a ranking
    column; `PickBest`, `PickAll`, `PickOr`; pivoted CSV; grid tables and grid CSV.
-4. **Machines** built from tables (definition, YAML `machines:` and `Prepare` built:
-   `tabular/machine.h`, `DocumentFromYaml`; see Machines).
+4. **Machines** built from tables (definition, YAML `machines:`, `Prepare`, `Bind`,
+   instances and `Step` built: `tabular/machine.h`, `tabular/instance.h`, `DocumentFromYaml`;
+   see Machines).
 
 **Two kinds of table (owner, 2026-10-15).**
 

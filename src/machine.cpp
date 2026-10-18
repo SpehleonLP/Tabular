@@ -484,6 +484,21 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 			{
 				return tl::make_unexpected(std::move(clause.error()).with(ClausePlace(def.name, list, i, clauses[i].table)));
 			}
+			// A state is entered when a hash column of next differs from current
+			// at the end of the step, and entry runs once, after the step list: a
+			// hash an entry clause wrote would be a transition that never gets an
+			// entry of its own (R6's state function would never start). Int and
+			// double columns are data, and entry may write them.
+			for (auto const& [column, state] : clause->sets)
+			{
+				if (list == size_t(trigger::Entry) && def.state[state].type == column_type::Hash)
+				{
+					return tl::make_unexpected(ErrorContext("an entry clause sets hash state column '", def.state[state].name,
+						"': entry runs once per step, after the step list, so a state it moved to would get no entry of "
+						"its own; a transition belongs in the step list")
+						.with(ClausePlace(def.name, list, i, clauses[i].table)));
+				}
+			}
 			def.lists[list].push_back(std::move(*clause));
 		}
 	}
