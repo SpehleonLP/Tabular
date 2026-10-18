@@ -66,6 +66,20 @@ owner with my recommendation. Merges still need the owner's approval.
   overlap is still priority by row order. Ties then never depend on load history, so reloading
   identical rows is idempotent.
 
+- **A key says what its domain is** (owner, 2026-10-18, from the display-selection worked
+  example). Every key column of a best table declares where its domain comes from:
+  - members;
+  - another relation's column (a foreign key, e.g. `owner.display` from `display`);
+  - a machine clause's output; or
+  - explicitly `rows`, meaning the keys its own rows name.
+
+  Nothing is inferred. Totality is checked over the domain, so a run whose key has left the
+  domain (its display was retracted, its stimulus is no longer produced) is an orphan. It is
+  reported, never refused, and `Retract` needs no refuse or cascade rule. This refines the
+  version-totality ruling above: "every key run of the version" becomes "every key in the
+  domain". Mutable tables get totality on insert and retract the same way, since the
+  display tables are where "always picks a row" matters most.
+
 ## 1. The method: premises and consequences
 
 For each open item, ask whether `definition.md` already implies it from other features. If
