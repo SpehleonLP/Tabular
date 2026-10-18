@@ -153,20 +153,12 @@ std::string TupleText(std::span<int64_t const> tuple)
 class run_reader
 {
 public:
-	run_reader(table_def const& def, table_rows const& rows) : _def(def), _rows(rows)
+	// Each run is laid into keep when given, after the runs before it, so a
+	// machine keeps them all; otherwise into a layout of the reader's own that
+	// holds one run at a time.
+	run_reader(table_def const& def, table_rows const& rows, kept_runs* keep) : _def(def), _rows(rows), _keep(keep)
 	{
-		// One axis per ranged input a band reads, in input order.
-		for (uint32_t i = 0; i < def.inputs.size(); ++i)
-		{
-			for (column_def const& col : def.columns)
-			{
-				if (col.type == column_type::Band && col.input == i)
-				{
-					_axes.push_back(i);
-					break;
-				}
-			}
-		}
+		LayoutAxes(def, _axes);
 		for (uint32_t i : _axes)
 		{
 			_domain.push_back({def.inputs[i].lo, def.inputs[i].hi});
@@ -207,7 +199,7 @@ public:
 		}
 	}
 
-	// Lays out rows [first, last); the layout's row numbers count from first.
+	// Lays out rows [first, last), naming them by their row numbers in rows.
 	void Lay(size_t first, size_t last)
 	{
 		_boxes.clear();
@@ -217,17 +209,22 @@ public:
 			BoxOf(r, _boxes);
 			_laid.push_back(layout_row{FlagsOf(r), Scripted(r)});
 		}
-		LayOut(_domain, _boxes, _laid, _layout);
+		if (!_keep)
+		{
+			Clear(_layout);
+		}
+		_span = LayOut(_domain, _boxes, _laid, static_cast<uint32_t>(first), Target(), _scratch);
 	}
 
-	run_layout const&         Layout() const { return _layout; }
+	run_layout const&         Layout() const { return _keep ? _keep->layout : _layout; }
+	run_span                  Span() const { return _span; }
 	std::span<interval const> Boxes() const { return _boxes; }
 
 	// The lowest input the default rows (flags 0, which an unranked table's
 	// rows all have) leave without a row that always holds, if any.
 	std::optional<std::vector<float>> Hole() const
 	{
-		return FirstOpen(_layout, _domain, FindGroup(_layout, 0));
+		return FirstOpen(Layout(), _domain, FindGroup(Layout(), _span, 0));
 	}
 
 	std::string WhereText(std::vector<float> const& point) const
@@ -301,6 +298,8 @@ public:
 	}
 
 private:
+	run_layout& Target() { return _keep ? _keep->layout : _layout; }
+
 	std::span<cell const> Cells(size_t r) const
 	{
 		return std::span<cell const>(_rows.cells).subspan(r * _rows.valueCount, _rows.valueCount);
@@ -312,7 +311,10 @@ private:
 	std::vector<interval>   _domain;
 	std::vector<interval>   _boxes;
 	std::vector<layout_row> _laid;
+	kept_runs*              _keep = nullptr;
 	run_layout              _layout;
+	run_span                _span;
+	layout_scratch          _scratch;
 };
 
 bool Meets(interval const* a, interval const* b, size_t dims)
@@ -325,7 +327,6 @@ bool Meets(interval const* a, interval const* b, size_t dims)
 	return meets;
 }
 
-constexpr char kOutsideNoRun[] = "; no row has this key, and the key is in the table's domain";
 
 std::vector<cell> KeyCells(std::span<int64_t const> tuple)
 {
@@ -338,6 +339,54 @@ std::vector<cell> KeyCells(std::span<int64_t const> tuple)
 	return key;
 }
 
+}
+
+void ColumnValues(table_rows const& rows, uint32_t column, std::vector<int64_t>& out)
+{
+	out.clear();
+	for (size_t r = 0; r < rows.RowCount(); ++r)
+	{
+		out.push_back(rows.cells[r * rows.valueCount + rows.slot[column]].i);
+	}
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+}
+
+void DeclaredDomain(domain_def const& declared, table_rows const* foreign, uint32_t k, key_domains& domains)
+{
+	std::vector<int64_t>& values = domains.values[k];
+	values.clear();
+	domains.overRows[k] = 0;
+	switch (declared.kind)
+	{
+	case domain_kind::Members:
+		values.assign(declared.members.begin(), declared.members.end());
+		break;
+	case domain_kind::Rows:
+		domains.overRows[k] = 1;
+		break;
+	case domain_kind::Column:
+		ColumnValues(*foreign, declared.column, values);
+		break;
+	case domain_kind::None:
+		break;   // the schema refuses a best table's key with no domain
+	}
+}
+
+void LayoutAxes(table_def const& def, std::vector<uint32_t>& out)
+{
+	out.clear();
+	for (uint32_t i = 0; i < def.inputs.size(); ++i)
+	{
+		for (column_def const& col : def.columns)
+		{
+			if (col.type == column_type::Band && col.input == i)
+			{
+				out.push_back(i);
+				break;
+			}
+		}
+	}
 }
 
 void ResolveDomain(table_rows const& rows, key_domains& domains)
@@ -404,11 +453,11 @@ void ResolveDomain(table_rows const& rows, key_domains& domains)
 }
 
 tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_domains const& domains,
-	load_refusal* refusal, std::vector<run_note>* report)
+	load_refusal* refusal, std::vector<run_note>* report, kept_runs* keep)
 {
 	table_def const&  def  = subject.def;
 	table_rows const& rows = subject.rows;
-	run_reader        reader(def, rows);
+	run_reader        reader(def, rows, keep);
 	size_t const      dims = reader.Dims();
 
 	auto isFresh = [&](size_t r) { return subject.fresh[r] != SIZE_MAX; };
@@ -495,9 +544,9 @@ tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_dom
 			std::string why;
 			if (start == end)
 			{
-				why = kOutsideNoRun;
+				why = cc(std::string("; no row has this key, and the key is in "), subject.domain);
 			}
-			else if (!subject.source.empty())
+			else if (!subject.source.empty() || subject.change.empty())
 			{
 				why = cc(std::string("; its first row is "), reader.SurvivorText(start));
 			}
@@ -565,10 +614,41 @@ tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_dom
 			return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", reader.KeyText(b), "): ",
 				label(b), " is never picked; ", by));
 		}
+		if (keep)
+		{
+			keep->runs.push_back(reader.Span());
+		}
 		return {};
 	};
 
 	return WalkDomain(rows, def.key_count, domains, onRun);
+}
+
+tl::expected<void, ErrorContext> CheckRuns(check_subject const& subject, key_domains const& domains, bool everyTuple,
+	std::vector<run_note>* report, std::vector<row_span>& runs)
+{
+	table_def const& def = subject.def;
+	runs.clear();
+	auto onRun = [&](size_t start, size_t end, std::span<int64_t const> key, bool inDomain)
+		-> tl::expected<void, ErrorContext>
+	{
+		if (!inDomain)
+		{
+			if (report)
+			{
+				report->push_back(run_note{subject.table, run_status::Orphan, KeyCells(key)});
+			}
+			return {};
+		}
+		if (start == end && everyTuple)
+		{
+			return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", TupleText(key),
+				") has no row to draw; no row has this key, and the key is in ", subject.domain));
+		}
+		runs.push_back(row_span{static_cast<uint32_t>(start), static_cast<uint32_t>(end - start)});
+		return {};
+	};
+	return WalkDomain(subject.rows, def.key_count, domains, onRun);
 }
 
 }

@@ -5,26 +5,41 @@
 namespace tabular::detail
 {
 
-void LayOut(std::span<interval const> domain, std::span<interval const> boxes, std::span<layout_row const> rows,
-	run_layout& out)
+void Clear(run_layout& layout)
 {
+	layout.dims = 0;
+	layout.groupFlags.clear();
+	layout.cutStart.assign(1, 0);
+	layout.cuts.clear();
+	layout.cellStart.assign(1, 0);
+	layout.listStart.assign(1, 0);
+	layout.lists.clear();
+	layout.closed.clear();
+	layout.listed.clear();
+}
+
+run_span LayOut(std::span<interval const> domain, std::span<interval const> boxes, std::span<layout_row const> rows,
+	uint32_t firstRow, run_layout& out, layout_scratch& scratch)
+{
+	// Each "then one end" array ends in an entry that is also the next run's
+	// start, so appending is pushing; an untouched layout needs that entry.
+	if (out.listStart.empty())
+	{
+		Clear(out);
+	}
 	size_t const dims = domain.size();
 	out.dims = dims;
-	out.groupFlags.clear();
-	out.cutStart.clear();
-	out.cuts.clear();
-	out.cellStart.clear();
-	out.listStart.clear();
-	out.lists.clear();
-	out.closed.clear();
 	out.listed.assign(rows.size(), 0);
 
+	run_span span{static_cast<uint32_t>(out.groupFlags.size()), 0};
 	for (layout_row const& row : rows)
 	{
 		out.groupFlags.push_back(row.flags);
 	}
-	std::sort(out.groupFlags.begin(), out.groupFlags.end());
-	out.groupFlags.erase(std::unique(out.groupFlags.begin(), out.groupFlags.end()), out.groupFlags.end());
+	auto const groupsBegin = out.groupFlags.begin() + span.first;
+	std::sort(groupsBegin, out.groupFlags.end());
+	out.groupFlags.erase(std::unique(groupsBegin, out.groupFlags.end()), out.groupFlags.end());
+	span.count = static_cast<uint32_t>(out.groupFlags.size() - span.first);
 
 	bool domainEmpty = false;
 	for (interval const& axis : domain)
@@ -32,12 +47,14 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 		domainEmpty = domainEmpty || !(axis.lo < axis.hi);
 	}
 
-	std::vector<uint32_t> members;   // the current group's rows, in row order
-	std::vector<size_t>   index(dims);
-	std::vector<float>    corner(dims);
-	out.listStart.push_back(0);
-	for (uint32_t const flags : out.groupFlags)
+	std::vector<uint32_t>& members = scratch.members;
+	std::vector<size_t>&   index   = scratch.index;
+	std::vector<float>&    corner  = scratch.corner;
+	index.resize(dims);
+	corner.resize(dims);
+	for (uint32_t g = span.first; g < span.first + span.count; ++g)
 	{
+		uint32_t const flags = out.groupFlags[g];
 		members.clear();
 		for (size_t r = 0; r < rows.size(); ++r)
 		{
@@ -49,11 +66,11 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 		// Cuts per axis: the domain's ends and every edge of the group's boxes
 		// strictly inside. Only this group's edges: another group's rows are
 		// never tried in this group's lists, so their edges split nothing.
-		size_t cells = domainEmpty ? 0 : 1;
+		size_t const axisBase = out.cutStart.size() - 1;   // this group's axis 0
+		size_t       cells    = domainEmpty ? 0 : 1;
 		for (size_t a = 0; a < dims; ++a)
 		{
 			size_t const first = out.cuts.size();
-			out.cutStart.push_back(static_cast<uint32_t>(first));
 			out.cuts.push_back(domain[a].lo);
 			out.cuts.push_back(domain[a].hi);
 			for (uint32_t r : members)
@@ -68,13 +85,12 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 			}
 			std::sort(out.cuts.begin() + first, out.cuts.end());
 			out.cuts.erase(std::unique(out.cuts.begin() + first, out.cuts.end()), out.cuts.end());
+			out.cutStart.push_back(static_cast<uint32_t>(out.cuts.size()));
 			cells *= out.cuts.size() - first - 1;
 		}
-		out.cellStart.push_back(static_cast<uint32_t>(out.closed.size()));
 
 		// Odometer over the group's cells, axis 0 most significant. A cell lies
 		// wholly inside or outside each box, so its low corner speaks for it.
-		size_t const axisBase = out.cutStart.size() - dims;
 		std::fill(index.begin(), index.end(), 0);
 		for (size_t c = 0; c < cells; ++c)
 		{
@@ -95,7 +111,7 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 				{
 					continue;
 				}
-				out.lists.push_back(r);
+				out.lists.push_back(firstRow + r);
 				out.listed[r] = 1;
 				// A row with no script always holds once its bands do, so the pick
 				// stops here and nothing after it in the group is ever tried.
@@ -109,9 +125,7 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 			out.listStart.push_back(static_cast<uint32_t>(out.lists.size()));
 			for (size_t a = dims; a > 0; --a)
 			{
-				size_t const axisCuts = out.cutStart.size() > axisBase + a
-					? out.cutStart[axisBase + a] - out.cutStart[axisBase + a - 1]
-					: out.cuts.size() - out.cutStart[axisBase + a - 1];
+				size_t const axisCuts = out.cutStart[axisBase + a] - out.cutStart[axisBase + a - 1];
 				if (++index[a - 1] + 1 < axisCuts)
 				{
 					break;
@@ -119,15 +133,17 @@ void LayOut(std::span<interval const> domain, std::span<interval const> boxes, s
 				index[a - 1] = 0;
 			}
 		}
+		out.cellStart.push_back(static_cast<uint32_t>(out.closed.size()));
 	}
-	out.cutStart.push_back(static_cast<uint32_t>(out.cuts.size()));
-	out.cellStart.push_back(static_cast<uint32_t>(out.closed.size()));
+	return span;
 }
 
-size_t FindGroup(run_layout const& layout, uint32_t flags)
+size_t FindGroup(run_layout const& layout, run_span run, uint32_t flags)
 {
-	auto found = std::lower_bound(layout.groupFlags.begin(), layout.groupFlags.end(), flags);
-	if (found == layout.groupFlags.end() || *found != flags)
+	auto const begin = layout.groupFlags.begin() + run.first;
+	auto const end   = begin + run.count;
+	auto       found = std::lower_bound(begin, end, flags);
+	if (found == end || *found != flags)
 	{
 		return SIZE_MAX;
 	}

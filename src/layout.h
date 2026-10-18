@@ -36,8 +36,11 @@ struct layout_row
 // one list answers for every input in it. A cell's list holds the group's rows
 // whose boxes contain it, in row order, ending at the first with no script.
 //
-// Flat, so a compiled pick reads it without chasing pointers: offsets into
-// shared arrays, never a vector per cell.
+// One layout holds any number of runs laid one after another, each a span of
+// groups (run_span), so a machine's clause keeps every run of its domain in
+// one set of arrays and Load reuses one for run after run. Every run in one
+// layout has the same axes. Flat, so a compiled pick reads it without chasing
+// pointers: offsets into shared arrays, never a vector per cell.
 struct run_layout
 {
 	size_t                dims = 0;
@@ -46,21 +49,60 @@ struct run_layout
 	std::vector<float>    cuts;         // per (group, axis): ascending, domain ends included
 	std::vector<uint32_t> cellStart;    // per group, then one end: the group's first cell
 	std::vector<uint32_t> listStart;    // per cell, then one end: offsets into lists
-	std::vector<uint32_t> lists;        // run row numbers
+	std::vector<uint32_t> lists;        // row numbers, as LayOut was given them
+	// Proof only: a pick never reads these, so a kept layout may drop them.
 	std::vector<uint8_t>  closed;       // per cell: its list ends in a row with no script
-	std::vector<uint8_t>  listed;       // per run row: it appears in some list of its group
+	std::vector<uint8_t>  listed;       // per row of the run laid last: it appears in some list of its group
 };
 
-// Lays out count rows whose boxes (domain.size() intervals each, one row after
-// another, already cut down to the domain) and flags are given in row order.
-// Cells run in odometer order with axis 0 most significant, so the first
-// unclosed cell of a group holds the lowest input that group misses. out is
-// overwritten; reusing one across runs keeps its allocations.
-void LayOut(std::span<interval const> domain, std::span<interval const> boxes, std::span<layout_row const> rows,
-	run_layout& out);
+// Where one run's groups sit in a layout: [first, first + count).
+struct run_span
+{
+	uint32_t first = 0;
+	uint32_t count = 0;
+};
 
-// The group whose rows have flags, or SIZE_MAX when no row has them.
-size_t FindGroup(run_layout const& layout, uint32_t flags);
+// Where one run's rows sit in a version: rows [first, first + count). A table
+// picked without a layout (or, weighted) is kept as these.
+struct row_span
+{
+	uint32_t first = 0;
+	uint32_t count = 0;
+};
+
+// What LayOut needs while it works and does not keep. A caller laying run
+// after run passes the same one, so the work allocates nothing once warm.
+struct layout_scratch
+{
+	std::vector<uint32_t> members;   // the current group's rows, in run order
+	std::vector<size_t>   index;     // odometer digits, one per axis
+	std::vector<float>    corner;    // the current cell's low corner
+};
+
+// The runs a machine's clause keeps: one layout and, per run laid into it in
+// domain order, where its groups are.
+struct kept_runs
+{
+	run_layout            layout;
+	std::vector<run_span> runs;
+};
+
+// Empties layout, keeping its allocations: no runs, the "one end" entries at 0.
+void Clear(run_layout& layout);
+
+// Appends one run of count rows whose boxes (domain.size() intervals each, one
+// row after another, already cut down to the domain) and flags are given in
+// run order; its lists name row r as firstRow + r, so a version's row numbers
+// go in unchanged. Cells run in odometer order with axis 0 most significant,
+// so the first unclosed cell of a group holds the lowest input that group
+// misses. A layout default-constructed or Cleared takes its axes from the
+// first run.
+run_span LayOut(std::span<interval const> domain, std::span<interval const> boxes, std::span<layout_row const> rows,
+	uint32_t firstRow, run_layout& out, layout_scratch& scratch);
+
+// The group of run whose rows have flags, as an index into the layout, or
+// SIZE_MAX when no row of the run has them.
+size_t FindGroup(run_layout const& layout, run_span run, uint32_t flags);
 
 // The lowest input of domain that group's lists leave open (no list there ends
 // in a row with no script), or none. A missing group (SIZE_MAX) closes

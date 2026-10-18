@@ -13,6 +13,24 @@
 namespace tabular
 {
 
+// A type as messages name it.
+inline char const* TypeName(column_type type)
+{
+	switch (type)
+	{
+	case column_type::Hash:      return "hash";
+	case column_type::Flags:     return "flag set";
+	case column_type::Int:       return "int";
+	case column_type::Double:    return "double";
+	case column_type::Condition: return "condition";
+	case column_type::Command:   return "command";
+	case column_type::Vec2:      return "vec2";
+	case column_type::String:    return "string";
+	case column_type::Band:      return "band";
+	}
+	return "unknown type";
+}
+
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
 // carried as int64_t, widened without sign. Anything outside [0, 2^32) is
 // either not one of them or a sign-extended copy, which would be a different

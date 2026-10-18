@@ -16,6 +16,7 @@
 namespace tabular
 {
 
+struct domain_def;
 struct load_refusal;
 struct run_note;
 struct table_def;
@@ -23,6 +24,9 @@ struct table_rows;
 
 namespace detail
 {
+
+struct kept_runs;
+struct row_span;
 
 // The key tuples a version must be total over. The caller says, per key
 // column, whether it is over its own rows or else which values its domain
@@ -43,6 +47,21 @@ struct key_domains
 // domain is read for. Work is proportional to the rows and the tuples.
 void ResolveDomain(table_rows const& rows, key_domains& domains);
 
+// The distinct values a value column holds across rows, sorted: a domain
+// taken from another table's column.
+void ColumnValues(table_rows const& rows, uint32_t column, std::vector<int64_t>& out);
+
+// Key column k of domains as declared: its members, the values of another
+// table's column (foreign, that table's rows as the caller reads them; read
+// only for a Column domain), or over its own rows. Load and a machine's
+// Prepare both start a key from here; Prepare then overrides the keys its
+// sources close.
+void DeclaredDomain(domain_def const& declared, table_rows const* foreign, uint32_t k, key_domains& domains);
+
+// A best table's layout axes: per axis, the input it reads, one per ranged
+// input a band reads, in input order.
+void LayoutAxes(table_def const& def, std::vector<uint32_t>& out);
+
 // A best table's candidate version, and which of its rows the change brought.
 struct check_subject
 {
@@ -57,20 +76,35 @@ struct check_subject
 	std::string_view        change;   // the change, for messages: "this load"
 	// The table this one's domain is read from, when the change is to that
 	// table and not this one: a refusal then says this table is not total,
-	// since the gap may be older than the change.
+	// since the gap may be older than the change. With change and source both
+	// empty there is no change: a standing version is proved over a domain of
+	// someone else's (a machine's clause), and a gap is named by its first row.
 	std::string_view        source;
 	// Never refuse, and check nothing but totality: every in-domain run that is
 	// not total is noted instead (a change that is never refused).
 	bool                    survey = false;
+	// Whose domain a tuple with no run is in, for messages.
+	std::string_view        domain = "the table's domain";
 };
 
 // Every key tuple in the domain has a total run; in those runs no two owners'
 // rows with equal flags overlap and no row is dead. The first failure in key
 // order is refused; refusal, if given, names the fresh rows at fault. A run
 // outside the domain is an orphan, appended to report if given; a survey
-// appends every run that is not total too, and refuses nothing.
+// appends every run that is not total too, and refuses nothing. Load and a
+// machine's Prepare differ only in the domain they pass: keep, if given,
+// receives every in-domain run's layout, one per tuple in domain order, with
+// the rows named by their numbers in subject.rows.
 tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_domains const& domains,
-	load_refusal* refusal, std::vector<run_note>* report);
+	load_refusal* refusal, std::vector<run_note>* report, kept_runs* keep = nullptr);
+
+// A table picked without a layout (an or or a weighted table), over a
+// machine clause's domain: runs receives each in-domain run's version rows,
+// one per tuple in domain order, a tuple no run has as an empty span. A run
+// outside the domain is an orphan, appended to report if given. With
+// everyTuple (a weighted draw needs a row) a tuple no run has is refused.
+tl::expected<void, ErrorContext> CheckRuns(check_subject const& subject, key_domains const& domains, bool everyTuple,
+	std::vector<run_note>* report, std::vector<row_span>& runs);
 
 }
 

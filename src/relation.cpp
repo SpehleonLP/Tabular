@@ -19,23 +19,6 @@ namespace tabular
 namespace
 {
 
-char const* TypeName(column_type type)
-{
-	switch (type)
-	{
-	case column_type::Hash:      return "hash";
-	case column_type::Flags:     return "flag set";
-	case column_type::Int:       return "int";
-	case column_type::Double:    return "double";
-	case column_type::Condition: return "condition";
-	case column_type::Command:   return "command";
-	case column_type::Vec2:      return "vec2";
-	case column_type::String:    return "string";
-	case column_type::Band:      return "band";
-	}
-	return "unknown type";
-}
-
 // Keys and orders compare by equality, which only an integer value gives:
 // doubles fail on NaN and -0.0, and conditions and commands are not values.
 bool ComparesByEquality(column_type type)
@@ -1329,31 +1312,9 @@ void relation_store::Storage::DomainOf(uint32_t table, table_rows const& rows, u
 		{
 			continue;
 		}
-		domain_def const&     d      = def.domains[k];
-		std::vector<int64_t>& values = out.values[k];
-		values.clear();
-		switch (d.kind)
-		{
-		case domain_kind::Members:
-			values.assign(d.members.begin(), d.members.end());
-			break;
-		case domain_kind::Rows:
-			out.overRows[k] = 1;
-			break;
-		case domain_kind::Column:
-		{
-			table_rows const& from = RowsDuring(d.table, changed, candidate);
-			for (size_t r = 0; r < from.RowCount(); ++r)
-			{
-				values.push_back(from.cells[r * from.valueCount + from.slot[d.column]].i);
-			}
-			std::sort(values.begin(), values.end());
-			values.erase(std::unique(values.begin(), values.end()), values.end());
-			break;
-		}
-		case domain_kind::None:
-			break;   // the schema refuses a best table's key with no domain
-		}
+		domain_def const& d = def.domains[k];
+		detail::DeclaredDomain(d, d.kind == domain_kind::Column ? &RowsDuring(d.table, changed, candidate) : nullptr, k,
+			out);
 		++k;
 	}
 	detail::ResolveDomain(rows, out);

@@ -69,10 +69,10 @@ Needed before machines: "a machine is a SELECT checked to always produce exactly
 
 Whatever the loader checks, an author can know by reading the table [def promise 2].
 
-- [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1, Key domains; cat §2.6] (built for best tables, read-only and mutable: every key declares its domain (members, another table's column, or rows), every tuple of the domain has a total run, orphans are reported, a foreign domain re-checks its dependents when its table changes, and a bare retract reports instead of refusing; key domains closed by machine clauses wait for slice 3)
+- [~] Totality over finite key domains; a table with opaque conditions must end in an unconditional row or an explicit hold [def promise 1, Key domains; cat §2.6] (built for best tables, read-only and mutable: every key declares its domain (members, another table's column, or rows), every tuple of the domain has a total run, orphans are reported, a foreign domain re-checks its dependents when its table changes, and a bare retract reports instead of refusing; and a machine's `Prepare` checks each clause over the domain its sources close: a hash state column by its members, an earlier best or weighted clause by what its rows can answer, a literal by its value; any other source (a machine input, an int or double state, an or clause's flags) keeps the table's declared domain; one check with the domain as its parameter, and `Prepare` reports orphans as a load does. Totality at run time waits for `Step`)
 - [x] Shadowed / unreachable rows refused (e.g. an earlier row with no conditions makes later rows dead) [arc §2.9; sr §6.1, §7] (best tables, on load and on insert; a row in no list of the run layout; partial overlaps are priority within one owner; between owners, equal-flag overlaps are refused)
-- [ ] Within one step, tables that feed each other form a DAG; a cycle is refused, naming the tables [def promise 2; attach §4]
-- [ ] Two tables writing one state column refused [arc §2.6; attach §4; c3 §5.4]
+- [x] Within one step, tables that feed each other form a DAG; a cycle is refused, naming the tables [def promise 2; attach §4] (P11: a clause names only earlier clauses of its list, so the DAG holds by how a machine is written; a clause naming itself or a later one is refused at definition build, naming the machine, list and clause)
+- [~] Two tables writing one state column refused [arc §2.6; attach §4; c3 §5.4] (R4 as accepted: two clauses writing one column are ordered by position and the later write wins, so they are not refused; one clause writing a column twice is. That the later write wins needs `Step`)
 
 ## 5. Host interface
 
@@ -84,15 +84,15 @@ Whatever the loader checks, an author can know by reading the table [def promise
 
 ## 6. Machines
 
-- [ ] Definition (immutable, per bundle section) → Binding (per definition × object type: closures, resolved inputs, state layout) → Instance (per object: state vector, edge history) [def Lifetimes; cat §2.2]
-- [ ] State vector declared in the definition, owned by the table, not mirrored in script; script reads it late-bound by name [sr §4.1; memory: no script mirror]
+- [~] Definition (immutable, per bundle section) → Binding (per definition × object type: closures, resolved inputs, state layout) → Instance (per object: state vector, edge history) [def Lifetimes; cat §2.2] (definition built: `create_machine`, YAML `machines:`, `CheckMachine`, and `Prepare` returning an immutable `Machine` that holds the versions it read and can say it is stale; binding and instance not built)
+- [~] State vector declared in the definition, owned by the table, not mirrored in script; script reads it late-bound by name [sr §4.1; memory: no script mirror] (declared: hash columns with members and an initial member, int and double columns with an initial value; no instance holds one yet)
 - [ ] Values write the *next* state vector, swapped in at the end of the step; next state always names a member, never computed from a state [def A row]
-- [ ] Transition tables and entry tables [def Structure]
+- [~] Transition tables and entry tables [def Structure] (they are clauses under `step` and `entry`, defined and proved by `Prepare` over the state's members; running them waits for `Step` and `CreateInstance`)
 - [ ] Bridges: a suffix command describing the steps between two states (?) [def Structure, Undecided; cat §2.1]
 - [ ] State-function table: a state maps to an ordinary host script function, which may suspend; the machine holds the state until it returns [def State functions]
 - [ ] Function-chain table: the chain of functions between two functions [def State functions]
 - [ ] State functions are aborted and their state re-entered on reload [def State functions]
-- [ ] "Exactly one row" proved for the machine's SELECT, then compiled to run fast (closures or machine code; undecided) [def A machine is a SELECT; sr §6.4; guard §3]
+- [~] "Exactly one row" proved for the machine's SELECT, for input values in the table's declared domain, then compiled to run fast (closures or machine code; undecided) [def A machine is a SELECT; sr §6.4; guard §3] (proved and laid out by `Prepare`: every tuple of each best clause's domain has a total run with no dead row, every weighted clause's tuple has a run, an or clause always answers one value (0 for no run), every hash a set writes is a member, and the layout of every best run is kept as flat arrays with a run directory, each or and weighted run as version rows; an all table is refused; an input value outside the declared domain at run time is `Step`'s business; the step that reads it is not built)
 - [ ] Hot reload migrates instance state by name: keep, reset to initial, or drop [def promise 5; sr §4.4]
 - [ ] Snapshot rule: wires read other entities' committed state as of step start (?) [def Undecided; c3 §8.5]
 - [ ] Several machines per object as orthogonal regions [arc §4.1]

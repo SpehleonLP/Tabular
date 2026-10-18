@@ -8,9 +8,12 @@
 using tabular::detail::FindGroup;
 using tabular::detail::FirstOpen;
 using tabular::detail::interval;
+using tabular::detail::Clear;
 using tabular::detail::LayOut;
 using tabular::detail::layout_row;
+using tabular::detail::layout_scratch;
 using tabular::detail::run_layout;
+using tabular::detail::run_span;
 
 namespace
 {
@@ -22,8 +25,9 @@ std::optional<std::vector<float>> Uncovered(std::span<interval const> domain, st
 {
 	std::vector<layout_row> rows(count);
 	run_layout              layout;
-	LayOut(domain, boxes, rows, layout);
-	return FirstOpen(layout, domain, FindGroup(layout, 0));
+	layout_scratch          scratch;
+	run_span const          run = LayOut(domain, boxes, rows, 0, layout, scratch);
+	return FirstOpen(layout, domain, FindGroup(layout, run, 0));
 }
 
 std::vector<uint32_t> ListAt(run_layout const& layout, size_t group, size_t cell)
@@ -100,7 +104,8 @@ TEST(Coverage, AListHoldsTheRowsTriedAndStopsAtTheFirstWithNoScript)
 	interval const   boxes[] = {{0.0f, 1.0f}, {0.0f, 0.5f}, {0.0f, 1.0f}};
 	layout_row const rows[]  = {{0, true}, {0, false}, {0, false}};
 	run_layout       layout;
-	LayOut(domain, boxes, rows, layout);
+	layout_scratch   scratch;
+	LayOut(domain, boxes, rows, 0, layout, scratch);
 	ASSERT_EQ(layout.groupFlags, (std::vector<uint32_t>{0}));
 	ASSERT_EQ(layout.cellStart[1] - layout.cellStart[0], 2u);
 	EXPECT_EQ(ListAt(layout, 0, 0), (std::vector<uint32_t>{0, 1}));
@@ -115,7 +120,8 @@ TEST(Coverage, ARowEveryEarlierPlainRowCoversIsInNoList)
 	interval const   boxes[]  = {{0.0f, 1.0f}, {0.25f, 0.5f}};
 	layout_row const rows[]   = {{0, false}, {0, false}};
 	run_layout       layout;
-	LayOut(domain, boxes, rows, layout);
+	layout_scratch   scratch;
+	LayOut(domain, boxes, rows, 0, layout, scratch);
 	EXPECT_EQ(layout.listed, (std::vector<uint8_t>{1, 0}));
 }
 
@@ -127,14 +133,61 @@ TEST(Coverage, GroupsAreByFlagSetAndCutOnlyAtTheirOwnEdges)
 	interval const   boxes[] = {{0.0f, 0.3f}, {0.0f, 1.0f}};
 	layout_row const rows[]  = {{4, false}, {0, false}};
 	run_layout       layout;
-	LayOut(domain, boxes, rows, layout);
+	layout_scratch   scratch;
+	run_span const   run = LayOut(domain, boxes, rows, 0, layout, scratch);
 	ASSERT_EQ(layout.groupFlags, (std::vector<uint32_t>{0, 4}));
 	EXPECT_EQ(layout.cellStart[1] - layout.cellStart[0], 1u) << "the default group has one cell";
 	EXPECT_EQ(layout.cellStart[2] - layout.cellStart[1], 2u) << "the flagged group is cut at 0.3";
 	EXPECT_EQ(layout.listed, (std::vector<uint8_t>{1, 1}));
-	EXPECT_FALSE(FirstOpen(layout, domain, FindGroup(layout, 0)).has_value());
-	auto open = FirstOpen(layout, domain, FindGroup(layout, 4));
+	EXPECT_FALSE(FirstOpen(layout, domain, FindGroup(layout, run, 0)).has_value());
+	auto open = FirstOpen(layout, domain, FindGroup(layout, run, 4));
 	ASSERT_TRUE(open.has_value());
 	EXPECT_EQ(*open, (std::vector<float>{0.3f}));
-	EXPECT_EQ(FindGroup(layout, 2), SIZE_MAX);
+	EXPECT_EQ(FindGroup(layout, run, 2), SIZE_MAX);
+}
+
+TEST(Coverage, RunsAppendWithTheirOwnGroupsAndTheRowNumbersGiven)
+{
+	interval const domain[] = {{0.0f, 1.0f}};
+	// The first run (rows 10, 11) is total; the second (rows 20, 21) leaves
+	// [0.5, 1) to a scripted row and has a flagged group of its own.
+	interval const   firstBoxes[]  = {{0.0f, 0.5f}, {0.5f, 1.0f}};
+	layout_row const firstRows[]   = {{0, false}, {0, false}};
+	interval const   secondBoxes[] = {{0.0f, 0.5f}, {0.5f, 1.0f}, {0.0f, 1.0f}};
+	layout_row const secondRows[]  = {{0, false}, {0, true}, {2, false}};
+	run_layout       layout;
+	layout_scratch   scratch;
+	run_span const   first  = LayOut(domain, firstBoxes, firstRows, 10, layout, scratch);
+	run_span const   second = LayOut(domain, secondBoxes, secondRows, 20, layout, scratch);
+	EXPECT_EQ(first.first, 0u);
+	EXPECT_EQ(first.count, 1u);
+	EXPECT_EQ(second.first, 1u);
+	EXPECT_EQ(second.count, 2u);
+	EXPECT_EQ(layout.groupFlags, (std::vector<uint32_t>{0, 0, 2}));
+	EXPECT_EQ(ListAt(layout, 0, 0), (std::vector<uint32_t>{10}));
+	EXPECT_EQ(ListAt(layout, 0, 1), (std::vector<uint32_t>{11}));
+	EXPECT_EQ(ListAt(layout, 1, 1), (std::vector<uint32_t>{21})) << "version row numbers, not run-relative";
+	EXPECT_EQ(ListAt(layout, 2, 0), (std::vector<uint32_t>{22}));
+	EXPECT_FALSE(FirstOpen(layout, domain, FindGroup(layout, first, 0)).has_value()) << "the first run is untouched";
+	auto open = FirstOpen(layout, domain, FindGroup(layout, second, 0));
+	ASSERT_TRUE(open.has_value()) << "FirstOpen reads the second run at its own base";
+	EXPECT_EQ(*open, (std::vector<float>{0.5f}));
+	EXPECT_EQ(FindGroup(layout, first, 2), SIZE_MAX) << "a group of another run is not this run's";
+	EXPECT_EQ(FindGroup(layout, second, 2), 2u);
+}
+
+TEST(Coverage, ClearEmptiesALayoutForTheNextRun)
+{
+	interval const   domain[] = {{0.0f, 1.0f}};
+	interval const   boxes[]  = {{0.0f, 1.0f}};
+	layout_row const rows[]   = {{0, false}};
+	run_layout       layout;
+	layout_scratch   scratch;
+	LayOut(domain, boxes, rows, 5, layout, scratch);
+	Clear(layout);
+	run_span const run = LayOut(domain, boxes, rows, 7, layout, scratch);
+	EXPECT_EQ(run.first, 0u);
+	EXPECT_EQ(layout.groupFlags.size(), 1u);
+	EXPECT_EQ(layout.lists, (std::vector<uint32_t>{7}));
+	EXPECT_EQ(layout.cutStart, (std::vector<uint32_t>{0, 2}));
 }

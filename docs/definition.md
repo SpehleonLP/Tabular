@@ -53,8 +53,8 @@ the feature is wrong, not the rule.
    and retract-then-load agrees with a one-step reload. A bare retract (or a load of no rows)
    is never checked, so crash recovery cannot fail; it reports what it leaves instead. Two
    owners' rows with equal flags may not overlap in one run (see Flag matching).
-   A key closed by a machine clause's output waits for machines. An all or an or table may
-   answer nothing.
+   A machine clause's key is proved by the machine's `Prepare` over the domain its source closes
+   (see Machines). An all or an or table may answer nothing.
 2. **Decidability.** Rows are finite, there is no recursion, and within one step the tables
    that feed each other form a DAG. Whatever the loader checks about a table, an author can
    also know by reading it.
@@ -215,7 +215,9 @@ the column's `domain:`:
   column, or a column of another type than the key, is refused. Tables whose domains come from
   other tables form a DAG; a cycle, a table naming itself included, is refused naming it.
 - `rows` (`domain: rows`): the key's own table's rows name its values.
-- A machine clause's output is the fourth kind, built with machines.
+- A machine clause's output is the fourth kind. It is not declared on the table: a machine's
+  `Prepare` closes a clause's key by its source (see Machines), and the table keeps one of the
+  three kinds above for its own loads.
 
 A key's domain is a set of key tuples. The key columns declared `rows` together contribute
 the distinct joint sub-tuples the table's rows hold in them, never a product of each column's
@@ -244,6 +246,9 @@ ranges' ends, and per cell the group's rows whose bands contain it, in try order
 index), ending at the first row with no script. Totality is "every list of the default group
 (flags 0) ends in a row with no script"; a dead row is "a row in no list of its group". The
 lists are flat arrays and offsets, the form a machine's `Prepare` keeps as its compiled pick.
+One layout holds any number of runs laid one after another, each a span of groups, and names
+rows by their version row numbers; `Load` lays one run at a time into a layout it reuses, and
+`Prepare` keeps every run of a clause's domain in one.
 
 **The report.** `load_rows`, `insert_row`, `retract_owner` and `csv_rows` take an optional
 `std::vector<run_note>* report`. It is cleared, and if the change is accepted filled with
@@ -253,6 +258,101 @@ is the state of those tables, not a delta: an orphan the change did not make is 
 Notes are ordered by table index, then key, whichever change made them. A refused change
 leaves it empty: the refusal says why. One list of one note type (table, status, key) is all
 a caller needs to find what to fix or retract; there is no callback.
+
+**Machines (built 2026-10-18: definition and `Prepare`).** A machine is one query, prepared
+once. `create_machine` (`tabular/machine.h`) is a command struct like `create_table`; YAML
+writes it under `machines:` beside `tables:`, read by `DocumentFromYaml` (`SchemaFromYaml`
+refuses a document with machines rather than drop them). It holds:
+
+- a **state vector**: named columns, each a `hash` with members and an initial member, or an
+  `int` or `double` with an initial value;
+- the machine's **inputs**, named and typed like a table's (a hash or an int too, since an
+  input may feed a key);
+- four ordered **clause lists**, `create`, `entry`, `step` and `exit`. A clause reads one
+  picked table that answers one value per column (a best, an or or a weighted table): `from` the table, `where` each key column = a source, `given` each table input = a
+  source, then `set` state columns from the picked row's value columns and/or `emit` a command
+  column (the suffix included). Transition and entry tables are clauses, not table kinds.
+
+A **source** is a state column (`state.mode`), a machine input (`input.energy`), a value column
+of the row an earlier clause of the same list picked (`clause.0.mood`), or a literal
+(`{literal: scared}`, read as a cell of the target's type; a literal is a scalar). A literal
+given to a ranged double input must be finite and inside the range (R12: a pick's clamp has no
+place for NaN, and a constant outside the range is a mistake, not a value to clamp). A clause
+may name only earlier
+clauses, so a list is a DAG by how it is written and there is no cycle check; a clause naming
+itself or a later one is refused. Two clauses setting one state column are ordered by
+position, and the later write wins (R4); one clause setting a column twice is refused.
+
+The definition build (`CheckMachine`, which `DocumentFromYaml` runs on every machine and
+`Prepare` runs first) refuses: an unknown table, column, input or state column; a clause on a
+table with no pick, or on an all table (an all pick answers every row that holds, not one value
+per column); a key or table input left unbound, or
+bound twice; a `where` naming a column that is not a key; a source whose type is not its
+target's; a `set` from a column that is not a value, or of another type than its state column;
+an `emit` on a table with no command column, or naming one that is not a command; a literal
+outside its ranged input's range, or not finite; on an or table, a `set` from, or a later
+clause reading, any column but its output, and any `emit` (several rows may hold); a hash
+state with no members, a duplicate member, or an initial value that is not a member. Both the
+YAML front end and the definition build name a clause the same way: `machine 'grazer' step
+clause 0 (table 'grazer_brain')`. In YAML, members
+and literals are hashed as CSV cells are, so within one machine a name hashing to 0 or two names
+with one hash are refused.
+
+**`Prepare(create_machine, store, report)` proves by laying out.** It returns an immutable,
+reference-counted `Machine` holding the version of every table its clauses read. For each
+clause it reads the **clause's key domain** from the sources. A source that closes its key
+gives the values it can hold:
+
+- a hash state column, the column's members;
+- an earlier best or weighted clause, the distinct values of the column read over the rows the
+  earlier clause can answer from (the rows a best clause's layout reaches, every row of a
+  weighted clause's in-domain runs);
+- a literal, its one value.
+
+Every other source closes nothing, and **one rule covers them all**: the key keeps the table's
+own declared domain for that column (members, a foreign column's values, or `rows`). That is a
+machine input, an `int` or `double` state column (it holds any value), and an or clause's
+output (the OR of any subset of its rows' flags may come out, a set exponential in the rows, so
+it is not enumerated). An or or a weighted table declares no key domains, so such a key is over
+the table's rows. Keys declared `rows` then contribute the sub-tuples the rows name, crossed
+with the other keys, as in a load. **An input-bound key is proved only over the table's
+declared domain**: an input value with no run at run time is `Step`'s business (slice 3b), not
+something `Prepare` can rule out.
+
+What the domain must satisfy depends on the table's pick:
+
+- **best**: the one check a load makes (totality of the default group over the table's band
+  inputs, no dead row, no two owners overlapping), with the domain as its parameter: `Load`
+  passes the table's declared domain, `Prepare` the clause's. A tuple with no run is a run of no
+  rows, refused with the load's message, ending "and the key is in the clause's domain"; a run
+  `Load` never proved (outside the table's domain, inside the clause's) is refused naming its
+  first row. The layout of every run is kept in one set of flat arrays, with a directory from
+  each key tuple to its run's groups and lists naming version row numbers, plus, per clause,
+  each layout axis's table input and the ranking column's input; the proof-only arrays are
+  dropped.
+- **or**: an or pick always answers one value, the OR of its holding rows' flags, 0 when none
+  hold, so nothing is proved beyond the domain resolving. A run directory (each tuple's version
+  rows) is kept; a tuple with no run is an empty run, answering 0.
+- **weighted**: every tuple must have a run, refused as "has no row to draw; no row has this
+  key, and the key is in the clause's domain" (a load already refuses non-positive weights and
+  non-finite totals). The run directory is kept for the draw, seeded per instance and step.
+
+Every refusal names the machine, the clause list and the clause. Every hash a `set` can write
+(a value in a row the clause can answer from) must be a member of its state column, checked
+here because rows load after the schema. `report`, if given, is cleared and, if the machine is
+accepted, holds every run outside a clause's domain as an orphan, as a load's report does,
+clause by clause in list order (two clauses on one table may note one run twice); a refused
+`Prepare` leaves it empty.
+
+A `Machine` records the generation of every table it read, taken from each version as the
+proof takes it: those its clauses pick from, and those a clause's key domain was read from (a
+foreign column behind an input key), since a
+dependent's generation does not move when its domain changes. `Machine::Stale(store)` says
+whether any of them has moved, so the machine must be prepared again.
+
+Not built yet: binding to a host, instances, `Step`, the next vector and its swap, sinks, edges
+and reload (later slices). A clause's table inputs are open over their declared ranges even
+when the source is a literal in range.
 
 **Picking (owner, 2026-10-12).**
 
@@ -456,7 +556,8 @@ changed through the table's generation counter (see Generation).
    hold conditions, each released once when the last version holding its row lets go.
    **Picking and grids** (built: `tabular/pick.h`, `tabular/grid.h`): inputs, bands and a ranking
    column; `PickBest`, `PickAll`, `PickOr`; pivoted CSV; grid tables and grid CSV.
-4. **Machines** built from tables.
+4. **Machines** built from tables (definition, YAML `machines:` and `Prepare` built:
+   `tabular/machine.h`, `DocumentFromYaml`; see Machines).
 
 **Two kinds of table (owner, 2026-10-15).**
 
