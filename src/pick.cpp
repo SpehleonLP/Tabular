@@ -1,6 +1,7 @@
 #include "tabular/pick.h"
 
 #include "relation_internal.h"
+#include "tabular/draw.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,7 @@ char const* PolicyName(pick_policy p)
 	case pick_policy::Best: return "best";
 	case pick_policy::All:  return "all";
 	case pick_policy::Or:   return "or";
+	case pick_policy::Weighted: return "weighted";
 	}
 	return "unknown";
 }
@@ -264,6 +266,60 @@ tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_qu
 		}
 	}
 	return bits;
+}
+
+tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(TableVersion const& version, pick_query const& query,
+	uint64_t seed, uint64_t site)
+{
+	auto run = RunOf(version, query, pick_policy::Weighted);
+	if (!run)
+	{
+		return tl::make_unexpected(std::move(run.error()));
+	}
+	if (run->first == run->last)
+	{
+		return std::optional<size_t>();
+	}
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	uint32_t const    slot = rows.slot[def.weight];
+	auto weightOf = [&](size_t r) { return rows.cells[r * rows.valueCount + slot].d; };
+
+	// Summed in row order, as Load summed it to prove the total finite.
+	double total = 0;
+	for (size_t r = run->first; r < run->last; ++r)
+	{
+		total += weightOf(r);
+	}
+	double const target = DrawUnit(Draw(seed, site)) * total;
+	double       edge   = 0;
+	for (size_t r = run->first; r < run->last; ++r)
+	{
+		edge += weightOf(r);
+		if (target < edge)
+		{
+			return std::optional<size_t>(r);
+		}
+	}
+	// Not reached: Load admits only normal positive weights, so total is a normal
+	// double, and the unit is at most 1 - 2^-53, which puts the exact product at
+	// least half an ulp below total and rounds it below total. The loop above
+	// sums in the order that built total, so its last edge is total and some
+	// row takes the target. A subnormal total could round the product up to
+	// total, which is why Load refuses subnormal weights. The return keeps a
+	// corrupt version from running off the run.
+	return std::optional<size_t>(run->last - 1);
+}
+
+tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(relation_store const& store, uint32_t table,
+	pick_query const& query, uint64_t seed, uint64_t site)
+{
+	auto version = store.Version(table);
+	if (!version)
+	{
+		return tl::make_unexpected(std::move(version.error()));
+	}
+	return PickWeighted(**version, query, seed, site);
 }
 
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(relation_store const& store, uint32_t table, pick_query const& query)

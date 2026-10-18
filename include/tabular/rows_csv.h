@@ -29,6 +29,11 @@ namespace tabular
 // blank condition cell is no condition: it is not handed to condition. Every
 // other blank cell is refused.
 //
+// A table with a suffix (table_def::suffix) ends its header with the suffix
+// column's name, and each row's last cell is the rest of its line: everything
+// after the declared cells, commas included, trimmed at its two ends. An empty
+// suffix, or a row with no cell for it, is refused naming the line.
+//
 // A pivoted load reads the table's pivot: the header row names the key
 // columns, in key order, then the flag headers, whose order gives the flag
 // domain (a best table's first is None, the 0 value; each simple header after

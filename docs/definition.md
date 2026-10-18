@@ -62,7 +62,9 @@ the feature is wrong, not the rule.
    parallel.
 4. **Determinism.** Given the same definition, inputs and seed, a step produces the same
    state and records. Randomness is a counter-based draw from a seed the host supplies, salted
-   per draw site, with no stored generator state.
+   per draw site, with no stored generator state. Built: `Draw(seed, site)` in
+   `tabular/draw.h`, a pure hash (Support's pcg3d, two rounds), and `DrawUnit` to turn a
+   draw into [0, 1).
 5. **Replaceability.** A definition is immutable once built. Hot reload builds a new one, binds
    it and migrates instance state by name. A failed rebuild leaves the old one running.
 
@@ -118,6 +120,8 @@ the feature is wrong, not the rule.
   to be built. A row with no script condition carries a closure with no function; a blank
   condition cell in CSV is one.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
+  Built: a `pick: weighted` table names its one `double` weight column (`weight:` in YAML,
+  `create_table::weight` in the builder).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
   Writes always go to the *next* vector, which is swapped in at the end of the step. **What
   is forbidden is computing a state from a state** (owner, 2026-10-12): a machine row like
@@ -132,6 +136,17 @@ the feature is wrong, not the rule.
   command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an
   s-expression, to whoever consumes it, and that consumer interprets it. Tabular does not.
   Bridge steps are such a command.
+  Built (2026-10-18): a table declares `suffix: <name>` (YAML) or `create_table::suffix`
+  (builder), which adds one Command column of that name after its declared columns, so the
+  store and the picks see an ordinary command column. In CSV the suffix is the rest of the
+  line: the text from the first cell after the declared ones to the end of the line, commas
+  and spacing between its parts kept exactly, trimmed only at its two ends. The header names
+  the declared columns and ends with the suffix column's name (the reader needs that last
+  header cell to know where the rest of each line starts); a header that names anything else
+  extra, or puts the suffix column anywhere but last, is refused. A row with no suffix text, or
+  no cell for it, is refused naming its line. A grid or a pivoted table cannot have a suffix
+  (a pivot cell holds one value), and a pivoted load into a suffix table is refused because the
+  table has no pivot.
 
 **Flag matching (owner, 2026-10-12).** For an input flag set `F` and each row's flag set `R`:
 
@@ -156,8 +171,15 @@ last, but its lookup grid has one None column, so no table it reads has two.
 from different owners with equal flags (every row of an unranked table has the same flags)
 whose boxes meet (every band input's intervals intersect; with no band inputs any two rows
 meet) are refused at load, naming both owners and describing a kept row by its key, flags and band values, scripted or not: that is two
-contributors claiming the same inputs, decided only by load order. The check precedes the
-dead-row check. One owner's rows may overlap; row order is their priority.
+contributors claiming the same inputs, which only an order among owners could decide. The check precedes the
+dead-row check. One owner's rows may overlap; their order within the owner's load is their priority.
+
+**Row order is a function of the loads (owner, 2026-10-18).** Reloading identical rows is
+idempotent: a version depends on which owners hold which rows, never on who loaded last. Rows
+sort by the table's order columns, then by owner id, then by index within that owner's load.
+So rows with equal order keys sit grouped by ascending owner id, and an owner reloading the
+same rows leaves every row where it was; PickAll's order, a weighted run's cumulative order and
+the order rows are tried in all follow it.
 
 **The None header (2026-10-18).** A pivoted best table's flag headers are read left to right.
 `None`, in any case, names the 0 value and is only the first header of a best table; spelled
@@ -184,6 +206,15 @@ through an input, and only a best table ranks:
   probability, and nothing is tested before drawing. When a roll needs a condition, an
   earlier table in the DAG computes a key for it. This restriction can be lifted later
   without breaking files; adding it later could not.
+  Built (2026-10-18): `pick: weighted` with `weight: <double column>`. The schema refuses a
+  condition column and any declared input (a band or a ranking flags column can only read an
+  input, so refusing inputs refuses them), a missing weight or one that is not a double, a
+  `weight` on a table that is not weighted, and a weighted table that is not read-only or
+  whose order does not start with its keys. A load refuses a weight that is not a normal positive number
+  (zero, negative, subnormal, infinite or NaN), and a key run whose weights total more than a double holds, so every non-empty
+  key run has a positive finite total. `PickWeighted(version | store, table, query, seed,
+  site)` lays the run's rows end to end in row order and takes the row holding the point
+  `DrawUnit(Draw(seed, site)) * total`; it answers nothing only for a key with no run.
 - **A pivoted flag output ORs together**, as animation's phase tables do today
   (`PipelineClosure::eval_phase_bits`). The phase table writes every flag whose band holds,
   combined with OR: each row whose keys match contributes the flag of every cell whose band
@@ -209,7 +240,21 @@ tables); every step; when a relation's rows change.
 | Definition | table section of a bundle | tables, machines, snippet text; immutable |
 | Binding | definition × host object type | compiled closures, resolved input slots, state layout |
 | Instance | object | state vector, edge history |
-| Relation | global relation | live rows, each owned by a contributor; RAII handles retract them |
+| Relation | global relation | live rows, each owned by a contributor; RAII handles retract them (`owner_handle`) |
+
+**Owner handles (built 2026-10-18).** An `owner_handle` (`tabular/owner_handle.h`) holds a store
+and an owner id; dropping it, or calling `Release`, retracts every row the owner holds, and a
+moved-from handle retracts nothing. It retracts from every table, read-only tables and grids
+included, because "RAII handles retract them" says nothing of how a row arrived and the handle
+is for crash recovery: loaded rows that outlive their contributor have no one left who would
+retract them. A reload does not use a handle; it loads again. Retract is never refused, so a
+destructor always finishes.
+
+**Generation (built 2026-10-18).** Each table has `relation_store::Generation(table)`, a counter
+that rises on every change a reader can see (an accepted insert, a published load, a retract
+that removed rows, a grid load) and never otherwise (a refused change, a retract of an owner
+with no rows there, a load of no rows for an owner with none). "The rows changed" is the
+counter moving; there is no callback.
 
 **Column types beyond the four native ones (owner, 2026-10-16).** A string column holds a
 `counted_string`. A `vec2` column holds two floats, one 8-byte cell like every other value;
@@ -311,7 +356,7 @@ every row it owns, insert the new ones". That is the install script done as data
 install placed is recorded as rows, so it can be found again and replaced, which a constructor
 could not offer. What happens to objects already spawned from a retracted row is the reload
 policy of the subsystem that owns the relation, not Tabular's. Tabular reports that the rows
-changed.
+changed through the table's generation counter (see Generation).
 
 **Order of work (owner, 2026-10-15).**
 
@@ -323,8 +368,9 @@ changed.
    each table has `name`, `columns` (`{name, type, key, input}`, type one of hash, flags, int,
    double, condition, command, vec2, string, band), an optional `order_by: {columns: [names],
    unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range}`),
-   `pick` (none, best, all, or), `output` (an or table's flags column) and `pivot: {headers,
-   cells}`. A grid is `grid: {rows, columns, cells}` instead of columns. A grid and a picked
+   `pick` (none, best, all, or, weighted), `output` (an or table's flags column), `weight` (a
+   weighted table's double column), `suffix` (the name of a trailing command column, see Suffix)
+   and `pivot: {headers, cells}`. A grid is `grid: {rows, columns, cells}` instead of columns. A grid and a picked
    table are always read-only: the key may be left out (it is read as `true`), and
    `read_only: false` on either is refused. The builder takes `read_only` explicitly. Any diagnostic fails the definition, an unknown key included, because a
    misspelled `unique` silently ignored is a table that is not unique.
@@ -337,7 +383,8 @@ changed.
    function the caller passes to the loader (`csv_rows::condition`, returning
    `tl::expected<closure, ErrorContext>`), which returns the compiled condition; that is the whole of Tabular's part in compiling
    conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
-   version). The function is needed only when a non-blank condition cell appears. CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
+   version). The function is needed only when a non-blank condition cell appears. CSV has no quoting, so a command cell cannot hold a comma, except the suffix of a table that
+   declares one, which is the rest of the line. Cells are trimmed; blank lines and `#` lines are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
    clash the line it clashes with. Within one load, two texts with one hash, or a text

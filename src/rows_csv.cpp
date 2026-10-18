@@ -190,6 +190,9 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	}
 	CSV::Options options;
 	options.normalizeUnicode = false;
+	// A suffix table's last column is the rest of every line, commas included;
+	// the reader already knows how to cut a row that way.
+	options.restInLastColumn = def.suffix;
 	CSV::File file(text, options, command.first_line);
 	if (file.rows() == 0)
 	{
@@ -224,6 +227,13 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				.with(label(file.line_of_row(0))));
 		}
 	}
+	// Where the rest of the line starts is where the header's last cell is, so
+	// the suffix column must be that cell.
+	if (def.suffix && columnOf[width - 1] != def.columns.size() - 1)
+	{
+		return tl::make_unexpected(ErrorContext("the suffix column '", def.columns.back().name,
+			"' must be the header's last cell, because it takes the rest of each line").with(label(file.line_of_row(0))));
+	}
 
 	size_t const                  count = file.rows() - 1;
 	std::vector<cell>             values(count * valueCount);
@@ -234,6 +244,11 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	for (size_t r = 0; r < count; ++r)
 	{
 		uint32_t line = file.line_of_row(r + 1);
+		if (def.suffix && file[r + 1].size() + 1 == width)
+		{
+			return tl::make_unexpected(ErrorContext("row has no suffix cell; the text after the declared cells is the command '",
+				def.columns.back().name, "', and it is missing").with(label(line)));
+		}
 		if (file[r + 1].size() != width)
 		{
 			return tl::make_unexpected(ErrorContext("row has ", file[r + 1].size(), " cells, but the header has ", width)

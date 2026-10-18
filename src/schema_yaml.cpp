@@ -71,6 +71,8 @@ struct table_yaml
 	std::string              output;
 	pivot_yaml               pivot;
 	grid_yaml                grid;
+	std::string              suffix;
+	std::string              weight;
 };
 
 struct document_yaml
@@ -83,8 +85,8 @@ char const* const kTypeNames[] = {"hash", "flags", "int", "double", "condition",
 YamlEnum const    kTypes{kTypeNames, 9};
 
 // In pick_policy's order.
-char const* const kPickNames[] = {"none", "best", "all", "or"};
-YamlEnum const    kPicks{kPickNames, 4};
+char const* const kPickNames[] = {"none", "best", "all", "or", "weighted"};
+YamlEnum const    kPicks{kPickNames, 5};
 
 YamlField const kColumnFields[] = {
 	{"name", FieldType::String, offsetof(column_yaml, name), true},
@@ -140,6 +142,8 @@ YamlField const kTableFields[] = {
 	{"output",    FieldType::String,   offsetof(table_yaml, output)},
 	{"pivot",     FieldType::Nested,   offsetof(table_yaml, pivot), false, 0, &kPivotSet},
 	{"grid",      FieldType::Nested,   offsetof(table_yaml, grid), false, 0, &kGridSet},
+	{"suffix",    FieldType::String,   offsetof(table_yaml, suffix)},
+	{"weight",    FieldType::String,   offsetof(table_yaml, weight)},
 };
 YamlSet const kTableSet{kTableFields, nullptr, "table"};
 
@@ -248,6 +252,23 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 					"', which the table does not have").with(std::string(label)));
 			}
 		}
+		uint32_t weight = UINT32_MAX;
+		if (tableNode->get("weight") != nullptr)
+		{
+			weight = columnOf(in.weight);
+			if (weight == UINT32_MAX)
+			{
+				return tl::make_unexpected(ErrorContext("table '", in.name, "' names weight '", in.weight,
+					"', which the table does not have").with(std::string(label)));
+			}
+		}
+		// Presence, not emptiness: `suffix: ""` names no column, and the builder
+		// could not tell it from no suffix at all.
+		if (tableNode->get("suffix") != nullptr && in.suffix.empty())
+		{
+			return tl::make_unexpected(ErrorContext("table '", in.name, "' has a suffix with no name; ",
+				"the suffix is named after the command column it adds").with(std::string(label)));
+		}
 		bool ordered = tableNodes->as_sequence().items[t]->get("order_by") != nullptr;
 		if (ordered)
 		{
@@ -286,7 +307,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 		bool const readOnly = alwaysReadOnly && tableNode->get("read_only") == nullptr ? true : in.read_only;
 		commands.push_back(create_table{in.name, columns[t], ordered ? &orders[t] : nullptr, readOnly,
 			inputs[t], static_cast<pick_policy>(in.pick), output, pivoted ? &pivots[t] : nullptr,
-			isGrid ? &grids[t] : nullptr});
+			isGrid ? &grids[t] : nullptr, in.suffix, weight});
 	}
 
 	auto built = BuildSchema(commands);

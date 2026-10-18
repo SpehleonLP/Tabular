@@ -90,7 +90,9 @@ struct add_input
 	float            hi     = 0;
 };
 
-enum class pick_policy : uint8_t { None, Best, All, Or };
+// Weighted draws one row of the key run in proportion to a Double weight
+// column; it has no conditions to test first (see PickWeighted).
+enum class pick_policy : uint8_t { None, Best, All, Or, Weighted };
 
 // The order a table's rows are stored in: rows compare by these columns in
 // turn, most significant first, and rows that compare equal keep insertion
@@ -142,6 +144,11 @@ struct create_table
 	uint32_t                      output = UINT32_MAX;   // Or: the Flags value column OR'd
 	pivot_by const*               pivot  = nullptr;
 	grid_shape const*             grid   = nullptr;   // set: this table is a grid
+	// Named, the table gets one more Command column after its columns, and a CSV
+	// load reads everything after the declared cells as that column's text, so
+	// a command may hold commas. Not for a grid or a pivoted table.
+	std::string_view              suffix;
+	uint32_t                      weight = UINT32_MAX;   // Weighted: the Double column that is the weight
 };
 
 struct column_def
@@ -179,6 +186,8 @@ struct table_def
 	column_def                   grid_rows;               // name and type of the row axis
 	column_def                   grid_columns;
 	column_type                  grid_cells    = column_type::Int;
+	bool                         suffix        = false;   // the last column is the suffix command
+	uint32_t                     weight        = UINT32_MAX;
 };
 
 // Immutable once built. Hot reload builds a new one.
@@ -337,7 +346,9 @@ private:
 // Live rows for every table of a schema.
 //
 // Rows keep their table's order, or insertion order without one; a retract
-// keeps the survivors' order. Row indices are valid only until the next
+// keeps the survivors' order. A read-only table's rows with equal order keys sit
+// by owner id, then by index within the owner's load, so a version does not
+// depend on which owner loaded last. Row indices are valid only until the next
 // Insert, Load or Retract, because each moves rows; a reader that must keep
 // its rows across them holds a read-only table's Version.
 //

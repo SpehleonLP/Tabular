@@ -32,8 +32,8 @@ Sources, cited in brackets:
 - [x] Read-only tables are immutable versions, replaced whole only after the new one checks out (RCU); a held version stays consistent [def Two kinds]
 - [x] Hash = `CityHash32` of the bytes as written, matching a script literal's `NameHash` [CONTEXT.md Hash; sr §3.1]
 - [x] Runs with no world, no threads, no script engine, no files [def What Tabular is]
-- [ ] RAII owner handles that retract their rows when dropped (crash and unload recovery) [def Lifetimes; cat D1 §1.3]
-- [ ] Report that a relation's rows changed, so the owning subsystem can apply its reload policy and dependent queries wake [def First version, Triggers; arc §6.2]
+- [x] RAII owner handles that retract their rows when dropped (crash and unload recovery) [def Lifetimes; cat D1 §1.3] (`owner_handle`; retracts from every table, read-only and grids included, see def Owner handles)
+- [x] Report that a relation's rows changed, so the owning subsystem can apply its reload policy and dependent queries wake [def First version, Triggers; arc §6.2] (the per-table generation counter; there is no callback)
 - [x] Refuse hash 0 and same-file hash collisions, naming both names [sr §3.1] (CSV front ends; within one load, any column)
 - [x] `vec2` column: two floats, one cell; the only vector type. Bands are `vec2`; a position is a string column naming the Section plus one or two `vec2` columns; no `Location` type [def Column types, owner 2026-10-16]
 - [x] String column holding an interned `counted_string`, in its own per-table slot array like commands [def Column types, owner 2026-10-16]
@@ -44,7 +44,7 @@ Sources, cited in brackets:
 - [x] YAML table definitions; any diagnostic fails, unknown keys included [def order 2]
 - [x] CSV rows into read-only tables; header names columns; refusals name the line and the clashing line; BOM dropped; no Unicode normalisation [def order 3]
 - [x] CSV filling condition columns: `csv_rows::condition`, a `std::function<tl::expected<closure, ErrorContext>(std::string_view)>`, is called per cell; read-only `Load` accepts condition columns [def order 3, owner 2026-10-16]
-- [ ] CSV quoting, or a rest-of-line last column, so a command cell can hold a comma [def order 3; sr §6.1 `restInLastColumn`]
+- [x] CSV quoting, or a rest-of-line last column, so a command cell can hold a comma [def order 3; sr §6.1 `restInLastColumn`] (a table's `suffix`; no quoting)
 - [x] Pivoted tables: any axis pivots into the headers (clip table pivots a key; phase table pivots the output, cells are bands) [def Pivot; cat §2.6; arc §5.2; cook §2.2]
 - [x] Flag domain from pivot headers: first column None = 0, each next column the next bit, `A|B` combos OR earlier columns [cook §2.2; arc §5.2]
 - [ ] `.tabular` bundle: one file holding YAML definitions plus CSV sections; the bundle file itself is the host's [arc §5.1; def What it is not]
@@ -58,7 +58,7 @@ Needed before machines: "a machine is a SELECT checked to always produce exactly
 - [x] Ranked fall-through: keys select candidates, flags rank them, take the best row whose other conditions hold, down to the default [def Picking]
 - [~] Native condition kinds on Tabular's own types only (flags ranking and band are built; edge not built): flags subset, band (half-open `start <= x < end`, as animation's phase bands) / one-input comparison against a literal, edge (crossing over the previous..now interval) (?) [def A row, What it is not; arc §3.1; cat §2.6]
 - [x] At most one script condition per row, any number of native ones [def A row]
-- [ ] Weighted tables: keys + one weight + outputs, no conditions; draw across the selected rows [def Picking; c3 §5.9]
+- [x] Weighted tables: keys + one weight + outputs, no conditions; draw across the selected rows [def Picking; c3 §5.9] (`pick: weighted`, `PickWeighted`)
 - [x] Pivoted flag outputs OR together, as animation phase tables do (`PipelineClosure::eval_phase_bits`): headers are flags, cells are bands, blank cells contribute nothing; every row whose key matches and whose band holds ORs in its column's bit; several rows may share a key and accumulate; nothing holding gives 0, so an OR table is total with no default row [def Picking; `src/Animation/authoring-form-spec.md` §Phase tables]
 - [x] Pick "all": every matching row runs in row order [arc §3.2; cat §2.6]
 - [ ] Query order for unordered results (nearest, then stable id) [c3 §8.9]
@@ -103,7 +103,7 @@ Whatever the loader checks, an author can know by reading the table [def promise
 - [ ] Decide whether a consumer compiles its s-expression at bind, so a step enqueues a prebuilt record (?) [def Undecided]
 - [ ] A table absorbs a message, one at a time, in arrival order; which step is still open (?) [def Undecided]
 - [ ] A delayed message arriving after its state ended and was re-entered (?) [def Undecided]
-- [ ] Deterministic randomness: counter-based draw from the host's seed, salted per draw site, no stored generator [def promise 4; cat §2.5]
+- [x] Deterministic randomness: counter-based draw from the host's seed, salted per draw site, no stored generator [def promise 4; cat §2.5] (`Draw`)
 - [ ] `random()` in a table snippet and in ordinary script use the same deterministic generator; `random(...)` inside a command (?) [def Undecided]
 
 ## 8. Budgets and evidence

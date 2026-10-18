@@ -463,6 +463,45 @@ tables:
 	EXPECT_EQ(*rows, (std::vector<size_t>{0, 3}));
 }
 
+// The row order across owners is a function of the owners' loads: reloading
+// identical rows must not move an owner's rows past another's.
+TEST(PickAll, OrderAcrossOwnersSurvivesAnIdenticalReload)
+{
+	relation_store store = StoreFrom(R"(
+tables:
+  - name: all
+    read_only: true
+    pick: all
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: clip, type: int}
+    order_by: {columns: [label]}
+)");
+	auto load = [&](uint64_t owner, int64_t clip)
+	{
+		cell const values[] = {cell::Integer(1), cell::Integer(clip)};
+		return store.Load(load_rows{0, owner, 1, values, {}, nullptr});
+	};
+	auto clips = [&]()
+	{
+		cell const keys[] = {cell::Integer(1)};
+		auto       rows   = PickAll(store, 0, pick_query{keys, {}});
+		EXPECT_TRUE(rows.has_value());
+		std::vector<int64_t> out;
+		for (size_t r : *rows)
+		{
+			out.push_back(store.Value(0, r, 1)->i);
+		}
+		return out;
+	};
+	ASSERT_TRUE(load(1, 10).has_value());
+	ASSERT_TRUE(load(2, 11).has_value());
+	std::vector<int64_t> const before = clips();
+	EXPECT_EQ(before, (std::vector<int64_t>{10, 11}));
+	ASSERT_TRUE(load(1, 10).has_value());
+	EXPECT_EQ(clips(), before);
+}
+
 // A clamp has no place for NaN, and that follows from the range declaration,
 // not from the pick policy.
 TEST(PickPolicy, NanIsRefusedForARangedInputInEveryPolicy)

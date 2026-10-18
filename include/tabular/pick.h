@@ -43,6 +43,17 @@ tl::expected<std::vector<size_t>, ErrorContext> PickAll(relation_store const& st
 tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_query const& query);
 tl::expected<uint32_t, ErrorContext> PickOr(relation_store const& store, uint32_t table, pick_query const& query);
 
+// One row of the key run, drawn in proportion to its weight: the run's rows in
+// row order are laid end to end by weight, and Draw(seed, site) picks a point on
+// that line. Nothing is tested first (a weighted table has no conditions), so
+// the answer depends only on the rows, the seed and the site, and is empty only
+// when the key has no run. The weights are normal and positive and a run's total
+// is finite, which Load enforces, so a nonempty run always draws a row.
+tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(TableVersion const& version, pick_query const& query,
+	uint64_t seed, uint64_t site);
+tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(relation_store const& store, uint32_t table,
+	pick_query const& query, uint64_t seed, uint64_t site);
+
 }
 
 #endif // TABULAR_PICK_H

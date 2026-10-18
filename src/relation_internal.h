@@ -79,6 +79,9 @@ struct table_rows : slot_layout
 	std::vector<std::string> commands;   // Command columns, row-major
 	std::vector<counted_string> strings; // String columns, row-major, interned
 	std::vector<uint64_t>    owners;     // one per row
+	// Read-only versions only: a row's index within its owner's load, so a
+	// reload orders the rows it keeps against the rows it brings by (owner, index).
+	std::vector<uint32_t>    ownerRows;
 	uint64_t                 generation = 0;
 
 	std::vector<uint32_t> orderSlots;    // the order's columns, as value slots

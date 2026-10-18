@@ -27,6 +27,13 @@ std::string FloatText(float v)
 	return std::string(buffer, r.ptr);
 }
 
+std::string DoubleText(double v)
+{
+	char buffer[32];
+	auto r = std::to_chars(buffer, buffer + sizeof buffer, v);
+	return std::string(buffer, r.ptr);
+}
+
 char const* TypeName(column_type type)
 {
 	switch (type)
@@ -232,6 +239,12 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 	{
 		return tl::make_unexpected(ErrorContext("table '", c.name, "' names an output; only an or table has one"));
 	}
+	// Before the no-pick return: a weight on a table nothing draws from is
+	// written and never read, which is the mistake this refuses.
+	if (c.pick != pick_policy::Weighted && c.weight != UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' names a weight; only a weighted table has one"));
+	}
 	if (c.pick == pick_policy::None)
 	{
 		// Only a pick reads an input, so a declared input is written and never
@@ -243,6 +256,36 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 				out.inputs.size(), " declared inputs; give the table a pick or drop them"));
 		}
 		return {};
+	}
+	if (c.pick == pick_policy::Weighted)
+	{
+		// A weighted table is a transform with a probability: nothing is tested
+		// before the draw. A band or a ranking flags column can only read a
+		// declared input (CheckInput), so refusing every input refuses them
+		// without a rule of their own; a condition column needs none, so it is
+		// refused here.
+		for (column_def const& col : out.columns)
+		{
+			if (col.type == column_type::Condition)
+			{
+				return tl::make_unexpected(ErrorContext("column '", col.name, "' of weighted table '", c.name,
+					"' is a condition; a weighted table has no conditions"));
+			}
+		}
+		if (!out.inputs.empty())
+		{
+			return tl::make_unexpected(ErrorContext("weighted table '", c.name,
+				"' declares inputs, which only a band or a ranking flags column reads, and a weighted table has no conditions"));
+		}
+		// An unnamed weight is an index past the columns, so one check covers
+		// both "no weight" and "a weight that is not a double".
+		if (c.weight >= out.columns.size() || out.columns[c.weight].type != column_type::Double)
+		{
+			return tl::make_unexpected(ErrorContext("weighted table '", c.name,
+				"' names its weight, one of its double columns", c.weight < out.columns.size()
+					? cc(std::string("; '"), out.columns[c.weight].name, "' is a ", TypeName(out.columns[c.weight].type)) : std::string()));
+		}
+		out.weight = c.weight;
 	}
 	if (c.pick != pick_policy::Best && out.ranking != UINT32_MAX)
 	{
@@ -346,10 +389,10 @@ tl::expected<table_def, ErrorContext> BuildGrid(create_table const& c)
 {
 	grid_shape const& g = *c.grid;
 	if (!c.columns.empty() || c.ordering || !c.inputs.empty() || c.pick != pick_policy::None
-		|| c.output != UINT32_MAX || c.pivot)
+		|| c.output != UINT32_MAX || c.pivot || c.weight != UINT32_MAX || !c.suffix.empty())
 	{
 		return tl::make_unexpected(ErrorContext("grid '", c.name,
-			"' has rows, columns and cells; it has no columns, order, inputs, pick or pivot"));
+			"' has axes and cells; it has no columns, order, inputs, pick, output, pivot, weight or suffix"));
 	}
 	for (grid_axis const* axis : {&g.rows, &g.columns})
 	{
@@ -382,24 +425,45 @@ tl::expected<table_def, ErrorContext> BuildGrid(create_table const& c)
 	return out;
 }
 
-tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::span<table_def const> earlier)
+tl::expected<table_def, ErrorContext> BuildTable(create_table const& declared, std::span<table_def const> earlier)
 {
-	if (c.name.empty())
+	if (declared.name.empty())
 	{
 		return tl::make_unexpected(ErrorContext("a table needs a name"));
 	}
 	for (table_def const& t : earlier)
 	{
-		if (t.name == c.name)
+		if (t.name == declared.name)
 		{
-			return tl::make_unexpected(ErrorContext("table '", c.name, "' is defined twice"));
+			return tl::make_unexpected(ErrorContext("table '", declared.name, "' is defined twice"));
 		}
 	}
 
-	if (c.grid)
+	if (declared.grid)
 	{
-		return BuildGrid(c);
+		return BuildGrid(declared);
 	}
+
+	// A suffix is one more Command column after the declared ones, so the store,
+	// the picks and every front end see an ordinary column; only the CSV reader
+	// treats it differently (it takes the rest of the line).
+	std::vector<add_column> widened;
+	create_table            withSuffix;
+	create_table const*     source = &declared;
+	if (!declared.suffix.empty())
+	{
+		if (declared.pivot)
+		{
+			return tl::make_unexpected(ErrorContext("table '", declared.name,
+				"' is pivoted and has a suffix; a pivot cell cannot carry a command's trailing text"));
+		}
+		widened.assign(declared.columns.begin(), declared.columns.end());
+		widened.push_back(add_column{declared.suffix, column_type::Command});
+		withSuffix         = declared;
+		withSuffix.columns = widened;
+		source             = &withSuffix;
+	}
+	create_table const& c = *source;
 
 	auto inputs = BuildInputs(c);
 	if (!inputs)
@@ -414,6 +478,7 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& c, std::spa
 
 	table_def out{std::string(c.name), std::move(*columns), {}, false, c.read_only};
 	out.inputs = std::move(*inputs);
+	out.suffix = !declared.suffix.empty();
 	if (c.ordering)
 	{
 		auto order = BuildOrder(c, out.columns);
@@ -961,6 +1026,23 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
 				}
 			}
+			if (c == def.weight)
+			{
+				// Every key run then has a positive total by construction (R7),
+				// and a zero would be a row that can never be drawn. A subnormal
+				// weight is refused too: a subnormal total lets the draw's product
+				// round up to the total, and PickWeighted's fallback would run.
+				double const weight = command.values[r * current.valueCount + current.slot[c]].d;
+				if (!(std::isnormal(weight) && weight > 0))
+				{
+					if (command.refusal)
+					{
+						command.refusal->row = r;
+					}
+					return tl::make_unexpected(ErrorContext("weight '", def.columns[c].name, "' of '", def.name, "' is ",
+						DoubleText(weight), "; a weight is a normal positive number").with("row ", r));
+				}
+			}
 			if (def.columns[c].type == column_type::Band)
 			{
 				cell const band = command.values[r * current.valueCount + current.slot[c]];
@@ -989,9 +1071,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		}
 	}
 
-	// Every row the next version holds, as (from the load?, row): survivors
-	// first, so a survivor sorts before a loaded row with the same key, as an
-	// earlier insert would.
+	// Every row the next version holds, as (from the load?, row). The version
+	// is a function of the owners' loads, not of their order, so rows sort by
+	// the order columns, then owner id, then index within the owner's load:
+	// an owner reloading identical rows leaves every row where it was.
 	struct source
 	{
 		bool   loaded;
@@ -1020,46 +1103,119 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		                : std::span<cell const>(current.cells).subspan(s.row * current.valueCount, current.valueCount);
 	};
 	auto ownerOf = [&](source s) { return s.loaded ? command.owner : current.owners[s.row]; };
-	if (!current.orderSlots.empty())
+	auto ownerRowOf = [&](source s) -> size_t { return s.loaded ? s.row : current.ownerRows[s.row]; };
+	auto keyCompare = [&](source a, source b) -> int
 	{
-		auto keyCompare = [&](source a, source b) -> int
+		std::span<cell const> ac = cellsOf(a);
+		std::span<cell const> bc = cellsOf(b);
+		for (uint32_t s : current.orderSlots)
 		{
-			std::span<cell const> ac = cellsOf(a);
-			std::span<cell const> bc = cellsOf(b);
-			for (uint32_t s : current.orderSlots)
+			if (ac[s].i != bc[s].i)
 			{
-				if (ac[s].i != bc[s].i)
-				{
-					return ac[s].i < bc[s].i ? -1 : 1;
-				}
+				return ac[s].i < bc[s].i ? -1 : 1;
 			}
-			return 0;
-		};
-		std::stable_sort(order.begin(), order.end(), [&](source a, source b) { return keyCompare(a, b) < 0; });
-		if (def.unique)
+		}
+		return 0;
+	};
+	// (owner, index) is unique per row, so the order is total and the sort
+	// needs no stability.
+	std::sort(order.begin(), order.end(), [&](source a, source b)
+	{
+		int const byKey = keyCompare(a, b);
+		if (byKey != 0)
 		{
-			for (size_t i = 1; i < order.size(); ++i)
+			return byKey < 0;
+		}
+		if (ownerOf(a) != ownerOf(b))
+		{
+			return ownerOf(a) < ownerOf(b);
+		}
+		return ownerRowOf(a) < ownerRowOf(b);
+	});
+	if (!current.orderSlots.empty() && def.unique)
+	{
+		for (size_t i = 1; i < order.size(); ++i)
+		{
+			if (keyCompare(order[i - 1], order[i]) == 0)
 			{
-				if (keyCompare(order[i - 1], order[i]) == 0)
+				// Survivors are unique among themselves, so at least one of a
+				// clashing pair is a loaded row; name the loaded one, and the
+				// other as the row it clashes with.
+				source const earlier = order[i - 1];
+				source const later   = order[i];
+				source const mine    = later.loaded ? later : earlier;
+				source const other   = later.loaded ? earlier : later;
+				if (command.refusal)
 				{
-					// Survivors are unique among themselves and sort first, so the
-					// later of a clashing pair is always a loaded row.
-					source const earlier = order[i - 1];
-					source const later   = order[i];
-					if (command.refusal)
-					{
-						command.refusal->row     = later.row;
-						command.refusal->earlier = earlier.loaded ? earlier.row : SIZE_MAX;
-					}
-					std::string key;
-					for (uint32_t s : current.orderSlots)
-					{
-						key = cc(key, key.empty() ? "" : ", ", cellsOf(later)[s].i);
-					}
-					return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
-						ownerOf(earlier), " already has a row with key (", key, ") of loaded row ", later.row));
+					command.refusal->row     = mine.row;
+					command.refusal->earlier = other.loaded ? other.row : SIZE_MAX;
 				}
+				std::string key;
+				for (uint32_t s : current.orderSlots)
+				{
+					key = cc(key, key.empty() ? "" : ", ", cellsOf(mine)[s].i);
+				}
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' has a unique order, and owner ",
+					ownerOf(other), " already has a row with key (", key, ") of loaded row ", mine.row));
 			}
+		}
+	}
+
+	// A key run is the rows sharing the table's key columns, which lead its order.
+	auto sameKey = [&](source a, source b)
+	{
+		for (uint32_t k = 0; k < def.key_count; ++k)
+		{
+			uint32_t const s = current.orderSlots[k];
+			if (cellsOf(a)[s].i != cellsOf(b)[s].i)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	auto keyText = [&](source s)
+	{
+		std::string key;
+		for (uint32_t k = 0; k < def.key_count; ++k)
+		{
+			key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
+		}
+		return key;
+	};
+
+	// A weighted run is drawn from by laying its weights end to end, so its total
+	// must be a number. Each weight is normal and positive (checked per row
+	// above), so the total can only fail by overflowing; a run no loaded row
+	// joins was summed when it was published.
+	if (def.pick == pick_policy::Weighted && command.count > 0)
+	{
+		uint32_t const weightSlot = current.slot[def.weight];
+		size_t         start      = 0;
+		while (start < order.size())
+		{
+			size_t end        = start;
+			double total      = 0;
+			size_t lastLoaded = SIZE_MAX;
+			while (end < order.size() && sameKey(order[start], order[end]))
+			{
+				total += cellsOf(order[end])[weightSlot].d;
+				if (order[end].loaded)
+				{
+					lastLoaded = order[end].row;
+				}
+				++end;
+			}
+			if (!std::isfinite(total))
+			{
+				if (command.refusal)
+				{
+					command.refusal->row = lastLoaded;
+				}
+				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", keyText(order[start]),
+					"): the weights total more than a double holds"));
+			}
+			start = end;
 		}
 	}
 
@@ -1123,18 +1279,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		{
 			return def.ranking == UINT32_MAX ? 0u : static_cast<uint32_t>(cellsOf(s)[current.slot[def.ranking]].i);
 		};
-		auto sameKey = [&](source a, source b)
-		{
-			for (uint32_t k = 0; k < def.key_count; ++k)
-			{
-				uint32_t const s = current.orderSlots[k];
-				if (cellsOf(a)[s].i != cellsOf(b)[s].i)
-				{
-					return false;
-				}
-			}
-			return true;
-		};
 		// A kept row of another owner, described by what its author can find in
 		// the owner's file: key values, ranking flags and band values.
 		auto survivorText = [&](source s)
@@ -1167,15 +1311,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				text = cc(text, p == 0 ? " with " : ", ", parts[p]);
 			}
 			return text;
-		};
-		auto keyText = [&](source s)
-		{
-			std::string key;
-			for (uint32_t k = 0; k < def.key_count; ++k)
-			{
-				key = cc(key, key.empty() ? "" : ", ", cellsOf(s)[current.orderSlots[k]].i);
-			}
-			return key;
 		};
 		char const* const noDefault = def.ranking == UINT32_MAX ? "no row with no script condition"
 		                                                        : "no row with no flags and no script condition";
@@ -1298,7 +1433,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			// same flags can: at input F = R_B, B is a full match with hit R_B,
 			// and any other full match has R a strict subset of R_B, so a
 			// smaller hit. Same flags tie by row order; the R == 0 rows come
-			// last, in row order, after every ranked row.
+			// last, in row order, after every ranked row. Row order across owners
+			// is by owner id, not by who loaded last, so a kept row can sort after
+			// a loaded one; that cannot kill it, because a loaded row that covers
+			// a kept row of equal flags would overlap it, and was refused above.
 			if (firstLoaded != SIZE_MAX)
 			{
 				for (size_t b = start; b < end; ++b)
@@ -1309,7 +1447,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 						continue;   // a kept row is never dead (see above)
 					}
 					uint32_t const RB = flagsOf(B);
-					// The rows tried before B, in try order (row order), so the last
+					// The rows tried before B, in try order (row order: owner id, then load index), so the last
 					// is the one tried just before it.
 					std::vector<size_t> before;
 					for (size_t a = start; a < b; ++a)
@@ -1388,6 +1526,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	next.conditions.reserve(order.size() * next.conditionCount);
 	next.strings.reserve(order.size() * next.stringCount);
 	next.owners.reserve(order.size());
+	next.ownerRows.reserve(order.size());
 	for (source s : order)
 	{
 		std::span<cell const> from = cellsOf(s);
@@ -1414,6 +1553,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			                                : current.strings[s.row * next.stringCount + k]);
 		}
 		next.owners.push_back(ownerOf(s));
+		next.ownerRows.push_back(static_cast<uint32_t>(ownerRowOf(s)));
 	}
 	next.RebuildIndex(def);
 	next.generation = current.generation + 1;
