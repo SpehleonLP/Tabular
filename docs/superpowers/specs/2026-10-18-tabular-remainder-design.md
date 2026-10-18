@@ -80,6 +80,11 @@ owner with my recommendation. Merges still need the owner's approval.
   domain". Mutable tables get totality on insert and retract the same way, since the
   display tables are where "always picks a row" matters most.
 
+- **A version is a function of the owners' loads, not of load order** (follows from the
+  idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
+  owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
+  dead-row try order never change when an owner reloads identical rows.
+
 ## 1. The method: premises and consequences
 
 For each open item, ask whether `definition.md` already implies it from other features. If
@@ -97,7 +102,7 @@ Two kinds of finding go to the owner instead of into the code:
 
 | # | Premise | Checklist | Slice |
 |---|---|---|---|
-| P1 | **Owner handles.** A movable `owner_handle` holds an owner id and a store. Dropping it retracts that owner's rows from every mutable table. It does not touch read-only tables, which are retracted by load. | §1 RAII | 1 |
+| P1 | **Owner handles.** A movable `owner_handle` holds an owner id and a store. Dropping it retracts that owner's rows from every table, read-only and grids included, through the one `Retract` (slice 1 decision: a dead contributor has nobody left to reload its read-only rows, so a mutable-only handle would leave them behind). | §1 RAII | 1 |
 | P2 | **Relation generation.** Each table has a counter. It goes up on every change that becomes visible: a published version, an insert, a retract. "Rows changed" means the counter moved. | §1 report | 1 |
 | P3 | **The suffix is the trailing cells.** A table may declare `suffix: command` instead of a final command column. In CSV, every cell after the declared columns, joined back with their commas, is that row's command text. | §2 quoting; §7 commands | 1 |
 | P4 | **Counter-based draw.** `Draw(seed, site) -> uint64_t` is a pure hash with no stored state. `site` salts each draw site. | §7 randomness | 1 |
