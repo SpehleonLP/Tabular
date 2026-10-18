@@ -108,6 +108,21 @@ TEST(RowsCsv, BadCellsNameTheLineAndColumn)
 	}
 }
 
+// Every blank cell is refused except a condition's, which is "no condition".
+// A command was the type this rule missed: an empty one loaded as a row that
+// does nothing, which no author meant.
+TEST(RowsCsv, ABlankCommandCellIsRefused)
+{
+	relation_store store = Store();
+	std::string error = Load(store, "package,section,mask,x,on_spawn\na,1,0,0,\n");
+	EXPECT_TRUE(Mentions(error, "'on_spawn'")) << error;
+	EXPECT_TRUE(Mentions(error, "is empty")) << error;
+	EXPECT_TRUE(Mentions(error, "spawn.csv:2")) << error;
+	EXPECT_EQ(store.RowCount(0), 0u);
+	EXPECT_TRUE(Mentions(Load(store, "package,section,mask,x,on_spawn\na,1,0,0,   \n"), "'on_spawn'"))
+		<< "a cell of spaces trims to empty";
+}
+
 TEST(RowsCsv, RaggedRowsNameTheirLine)
 {
 	relation_store store = Store();
@@ -348,6 +363,22 @@ TEST(RowsCsv, AConditionTableWithNoFunctionIsRefused)
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "priority,when\n1,fine\n", "rules.csv"});
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().format(), "condition function")) << loaded.error().format();
+}
+
+// The function is Tabular's part in compiling conditions, and a table whose
+// condition cells are all blank has nothing to compile.
+TEST(RowsCsv, ABlankConditionColumnNeedsNoFunction)
+{
+	relation_store store = RuleStore();
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "priority,when\n1,\n2,   \n", "rules.csv"});
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	EXPECT_EQ(store.RowCount(0), 2u);
+	auto refused = LoadCsv(store, csv_rows{0, 1, "priority,when\n1,\n2,fine\n", "rules.csv"});
+	ASSERT_FALSE(refused.has_value());
+	EXPECT_TRUE(Mentions(refused.error().format(), "condition function")) << refused.error().format();
+	EXPECT_TRUE(Mentions(refused.error().format(), "'when'")) << refused.error().format();
+	EXPECT_TRUE(Mentions(refused.error().format(), "rules.csv:3")) << refused.error().format();
+	EXPECT_EQ(store.RowCount(0), 2u) << "the refused load changes nothing";
 }
 
 TEST(RowsCsv, ABlankConditionCellIsNoConditionAndNeverReachesTheFunction)

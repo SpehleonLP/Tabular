@@ -23,7 +23,8 @@ relation_store GridStore(column_type cells, column_type axes = column_type::Int)
 {
 	grid_shape const   shape{{"creature", axes}, {"kind", axes}, cells};
 	create_table       t{"g"};
-	t.grid = &shape;
+	t.grid      = &shape;
+	t.read_only = true;
 	auto s = BuildSchema(std::span<create_table const>(&t, 1));
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().message);
 	return relation_store(std::move(*s));
@@ -169,6 +170,41 @@ TEST(Grid, DuplicateKeysAndWrongSizesAreRefused)
 	EXPECT_EQ(store.RowCount(0), 0u) << "refusals change nothing";
 }
 
+// A grid is one contributor's whole array, so a second owner's load would
+// silently replace the first's, and the first owner's Retract would then do
+// nothing. Every row table keeps other owners' rows; a grid refuses instead.
+TEST(Grid, ASecondOwnersLoadIsRefusedNamingBothOwners)
+{
+	relation_store store = GridStore(column_type::Int);
+	auto rows  = Ints({1});
+	auto cols  = Ints({1});
+	auto first = Ints({100});
+	auto other = Ints({200});
+	ASSERT_EQ(RefusalOf(store.LoadGrid(load_grid{0, 7, rows, cols, first})), "(accepted)");
+	std::string const refused = RefusalOf(store.LoadGrid(load_grid{0, 8, rows, cols, other}));
+	EXPECT_TRUE(Mentions(refused, "owner 7")) << refused;
+	EXPECT_TRUE(Mentions(refused, "owner 8")) << refused;
+	auto grid = store.Grid(0);
+	ASSERT_TRUE(grid.has_value()) << ErrorOf(grid);
+	EXPECT_EQ(IntAt(**grid, 1, 1), 100) << "a refused load changes nothing";
+	EXPECT_EQ(RefusalOf(store.LoadGrid(load_grid{0, 7, rows, cols, other})), "(accepted)") << "the owner reloads its own";
+	store.Retract(retract_owner{7});
+	EXPECT_EQ(RefusalOf(store.LoadGrid(load_grid{0, 8, rows, cols, other})), "(accepted)")
+		<< "an emptied grid has no contributor to protect";
+}
+
+// OwnerOf indexed the row layout, which a grid leaves empty: out-of-bounds.
+TEST(Grid, OwnerOfAGridIsTheGridsOwner)
+{
+	relation_store store = GridStore(column_type::Int);
+	auto rows  = Ints({1, 2});
+	auto cols  = Ints({1});
+	auto cells = Ints({100, 200});
+	ASSERT_EQ(RefusalOf(store.LoadGrid(load_grid{0, 7, rows, cols, cells})), "(accepted)");
+	EXPECT_EQ(store.OwnerOf(0, 0), 7u);
+	EXPECT_EQ(store.OwnerOf(0, 1), 7u);
+}
+
 TEST(Grid, RetractEmptiesTheOwnersGrid)
 {
 	relation_store store = GridStore(column_type::Int);
@@ -205,7 +241,8 @@ TEST(Grid, TableCallsRefuseAGridAndGridCallsRefuseATable)
 	grid_shape const shape{{"r", column_type::Int}, {"c", column_type::Int}, column_type::Int};
 	add_column const columns[] = {{"x", column_type::Int}};
 	create_table tables[2] = {{"g"}, {"t", columns, nullptr, true}};
-	tables[0].grid = &shape;
+	tables[0].grid      = &shape;
+	tables[0].read_only = true;
 	auto s = BuildSchema(tables);
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	relation_store store(std::move(*s));
@@ -221,12 +258,40 @@ TEST(Grid, TableCallsRefuseAGridAndGridCallsRefuseATable)
 	EXPECT_TRUE(Mentions(RefusalOf(store.LoadGrid(load_grid{1, 1, one, one, one})), "not a grid"));
 }
 
+TEST(Grid, AGridIsReadOnlyWhateverIsWritten)
+{
+	grid_shape const shape{{"r", column_type::Int}, {"c", column_type::Int}, column_type::Int};
+	create_table t{"g"};
+	t.grid = &shape;   // read_only left false
+	auto built = BuildSchema(std::span<create_table const>(&t, 1));
+	ASSERT_FALSE(built.has_value());
+	EXPECT_TRUE(Mentions(built.error().message, "read-only")) << built.error().message;
+
+	auto yaml = SchemaFromYaml(R"(
+tables:
+  - name: g
+    read_only: false
+    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: int}
+)", "g.yaml");
+	ASSERT_FALSE(yaml.has_value());
+	EXPECT_TRUE(Mentions(yaml.error().format(), "read-only")) << yaml.error().format();
+
+	auto stated = SchemaFromYaml(R"(
+tables:
+  - name: g
+    read_only: true
+    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: int}
+)", "g.yaml");
+	EXPECT_TRUE(stated.has_value()) << (stated ? std::string() : stated.error().format());
+}
+
 TEST(Grid, AGridIsDeclaredWithAxesAndOneCellType)
 {
 	auto build = [](grid_shape const& shape, std::span<add_column const> columns = {})
 	{
 		create_table t{"g", columns};
-		t.grid = &shape;
+		t.grid      = &shape;
+		t.read_only = true;
 		return BuildSchema(std::span<create_table const>(&t, 1));
 	};
 	EXPECT_FALSE(build({{"r", column_type::Double}, {"c", column_type::Int}, column_type::Int}).has_value());

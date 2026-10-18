@@ -134,7 +134,7 @@ TEST(PickSchema, ABandIsAConditionNotAValue)
 	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), kInputs, pick_policy::Best, UINT32_MAX, &bandOrder)),
 		"cannot be in an order"));
 
-	auto s = Build(Columns(), kInputs, pick_policy::None);
+	auto s = Build(Columns());
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	relation_store store(std::move(*s));
 	cell const row[] = {cell::Integer(1), cell::Integer(0), cell::Vector(0.0f, 1.0f), cell::Integer(7)};
@@ -147,10 +147,10 @@ TEST(PickSchema, ABandIsAConditionNotAValue)
 
 TEST(PickSchema, ABandCellIsWrittenAsARange)
 {
-	auto s = Build(Columns(), kInputs, pick_policy::None);
+	auto s = Build(Columns());
 	ASSERT_TRUE(s.has_value()) << s.error().message;
 	relation_store store(std::move(*s));
-	EXPECT_TRUE(LoadCsv(store, csv_rows{0, 1, "label,req,window,clip\n1,0,0.25..0.5,7\n", "l.csv"}).has_value());
+	EXPECT_TRUE(LoadCsv(store, csv_rows{0, 1, "label,req,window,clip\n1,0,0..1,7\n", "l.csv"}).has_value());
 	auto bad = LoadCsv(store, csv_rows{0, 1, "label,req,window,clip\n1,0,0.25,7\n", "l.csv"});
 	ASSERT_FALSE(bad.has_value());
 	EXPECT_TRUE(Mentions(bad.error().format(), "is a band, written a..b")) << bad.error().format();
@@ -160,7 +160,9 @@ TEST(PickSchema, ABestTablesBandInputDeclaresARange)
 {
 	add_input const unranged[] = {{"mode", column_type::Flags}, {"t", column_type::Double}};
 	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), unranged)), "declares no range")) << Refusal(Build(Columns(), unranged));
-	EXPECT_EQ(Refusal(Build(Columns(), unranged, pick_policy::None)), "") << "only a best table needs one";
+	auto columns = Columns();
+	columns[1].input = UINT32_MAX;   // an all table does not rank
+	EXPECT_EQ(Refusal(Build(columns, unranged, pick_policy::All)), "") << "only a best table needs one";
 }
 
 TEST(PickSchema, ARangeIsOnADoubleAndRunsLowToHigh)
@@ -171,4 +173,45 @@ TEST(PickSchema, ARangeIsOnADoubleAndRunsLowToHigh)
 	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), backwards)), "lo < hi"));
 	add_input const infinite[] = {{"mode", column_type::Flags}, {"t", column_type::Double, true, 0.0f, INFINITY}};
 	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), infinite)), "lo < hi"));
+}
+
+// Declarations the builder used to accept and ignore: each looked like
+// behaviour and did nothing.
+TEST(PickSchema, ABandOrInputOnATableWithNoPickIsRefused)
+{
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), kInputs, pick_policy::None)), "has no pick"))
+		<< Refusal(Build(Columns(), kInputs, pick_policy::None));
+
+	// Inputs alone, with no column reading them, are just as unread.
+	auto none = Columns();
+	none[1] = {"req", column_type::Flags};
+	none[2] = {"window", column_type::Int};
+	EXPECT_TRUE(Mentions(Refusal(Build(none, kInputs, pick_policy::None)), "has no pick"))
+		<< Refusal(Build(none, kInputs, pick_policy::None));
+
+	// Without inputs, a column that reads one has nothing to name.
+	EXPECT_TRUE(Mentions(Refusal(Build(Columns(), {}, pick_policy::None)), "reads input"))
+		<< Refusal(Build(Columns(), {}, pick_policy::None));
+	auto bandOnly = Columns();
+	bandOnly[1] = {"req", column_type::Flags};
+	bandOnly[2].input = UINT32_MAX;
+	EXPECT_TRUE(Mentions(Refusal(Build(bandOnly, {}, pick_policy::None)), "names the double input"))
+		<< Refusal(Build(bandOnly, {}, pick_policy::None));
+
+	EXPECT_EQ(Refusal(Build(none, {}, pick_policy::None)), "") << "a table that reads no input has no pick to need";
+}
+
+TEST(PickSchema, ARankingColumnOnAnAllOrOrTableIsRefused)
+{
+	auto all = Columns();
+	EXPECT_TRUE(Mentions(Refusal(Build(all, kInputs, pick_policy::All)), "only a best table ranks"))
+		<< Refusal(Build(all, kInputs, pick_policy::All));
+
+	auto ord = Columns();
+	ord.push_back({"bits", column_type::Flags});
+	EXPECT_TRUE(Mentions(Refusal(Build(ord, kInputs, pick_policy::Or, 4)), "only a best table ranks"))
+		<< Refusal(Build(ord, kInputs, pick_policy::Or, 4));
+
+	ord[1].input = UINT32_MAX;
+	EXPECT_EQ(Refusal(Build(ord, kInputs, pick_policy::Or, 4)), "");
 }

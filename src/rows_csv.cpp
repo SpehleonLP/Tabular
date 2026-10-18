@@ -1,5 +1,6 @@
 #include "tabular/rows_csv.h"
 #include "csv_cells.h"
+#include "table_layout.h"
 #include "Utility/load_csv.h"
 #include "cityhash/src/city.h"
 
@@ -45,14 +46,27 @@ struct pending_conditions
 namespace detail
 {
 
+bool ParseRange(std::string_view text, float& start, float& end)
+{
+	size_t const dots = text.find("..");
+	return dots != std::string_view::npos && text.find("...") == std::string_view::npos
+		&& ParseWhole(text.substr(0, dots), start) && ParseWhole(text.substr(dots + 2), end);
+}
+
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text)
 {
+	// The one rule for empty cells, for every type including the text ones, so
+	// no front end carries a blank check of its own.
 	if (text.empty())
 	{
 		return tl::make_unexpected(ErrorContext("column '", column.name, "' is empty"));
 	}
 	switch (column.type)
 	{
+	case column_type::Command:
+	case column_type::String:
+		// Text has no cell; the caller keeps the text it already holds.
+		return cell::Integer(0);
 	case column_type::Hash:
 		return cell::Integer(static_cast<int64_t>(CityHash32(text.data(), text.size())));
 	case column_type::Flags:
@@ -87,17 +101,15 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 	case column_type::Vec2:
 	case column_type::Band:
 	{
-		size_t const dots = text.find("..");
-		float        x    = 0;
-		float        y    = 0;
-		// Three dots in a row would let "1...2" read as 1 and .2; which pair separates is
-		// ambiguous, so it is refused rather than guessed.
-		if (dots == std::string_view::npos || text.find("...") != std::string_view::npos
-			|| !ParseWhole(text.substr(0, dots), x) || !ParseWhole(text.substr(dots + 2), y))
+		float x = 0;
+		float y = 0;
+		if (!ParseRange(text, x, y))
 		{
 			return tl::make_unexpected(ErrorContext("column '", column.name, "' is a ",
 				column.type == column_type::Band ? "band" : "vec2", ", written a..b; got '", text, "'"));
 		}
+		// A band's well-formedness is Load's to check, where every front end's
+		// rows enter a table and the refusal still maps to the CSV line.
 		return cell::Vector(x, y);
 	}
 	default:
@@ -156,34 +168,14 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	{
 		return detail::LoadPivotedCsv(store, command);
 	}
-	if (!command.condition)
-	{
-		for (column_def const& column : def.columns)
-		{
-			if (column.type == column_type::Condition)
-			{
-				return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
-					"', and no condition function was given").with(std::string(command.label)));
-			}
-		}
-	}
 
 	// Each column's position among the columns of its kind, as the store numbers them.
-	std::vector<uint32_t> slot(def.columns.size());
-	uint32_t valueCount                         = 0;
-	uint32_t commandCount                       = 0;
-	uint32_t stringCount                        = 0;
-	uint32_t conditionCount                     = 0;
-	for (uint32_t c = 0; c < def.columns.size(); ++c)
-	{
-		switch (def.columns[c].type)
-		{
-		case column_type::Command:   slot[c] = commandCount++;   break;
-		case column_type::String:    slot[c] = stringCount++;    break;
-		case column_type::Condition: slot[c] = conditionCount++; break;
-		default:                     slot[c] = valueCount++;     break;
-		}
-	}
+	slot_layout const layout(def);
+	std::vector<uint32_t> const& slot = layout.slot;
+	uint32_t const valueCount     = layout.valueCount;
+	uint32_t const commandCount   = layout.commandCount;
+	uint32_t const stringCount    = layout.stringCount;
+	uint32_t const conditionCount = layout.conditionCount;
 
 	// A BOM is the editor's, not the first column's name. Unicode is left as
 	// written: a Hash column must hash the bytes a script literal hashes.
@@ -247,28 +239,20 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		{
 			column_def const& column = def.columns[columnOf[h]];
 			std::string_view  text   = file.cell(h, r + 1);
-			if (column.type == column_type::Command)
+			// The one blank cell CSV accepts is a condition's: "no condition",
+			// which the loader must see to prove a table total.
+			if (column.type == column_type::Condition && text.empty())
 			{
-				commands[r * commandCount + slot[columnOf[h]]] = text;
-				continue;
-			}
-			if (column.type == column_type::String)
-			{
-				if (text.empty())
-				{
-					return tl::make_unexpected(ErrorContext("column '", column.name, "' is empty").with(label(line)));
-				}
-				strings[r * stringCount + slot[columnOf[h]]] = text;
+				conditions.list[r * conditionCount + slot[columnOf[h]]] = closure{};
 				continue;
 			}
 			if (column.type == column_type::Condition)
 			{
-				// The one blank cell CSV accepts: "no condition", which the
-				// loader must see to prove a table total.
-				if (text.empty())
+				// Only a cell with text needs the function that compiles it.
+				if (!command.condition)
 				{
-					conditions.list[r * conditionCount + slot[columnOf[h]]] = closure{};
-					continue;
+					return tl::make_unexpected(ErrorContext("table '", def.name, "' has condition column '", column.name,
+						"', and no condition function was given").with(label(line)));
 				}
 				auto built = command.condition(text);
 				if (!built)
@@ -284,7 +268,18 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));
 			}
-			values[r * valueCount + slot[columnOf[h]]] = *value;
+			if (column.type == column_type::Command)
+			{
+				commands[r * commandCount + slot[columnOf[h]]] = text;
+			}
+			else if (column.type == column_type::String)
+			{
+				strings[r * stringCount + slot[columnOf[h]]] = text;
+			}
+			else
+			{
+				values[r * valueCount + slot[columnOf[h]]] = *value;
+			}
 		}
 	}
 
@@ -294,20 +289,8 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		conditions.list, strings});
 	if (!loaded)
 	{
-		ErrorContext error = std::move(loaded.error());
-		if (refusal.earlier < count)
-		{
-			error = std::move(error).with("same key as line ", file.line_of_row(refusal.earlier + 1));
-		}
-		if (refusal.covered_by < count)
-		{
-			error = std::move(error).with("covered by line ", file.line_of_row(refusal.covered_by + 1));
-		}
-		if (refusal.row < count)
-		{
-			return tl::make_unexpected(std::move(error).with(label(file.line_of_row(refusal.row + 1))));
-		}
-		return tl::make_unexpected(std::move(error).with(std::string(command.label)));
+		return tl::make_unexpected(detail::LocateRefusal(std::move(loaded.error()), refusal, count, command.label,
+			[&](size_t row) { return file.line_of_row(row + 1); }));
 	}
 	return {};
 }

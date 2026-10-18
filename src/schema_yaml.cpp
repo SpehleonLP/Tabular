@@ -189,10 +189,7 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 			// Presence, not emptiness, as with input: `range: ""` is a mistake.
 			if (inputNodes->as_sequence().items[ii]->get("range") != nullptr)
 			{
-				size_t const dots = i.range.find("..");
-				a.ranged = dots != std::string::npos && i.range.find("...") == std::string::npos
-					&& detail::ParseWhole(std::string_view(i.range).substr(0, dots), a.lo)
-					&& detail::ParseWhole(std::string_view(i.range).substr(dots + 2), a.hi);
+				a.ranged = detail::ParseRange(i.range, a.lo, a.hi);
 				if (!a.ranged)
 				{
 					return tl::make_unexpected(ErrorContext("input '", i.name, "' of table '", in.name, "' has range '",
@@ -283,7 +280,11 @@ tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::st
 			                      {in.grid.columns.name, static_cast<column_type>(in.grid.columns.type)},
 			                      static_cast<column_type>(in.grid.cells)};
 		}
-		commands.push_back(create_table{in.name, columns[t], ordered ? &orders[t] : nullptr, in.read_only,
+		// A grid and a picked table are always read-only, so leaving the key
+		// out is not a refusal; stating false is.
+		bool const alwaysReadOnly = isGrid || static_cast<pick_policy>(in.pick) != pick_policy::None;
+		bool const readOnly = alwaysReadOnly && tableNode->get("read_only") == nullptr ? true : in.read_only;
+		commands.push_back(create_table{in.name, columns[t], ordered ? &orders[t] : nullptr, readOnly,
 			inputs[t], static_cast<pick_policy>(in.pick), output, pivoted ? &pivots[t] : nullptr,
 			isGrid ? &grids[t] : nullptr});
 	}

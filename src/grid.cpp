@@ -16,11 +16,6 @@ bool IsTextGrid(column_type cells)
 	return cells == column_type::String || cells == column_type::Command;
 }
 
-bool Fits32(int64_t v)
-{
-	return v >= 0 && v <= INT64_C(0xFFFFFFFF);
-}
-
 // Sorted (key, position) pairs; on a clash, the two positions.
 struct sorted_keys
 {
@@ -172,21 +167,22 @@ tl::expected<void, ErrorContext> relation_store::LoadGrid(load_grid const& comma
 	{
 		for (cell k : keys)
 		{
-			if (axis->type == column_type::Hash && !Fits32(k.i))
+			auto fits = Check32(*axis, def, k.i);
+			if (!fits)
 			{
-				return tl::make_unexpected(ErrorContext(axis->name, " of grid '", def.name,
-					"' is a hash, a 32-bit value widened without sign; got ", k.i));
+				return tl::make_unexpected(std::move(fits.error()));
 			}
 		}
 	}
 	if (def.grid_cells == column_type::Hash || def.grid_cells == column_type::Flags)
 	{
+		column_def const cells{"cells", def.grid_cells};
 		for (cell v : command.values)
 		{
-			if (!Fits32(v.i))
+			auto fits = Check32(cells, def, v.i);
+			if (!fits)
 			{
-				return tl::make_unexpected(ErrorContext("the cells of grid '", def.name,
-					"' are 32-bit values widened without sign; got ", v.i));
+				return tl::make_unexpected(std::move(fits.error()));
 			}
 		}
 	}
@@ -211,6 +207,15 @@ tl::expected<void, ErrorContext> relation_store::LoadGrid(load_grid const& comma
 		}
 		return tl::make_unexpected(ErrorContext("grid '", def.name, "' has ", def.grid_columns.name, " ",
 			command.column_keys[columnKeys.clash].i, " twice"));
+	}
+
+	// A grid has one contributor: replacing another owner's would leave its
+	// Retract with nothing to remove. A grid holding nothing has none.
+	GridVersion::Data const& held = *_storage->grids[command.table]->_data;
+	if (held.owner != command.owner && (held.rows != 0 || held.columns != 0))
+	{
+		return tl::make_unexpected(ErrorContext("grid '", def.name, "' is owned by owner ", held.owner,
+			", and owner ", command.owner, " cannot replace it; a grid has one contributor"));
 	}
 
 	GridVersion::Data next{def};

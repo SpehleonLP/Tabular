@@ -27,9 +27,9 @@ struct pick_query
 //
 // The best row of the key run: with a ranking column, ranked as animation's
 // LookupBest ranks a lookup row (a row whose flags are all in the input first,
-// then the larger R & F, then the larger R; ties to the lower pivot column,
-// then row order), rows matching nothing skipped, and the R == 0 row tried
-// last; without one, in row order. Empty when no row holds.
+// then the larger R & F, then the larger R; ties to row order), rows matching
+// nothing skipped, and the R == 0 row tried last; without one, in row order.
+// Empty when no row holds.
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& version, pick_query const& query);
 tl::expected<std::optional<size_t>, ErrorContext> PickBest(relation_store const& store, uint32_t table, pick_query const& query);
 

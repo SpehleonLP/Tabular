@@ -43,9 +43,11 @@ the feature is wrong, not the rule.
    rows never stop matching. Over finite key domains, totality is checked when a definition
    is built. A table whose rows are guarded by opaque conditions must end in an unconditional
    row or an explicit hold.
-   Built for best tables (2026-10-17): in every key run a load adds rows to, the rows with no
-   script condition (and, when the table ranks, no flags) cover every value of the band
-   inputs' declared ranges; a row the rows tried before it always cover is refused as dead.
+   Built for best tables (2026-10-17): in every key run a load adds rows to, or that the
+   owner's replaced rows were in, the rows with no script condition (and, when the table ranks,
+   no flags) cover every value of the band inputs' declared ranges; a row the rows tried before
+   it always cover is refused as dead. A bare retract is a load of no rows and is never
+   checked, so crash recovery cannot fail.
    Hash key domains are closed by a machine, which relates its keys to each other, so a key
    with no run is not checked until machines exist. An all or an or table may answer nothing.
 2. **Decidability.** Rows are finite, there is no recursion, and within one step the tables
@@ -137,13 +139,28 @@ The order as built, the same as animation's `LookupBest`:
    together, so **the bit order of a flag set is its priority**;
 3. then the larger `R`.
 
-Ties go to the lower pivot column (header order), then row order. A row with `R != 0` and
+Pivot headers are distinct flag sets (two spellings of one set, such as `A|B` and `B|A`, are
+refused by value), so rows tie only when their flags are equal, and **ties go to row order**,
+whichever front end loaded them. A row with `R != 0` and
 `R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and in
-every key run a load adds rows to the `R == 0` rows with no script condition must cover every
+every key run a load checks the `R == 0` rows with no script condition must cover every
 input: they are the clear default (see promise 1). Every table
 needs a well-defined answer to "what happens if nothing matches".
 Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
 last, but its lookup grid has one None column, so no table it reads has two.
+
+**The None header (2026-10-18).** A pivoted best table's flag headers are read left to right.
+`None`, in any case, names the 0 value and is only the first header of a best table; spelled
+anywhere else, or on an or table, it is refused, because it would otherwise become a flag bit
+no one meant.
+
+**What the schema refuses on a pick.** An input is read only by a pick, a band is read only
+through an input, and only a best table ranks:
+
+- a table with no pick that declares `inputs` (or a band or ranking column that would need
+  one) is refused: it is written and never read;
+- an all or an or table with a ranking column (a flags column reading an input) is refused;
+- a picked table or a grid declared writable (`read_only: false`) is refused.
 
 **Picking (owner, 2026-10-12).**
 
@@ -168,7 +185,8 @@ last, but its lookup grid has one None column, so no table it reads has two.
 headers, with values in the cells. The phase table pivots the *output* into the headers: the
 flags across the top are the value column, and the cells are bands, i.e. conditions.
 A key by key pivot is a **grid**, stored densely with every cell filled (a blank is an
-error). A flags-of-key pivot and an output pivot are ordinary rows sorted by key, which the CSV
+error). **A grid has one contributor** (owner, 2026-10-18): it is read-only, and a load from
+another owner is refused while the grid holds a version owned by someone else. A flags-of-key pivot and an output pivot are ordinary rows sorted by key, which the CSV
 front end expands.
 
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
@@ -192,9 +210,12 @@ position or `Location` type: a 2D position is a string column naming the Section
 **Input ranges (owner, 2026-10-17).** A double input may declare `range: lo..hi`, half-open;
 a best table's band inputs must. A pick clamps the input into the range (the top end to the
 largest float below `hi`, so the top value is in the top band), and a band reaching outside its
-input's range is refused. A pick given NaN for a ranged input is refused rather than answering
-nothing, since that would break the totality the load proved (review, 2026-10-17; not an owner
-ruling).
+input's range is refused. A pick given NaN for a ranged input is refused, in every policy: a
+clamp has no place for NaN (owner, 2026-10-18).
+
+**A band is well formed (2026-10-18).** A band cell has both ends finite and start before end,
+in every table whatever its input's range, checked where the cell enters a table. The range
+check then only tests containment.
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
@@ -289,20 +310,24 @@ changed.
    handed to the builder. The core is complete and testable with no parser.
 2. **YAML front end** (built: `tabular/schema_yaml.h`): a table definition written in YAML
    becomes those commands, through the `Spehleon/lib/Yaml` markup walker. A `tables:` sequence;
-   each table has `name`, `columns` (`{name, type, key}`, type one of hash, flags, int, double,
-   condition, command), an optional `order_by: {columns: [names], unique}` and an optional
-   `read_only`. Any diagnostic fails the definition, an unknown key included, because a
+   each table has `name`, `columns` (`{name, type, key, input}`, type one of hash, flags, int,
+   double, condition, command, vec2, string, band), an optional `order_by: {columns: [names],
+   unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range}`),
+   `pick` (none, best, all, or), `output` (an or table's flags column) and `pivot: {headers,
+   cells}`. A grid is `grid: {rows, columns, cells}` instead of columns. A grid and a picked
+   table are always read-only: the key may be left out (it is read as `true`), and
+   `read_only: false` on either is refused. The builder takes `read_only` explicitly. Any diagnostic fails the definition, an unknown key included, because a
    misspelled `unique` silently ignored is a table that is not unique.
 3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
    table. The header names the columns in any order, every non-condition column exactly once.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
    an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
-   must parse whole, and an empty cell is refused, except a blank condition cell, which is no
-   condition. A condition cell is handed, as text, to a
+   must parse whole, and an empty cell is refused in every column type, except a blank
+   condition cell, which is no condition. A condition cell is handed, as text, to a
    function the caller passes to the loader (`csv_rows::condition`, returning
    `tl::expected<closure, ErrorContext>`), which returns the compiled condition; that is the whole of Tabular's part in compiling
    conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
-   version). CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
+   version). The function is needed only when a non-blank condition cell appears. CSV has no quoting, so a command cell cannot hold a comma. Cells are trimmed; blank lines and `#` lines are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
    clash the line it clashes with. Within one load, two texts with one hash, or a text

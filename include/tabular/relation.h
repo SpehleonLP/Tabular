@@ -262,7 +262,6 @@ struct load_rows
 	load_refusal*                     refusal = nullptr;   // filled on a refusal, if given
 	std::span<closure const>          conditions; // count * Condition columns
 	std::span<string_in const>        strings;    // count * String columns
-	std::span<uint16_t const>         pivot;      // empty, or count: each row's pivot column
 };
 
 // Which keys of a refused grid load clash, as indices into the load's key spans.

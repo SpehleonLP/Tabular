@@ -54,7 +54,7 @@ Sources, cited in brackets:
 
 Needed before machines: "a machine is a SELECT checked to always produce exactly one row" [def].
 
-- [x] Flags match: all-in-input first, then the largest `R & F` as an integer (bit order is priority), then the larger `R`; else the required `R == 0` default row; ties go to column order if pivoted, then row order [def Flag matching; arc §3.2 `best`; cook §5]
+- [x] Flags match: all-in-input first, then the largest `R & F` as an integer (bit order is priority), then the larger `R`; else the required `R == 0` default row; ties go to row order; pivot headers are distinct flag sets [def Flag matching; arc §3.2 `best`; cook §5]
 - [x] Ranked fall-through: keys select candidates, flags rank them, take the best row whose other conditions hold, down to the default [def Picking]
 - [~] Native condition kinds on Tabular's own types only (flags ranking and band are built; edge not built): flags subset, band (half-open `start <= x < end`, as animation's phase bands) / one-input comparison against a literal, edge (crossing over the previous..now interval) (?) [def A row, What it is not; arc §3.1; cat §2.6]
 - [x] At most one script condition per row, any number of native ones [def A row]
@@ -76,7 +76,7 @@ Whatever the loader checks, an author can know by reading the table [def promise
 
 ## 5. Host interface
 
-- [ ] Script conditions (anything with a wire, anything complicated) reach the host only through the loader's `condition(string_view)` function (§2), with no symbol table; native conditions (`a..b` bands, flag sets) are read by Tabular and never go through it [def Host interface, owner 2026-10-16]
+- [x] Script conditions (anything with a wire, anything complicated) reach the host only through the loader's `condition(string_view)` function (§2), with no symbol table; native conditions (`a..b` bands, flag sets) are read by Tabular and never go through it [def Host interface, owner 2026-10-16]
 - [ ] Compile refuses any snippet it cannot prove halts; read-only snippets call only read-only functions; functions that take a script callback are refused [def Host interface; guard Rulings]
 - [ ] Input resolution for every name Tabular does not own (wires are the host's) [def Host interface; cat §2.3]
 - [ ] Sinks for emitted commands and messages [def Host interface]
@@ -122,8 +122,8 @@ from are built; a test for one is a test of those. `[x]` when everything it foll
 - [x] A failed rebuild keeps the old version running ← read-only versions replaced only after the new one checks out (§1, RCU) [def promise 5; attach §6]
 - [x] Conditions are `{function, data, release}` closures, released with their row ← the condition function returns the `closure` type `relation.h` already defines (§5) [def Host interface; cat §2.3]
 - [ ] Every query picks a row (totality at run time) ← flags match with its required default row (§3) + ranked fall-through down to the default (§3) + the totality check (§4) [def promise 1; cat §2.6]
-- [x] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked for key runs a load adds rows to, as totality; a run left without one by removing rows picks nothing
-- [x] No tie is ever ambiguous ← flags match breaks ties by row order, or column order if pivoted (§3) [def Flag matching]
+- [x] A missing default (`R == 0`) row is refused ← flags match requires it (§3) [def Flag matching]; checked, as totality, for key runs a load adds rows to or that the owner's replaced rows were in; a bare retract is unchecked, so a run it leaves without one picks nothing
+- [x] No tie is ever ambiguous ← flags match breaks ties by row order (§3) [def Flag matching]
 - [x] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]; a gap is a totality refusal, a full overlap a dead row, a partial overlap priority
 - [ ] Tables run in DAG order within a step, so a phase → lookup → bridge chain settles in one step ← tables that feed each other form a checked DAG (§4) [def A row]
 - [ ] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]

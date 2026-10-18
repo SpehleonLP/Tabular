@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/pick.h"
 #include "tabular/relation.h"
+#include "tabular/rows_csv.h"
 #include "tabular/schema_yaml.h"
 #include "probe_closure.h"
 
@@ -52,9 +53,9 @@ tables:
     order_by: {columns: [label]}
 )";
 
-// Rows of (label, req, clip), with their pivot columns if given.
+// Rows of (label, req, clip).
 tl::expected<void, ErrorContext> LoadRanked(relation_store& store, std::vector<std::array<int64_t, 3>> const& rows,
-	uint64_t owner = 1, std::vector<uint16_t> const& pivot = {}, load_refusal* refusal = nullptr)
+	uint64_t owner = 1, load_refusal* refusal = nullptr)
 {
 	std::vector<cell> values;
 	for (auto const& r : rows)
@@ -64,7 +65,7 @@ tl::expected<void, ErrorContext> LoadRanked(relation_store& store, std::vector<s
 			values.push_back(cell::Integer(v));
 		}
 	}
-	return store.Load(load_rows{0, owner, rows.size(), values, {}, refusal, {}, {}, pivot});
+	return store.Load(load_rows{0, owner, rows.size(), values, {}, refusal});
 }
 
 // The picked row's clip, -1 for none.
@@ -216,7 +217,7 @@ TEST(PickBest, AFailingScriptConditionFailsThePick)
 
 // animation's bit_value lookup fixture (tests/fixtures/animation_pipeline/bit_value),
 // long-form: headers None=0, Injured=1, Crouch=2, Injured|Crouch=3, Prone=4,
-// Crouch|Prone=6 at pivot columns 0..5; clip = case * 10 + pivot column. The
+// Crouch|Prone=6; clip = case * 10 + the header's position. The
 // expected cells are animation's LookupBest.BitValueRuling.
 TEST(PickBest, RanksLikeAnimationsLookupBest)
 {
@@ -229,12 +230,7 @@ TEST(PickBest, RanksLikeAnimationsLookupBest)
 		{5, 0, 50}, {5, 3, 53}, {5, 6, 55},
 		{6, 0, 60}, {6, 3, 63},
 	};
-	std::vector<uint16_t> pivot;
-	for (auto const& r : rows)
-	{
-		pivot.push_back(static_cast<uint16_t>(r[2] % 10));
-	}
-	ASSERT_TRUE(LoadRanked(store, rows, 1, pivot).has_value());
+	ASSERT_TRUE(LoadRanked(store, rows).has_value());
 	int64_t const injured = 1, crouch = 2, prone = 4;
 	EXPECT_EQ(BestClip(store, 1, injured | crouch), 12);
 	EXPECT_EQ(BestClip(store, 2, injured | crouch), 23);
@@ -258,7 +254,7 @@ TEST(PickBest, AKeyRunWithoutADefaultIsRefusedAtLoad)
 {
 	relation_store store = StoreFrom(kRanked);
 	load_refusal refusal;
-	auto loaded = LoadRanked(store, {{1, 0, 10}, {7, 1, 71}, {7, 2, 72}}, 1, {}, &refusal);
+	auto loaded = LoadRanked(store, {{1, 0, 10}, {7, 1, 71}, {7, 2, 72}}, 1, &refusal);
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_TRUE(Mentions(loaded.error().format(), "no row with no flags")) << loaded.error().format();
 	EXPECT_EQ(refusal.row, 1u) << "the run's first loaded row";
@@ -396,6 +392,39 @@ TEST(PickOr, OverlappingBandsOrTogether)
 	EXPECT_EQ(PhaseBits(store, 1, 0.5), 5u);
 }
 
+// "A band runs low to high" is a property of the cell, not of an input's range,
+// so a table whose input declares no range holds to it too.
+TEST(PickOr, ABandIsWellFormedWhateverTheInputsRange)
+{
+	relation_store store = StoreFrom(kPhase);
+	float const nan = std::nanf("");
+	float const inf = INFINITY;
+	struct bad { float lo; float hi; };
+	for (bad const& b : {bad{0.5f, 0.2f}, bad{0.5f, 0.5f}, bad{nan, 1.0f}, bad{0.0f, nan}, bad{0.0f, inf}, bad{-inf, 1.0f}})
+	{
+		cell const values[] = {cell::Integer(1), cell::Integer(1), cell::Vector(b.lo, b.hi)};
+		load_refusal refusal;
+		auto loaded = store.Load(load_rows{0, 1, 1, values, {}, &refusal});
+		ASSERT_FALSE(loaded.has_value()) << b.lo << ".." << b.hi;
+		EXPECT_TRUE(Mentions(loaded.error().format(), "window")) << loaded.error().format();
+		EXPECT_EQ(refusal.row, 0u);
+		EXPECT_EQ(store.RowCount(0), 0u);
+	}
+}
+
+TEST(PickOr, ABandWrittenInCsvIsWellFormed)
+{
+	relation_store store = StoreFrom(kPhase);
+	for (char const* band : {"0.5..0.2", "nan..1", "0..inf", "0.5..0.5"})
+	{
+		auto loaded = LoadCsv(store, csv_rows{0, 1, std::string("clip,bits,window\n1,1,") + band + "\n", "phase.csv"});
+		ASSERT_FALSE(loaded.has_value()) << band;
+		EXPECT_TRUE(Mentions(loaded.error().format(), "a band runs low to high")) << loaded.error().format();
+		EXPECT_TRUE(Mentions(loaded.error().format(), "phase.csv:2")) << loaded.error().format();
+	}
+	EXPECT_TRUE(LoadCsv(store, csv_rows{0, 1, "clip,bits,window\n1,1,0.1..0.2\n", "phase.csv"}).has_value());
+}
+
 TEST(PickOr, EdgesAreHalfOpenAndNanHoldsNothing)
 {
 	relation_store store = PhaseStore();
@@ -432,6 +461,34 @@ tables:
 	auto rows = PickAll(store, 0, pick_query{keys, inputs, &thisIn});
 	ASSERT_TRUE(rows.has_value()) << rows.error().format();
 	EXPECT_EQ(*rows, (std::vector<size_t>{0, 3}));
+}
+
+// A clamp has no place for NaN, and that follows from the range declaration,
+// not from the pick policy.
+TEST(PickPolicy, NanIsRefusedForARangedInputInEveryPolicy)
+{
+	auto store = [](char const* policy)
+	{
+		return StoreFrom(std::string(R"(
+tables:
+  - name: t
+    read_only: true
+    pick: )") + policy + R"(
+    inputs:
+      - {name: t, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: window, type: band, input: t}
+      - {name: out, type: flags}
+    order_by: {columns: [label]}
+)" + (std::string_view(policy) == "or" ? "    output: out\n" : ""));
+	};
+	cell const keys[]   = {cell::Integer(1)};
+	cell const inputs[] = {cell::Real(std::nan(""))};
+	relation_store all = store("all");
+	relation_store ord = store("or");
+	EXPECT_TRUE(Mentions(RefusalOf(PickAll(all, 0, pick_query{keys, inputs})), "is NaN"));
+	EXPECT_TRUE(Mentions(RefusalOf(PickOr(ord, 0, pick_query{keys, inputs})), "is NaN"));
 }
 
 TEST(PickPolicy, EachTableIsPickedOneWay)
@@ -592,7 +649,6 @@ struct band_row
 	float    hi;
 	closure  when;
 	int64_t  clip;
-	uint16_t pivot = 0;
 };
 
 tl::expected<void, ErrorContext> LoadBand(relation_store& store, std::vector<band_row> const& rows,
@@ -600,7 +656,6 @@ tl::expected<void, ErrorContext> LoadBand(relation_store& store, std::vector<ban
 {
 	std::vector<cell>     values;
 	std::vector<closure>  conditions;
-	std::vector<uint16_t> pivot;
 	for (band_row const& r : rows)
 	{
 		values.push_back(cell::Integer(r.label));
@@ -608,9 +663,8 @@ tl::expected<void, ErrorContext> LoadBand(relation_store& store, std::vector<ban
 		values.push_back(cell::Vector(r.lo, r.hi));
 		values.push_back(cell::Integer(r.clip));
 		conditions.push_back(r.when);
-		pivot.push_back(r.pivot);
 	}
-	return store.Load(load_rows{0, owner, rows.size(), values, {}, refusal, conditions, {}, pivot});
+	return store.Load(load_rows{0, owner, rows.size(), values, {}, refusal, conditions});
 }
 
 int64_t BandClip(relation_store const& store, int64_t label, int64_t mode, double t)
@@ -695,31 +749,52 @@ tables:
 	EXPECT_TRUE(store.Load(load_rows{0, 1, 1, values, {}, nullptr, plain}).has_value());
 }
 
-TEST(PickBest, ARunTheLoadDoesNotTouchIsNotRechecked)
+// A reload replaces everything its owner had, so it can take a run's only
+// default away from another owner's ranked row.
+TEST(PickBest, AReloadThatStrandsARunIsRefused)
 {
 	relation_store store = StoreFrom(kRankedBand);
 	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
 	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 2)), "(accepted)");
-	EXPECT_EQ(RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 1)), "(accepted)")
-		<< "owner 1 leaves run 1; the reload adds nothing to it, so it is not refused";
+	load_refusal refusal;
+	std::string const refused = RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, &refusal, 1));
+	EXPECT_TRUE(Mentions(refused, "key (1)")) << refused;
+	EXPECT_TRUE(Mentions(refused, "no row with no flags")) << refused;
+	EXPECT_EQ(store.RowCount(0), 2u) << "the old version stays";
+	EXPECT_EQ(BandClip(store, 1, 0, 0.5), 10);
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 12}}, nullptr, 1)), "(accepted)")
+		<< "a reload that keeps the run's default is fine";
+	EXPECT_EQ(BandClip(store, 1, 0, 0.5), 12);
+}
+
+TEST(PickBest, ARunNeitherLoadedNorLeftIsNotRechecked)
+{
+	relation_store store = StoreFrom(kRankedBand);
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10}}, nullptr, 1)), "(accepted)");
+	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 11}}, nullptr, 2)), "(accepted)");
+	store.Retract(retract_owner{1});   // a bare retract is never refused, and strands run 1
 	EXPECT_EQ(BandClip(store, 1, 0, 0.5), -1) << "run 1 has no default now, and picks nothing";
+	EXPECT_EQ(RefusalOf(LoadBand(store, {{2, 0, 0.0f, 1.0f, closure{}, 20}}, nullptr, 3)), "(accepted)")
+		<< "owner 3 has no rows in run 1 and adds none, so run 1 is not looked at";
 	EXPECT_NE(RefusalOf(LoadBand(store, {{1, 2, 0.0f, 1.0f, closure{}, 12}}, nullptr, 3)), "(accepted)")
 		<< "a load adding to run 1 is checked, and run 1 has no default";
 }
 
-TEST(PickBest, EqualRanksGoToPivotColumnThenRowOrder)
+// Rows of equal rank are tried in row order, whichever front end loaded them:
+// nothing but the rows' own order breaks a tie.
+TEST(PickBest, EqualRanksGoToRowOrder)
 {
 	relation_store store = StoreFrom(kRankedBand);
 	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
-	                                     {1, 1, 0.0f, 1.0f, closure{}, 11, 2},
-	                                     {1, 1, 0.0f, 0.5f, closure{}, 12, 1},
+	                                     {1, 1, 0.0f, 0.5f, closure{}, 11},
+	                                     {1, 1, 0.25f, 1.0f, closure{}, 12},
 	                                     {2, 0, 0.0f, 1.0f, closure{}, 20},
-	                                     {2, 1, 0.0f, 0.5f, closure{}, 21},
-	                                     {2, 1, 0.0f, 1.0f, closure{}, 22}})), "(accepted)");
-	EXPECT_EQ(BandClip(store, 1, 1, 0.25), 12) << "the lower pivot column wins";
-	EXPECT_EQ(BandClip(store, 1, 1, 0.75), 11);
-	EXPECT_EQ(BandClip(store, 2, 1, 0.25), 21) << "equal pivot columns: row order";
-	EXPECT_EQ(BandClip(store, 2, 1, 0.75), 22);
+	                                     {2, 1, 0.25f, 1.0f, closure{}, 21},
+	                                     {2, 1, 0.0f, 0.5f, closure{}, 22}})), "(accepted)");
+	EXPECT_EQ(BandClip(store, 1, 1, 0.3), 11) << "both hold at 0.3: the earlier row";
+	EXPECT_EQ(BandClip(store, 1, 1, 0.75), 12);
+	EXPECT_EQ(BandClip(store, 2, 1, 0.3), 21) << "the same bands in the other order: the other winner";
+	EXPECT_EQ(BandClip(store, 2, 1, 0.1), 22);
 }
 
 TEST(PickBest, ARowEarlierRowsCoverIsRefusedNamingThem)
@@ -770,13 +845,13 @@ TEST(PickBest, SameFlagsShadowInTieOrder)
 	relation_store store = StoreFrom(kRankedBand);
 	load_refusal refusal;
 	auto loaded = LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
-	                               {1, 1, 0.0f, 0.5f, closure{}, 11, 2},
-	                               {1, 1, 0.0f, 1.0f, closure{}, 12, 1}}, &refusal);
-	ASSERT_FALSE(loaded.has_value()) << "pivot 1 is tried first and covers pivot 2's band";
-	EXPECT_TRUE(Mentions(loaded.error().format(), "loaded row 1 is never picked; loaded row 2 covers it"))
+	                               {1, 1, 0.0f, 1.0f, closure{}, 11},
+	                               {1, 1, 0.0f, 0.5f, closure{}, 12}}, &refusal);
+	ASSERT_FALSE(loaded.has_value()) << "row order: row 1 is tried first and covers row 2's band";
+	EXPECT_TRUE(Mentions(loaded.error().format(), "loaded row 2 is never picked; loaded row 1 covers it"))
 		<< loaded.error().format();
-	EXPECT_EQ(refusal.row, 1u);
-	EXPECT_EQ(refusal.covered_by, 2u);
+	EXPECT_EQ(refusal.row, 2u);
+	EXPECT_EQ(refusal.covered_by, 1u);
 }
 
 TEST(PickBest, TwoBandsOnOneInputIntersect)
@@ -829,23 +904,6 @@ TEST(PickBest, ADeadRowNamesOnlyTheRowsThatMeetIt)
 	EXPECT_TRUE(Mentions(error, "loaded row 2 is never picked; loaded row 0 covers it")) << error;
 	EXPECT_EQ(refusal.row, 2u);
 	EXPECT_EQ(refusal.covered_by, 0u) << "row 1 is 0..0.5 and never takes row 2's place";
-}
-
-TEST(PickBest, ALoadThatKillsAKeptRowIsRefused)
-{
-	relation_store store = StoreFrom(kRankedBand);
-	ASSERT_EQ(RefusalOf(LoadBand(store, {{1, 0, 0.0f, 1.0f, closure{}, 10},
-	                                     {1, 1, 0.0f, 1.0f, closure{}, 11, 2}}, nullptr, 1)), "(accepted)");
-	load_refusal refusal;
-	auto loaded = LoadBand(store, {{1, 1, 0.0f, 1.0f, closure{}, 21, 1}}, &refusal, 2);
-	ASSERT_FALSE(loaded.has_value()) << "pivot 1 is tried before owner 1's pivot 2 row and covers it";
-	std::string const error = loaded.error().format();
-	EXPECT_TRUE(Mentions(error, "owner 1's row 1 of the current version is never picked; loaded row 0 covers it"))
-		<< error;
-	EXPECT_EQ(refusal.row, 0u) << "the loaded row, since the dead one is not part of the load";
-	EXPECT_EQ(refusal.covered_by, SIZE_MAX);
-	EXPECT_EQ(store.RowCount(0), 2u);
-	EXPECT_EQ(BandClip(store, 1, 1, 0.5), 11);
 }
 
 TEST(PickBest, AnOrderPastTheKeysCanKillAKeptRow)

@@ -160,6 +160,23 @@ tables:
 	EXPECT_EQ(def.columns[2].input, 0u);
 }
 
+TEST(SchemaYaml, APickedTableIsReadOnlyWhetherOrNotItSaysSo)
+{
+	constexpr std::string_view kBody = R"(
+    pick: all
+    columns:
+      - {name: clip, type: int, key: true}
+    order_by: {columns: [clip]}
+)";
+	auto inferred = SchemaFromYaml(std::string("tables:\n  - name: t") + std::string(kBody), "t.yaml");
+	ASSERT_TRUE(inferred.has_value()) << inferred.error().format();
+	EXPECT_TRUE(inferred->tables()[0].read_only);
+
+	auto refused = SchemaFromYaml(std::string("tables:\n  - name: t\n    read_only: false") + std::string(kBody), "t.yaml");
+	ASSERT_FALSE(refused.has_value());
+	EXPECT_TRUE(Mentions(refused.error().format(), "read-only")) << refused.error().format();
+}
+
 TEST(SchemaYaml, AnUndeclaredInputOrOutputIsRefused)
 {
 	auto input = SchemaFromYaml(R"(

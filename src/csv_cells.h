@@ -32,7 +32,15 @@ bool ParseWhole(std::string_view text, T& out, int base = 10)
 	return r.ec == std::errc() && r.ptr == end;
 }
 
-// A value cell of column's type; an empty cell is refused.
+// The two floats of `a..b`, the whole text. Three dots in a row would let
+// "1...2" read as 1 and .2; which pair separates is ambiguous, so it is
+// refused rather than guessed.
+bool ParseRange(std::string_view text, float& start, float& end);
+
+// A cell of column's type. The one place an empty cell is refused, whatever the
+// type; a condition column's blank cell is "no condition", which the caller
+// accepts before asking. A command or string column has no cell value: it
+// answers a zero cell and the caller keeps the text.
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text);
 
 // Every text one CSV load hashed, in any column, so two names with one hash,
@@ -50,6 +58,28 @@ private:
 // ReadCell, recording a hash cell's text in names.
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text, hash_names& names,
 	uint32_t line);
+
+// A refused Load, told in the file's terms: the lines of the rows it names,
+// as lineOf(row) gives them, and the label alone when it names none. The
+// rows and pivoted front ends both map Load's row indexes back this way.
+template<typename LineOf>
+ErrorContext LocateRefusal(ErrorContext error, load_refusal const& refusal, size_t count, std::string_view label,
+	LineOf const& lineOf)
+{
+	if (refusal.earlier < count)
+	{
+		error = std::move(error).with("same key as line ", lineOf(refusal.earlier));
+	}
+	if (refusal.covered_by < count)
+	{
+		error = std::move(error).with("covered by line ", lineOf(refusal.covered_by));
+	}
+	if (refusal.row < count)
+	{
+		return std::move(error).with(cc(std::string(), label, ":", lineOf(refusal.row)));
+	}
+	return std::move(error).with(std::string(label));
+}
 
 tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows const& command);
 

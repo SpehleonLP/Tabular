@@ -6,6 +6,7 @@
 
 #include "tabular/relation.h"
 #include "tabular/grid.h"
+#include "table_layout.h"
 
 #include <atomic>
 #include <memory>
@@ -71,24 +72,15 @@ inline held_condition Hold(closure const& c)
 // A table's rows: three parallel slices, one per kind of column, so a row
 // moves as one when the table is sorted or compacted. A writable table's live
 // in the store; a read-only table's live in its current TableVersion.
-struct table_rows
+struct table_rows : slot_layout
 {
 	std::vector<cell>        cells;      // value columns, row-major
 	std::vector<detail::held_condition> conditions; // Condition columns, row-major
 	std::vector<std::string> commands;   // Command columns, row-major
 	std::vector<counted_string> strings; // String columns, row-major, interned
 	std::vector<uint64_t>    owners;     // one per row
-	// Per row, the header position a pivoted load took it from (0 otherwise),
-	// so flag ties go to column order. Kept by read-only tables only; picks
-	// read nothing else.
-	std::vector<uint16_t>    pivots;
 	uint64_t                 generation = 0;
 
-	uint32_t              valueCount     = 0;
-	uint32_t              conditionCount = 0;
-	uint32_t              commandCount   = 0;
-	uint32_t              stringCount    = 0;
-	std::vector<uint32_t> slot;          // per column: its position among columns of its kind
 	std::vector<uint32_t> orderSlots;    // the order's columns, as value slots
 
 	// Per column, value -> rows in row order; filled for key columns only.
@@ -98,21 +90,10 @@ struct table_rows
 	std::vector<std::unordered_map<std::string_view, std::vector<uint32_t>>> stringIndex;
 
 	// No rows, laid out for def.
-	explicit table_rows(table_def const& def)
+	explicit table_rows(table_def const& def) : slot_layout(def)
 	{
-		slot.resize(def.columns.size());
 		index.resize(def.columns.size());
 		stringIndex.resize(def.columns.size());
-		for (uint32_t c = 0; c < def.columns.size(); ++c)
-		{
-			switch (def.columns[c].type)
-			{
-			case column_type::Condition: slot[c] = conditionCount++; break;
-			case column_type::Command:   slot[c] = commandCount++;   break;
-			case column_type::String:    slot[c] = stringCount++;    break;
-			default:                     slot[c] = valueCount++;     break;
-			}
-		}
 		for (uint32_t k = 0; k < def.order.size(); ++k)
 		{
 			orderSlots.push_back(slot[def.order[k]]);
@@ -189,6 +170,31 @@ struct relation_store::Storage
 	table_rows const& RowsOf(uint32_t table) const
 	{
 		return versions[table] ? versions[table]->_data->rows : tables[table];
+	}
+
+	// The one place that decides whether a table is a grid: a grid has no
+	// entry in tables or versions, so a row-table call must go through here
+	// before it reaches them. Null for a table that is not a grid.
+	GridVersion const* GridOf(uint32_t table) const
+	{
+		return grids[table].get();
+	}
+
+	// What a row-table call may read: the table's rows, or the refusal a grid
+	// answers it with. Everything that takes a table index and then touches
+	// rows asks here, so a grid never reaches the empty layout beside it.
+	tl::expected<table_rows const*, ErrorContext> RowTable(uint32_t table) const
+	{
+		if (table >= tables.size())
+		{
+			return tl::make_unexpected(ErrorContext("no table ", table));
+		}
+		if (GridOf(table))
+		{
+			return tl::make_unexpected(ErrorContext("table '", definition.tables()[table].name,
+				"' is a grid; read it with Grid"));
+		}
+		return &RowsOf(table);
 	}
 };
 

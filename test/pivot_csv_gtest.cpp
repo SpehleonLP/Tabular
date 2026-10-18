@@ -224,14 +224,34 @@ tables:
 	EXPECT_TRUE(Mentions(Error(LoadCsv(plain, rows)), "has no pivot"));
 }
 
-TEST(PivotCsv, EqualFlagsOnOneLineAreADeadRow)
+// Two names for one flag set would make two columns with one rank, and a tie
+// only the pivot could break. Headers are distinct flag sets, so the author is
+// told instead.
+TEST(PivotCsv, EqualFlagSetsAreRefusedNamingBothHeaders)
 {
 	relation_store store = StoreFrom(kLookup);
-	// Two names for the same flags; the left one always wins, so the right is dead.
 	std::string error = Error(LoadPivot(store, "label,None,Injured,Crouch,Crouch|Injured,Injured|Crouch\n1,n,,,left,right\n"));
-	EXPECT_TRUE(Mentions(error, "never picked")) << error;
-	EXPECT_TRUE(Mentions(error, "lookup.csv:2")) << error;
-	EXPECT_TRUE(Mentions(error, "covered by line 2")) << error;
+	EXPECT_TRUE(Mentions(error, "'Crouch|Injured'")) << error;
+	EXPECT_TRUE(Mentions(error, "'Injured|Crouch'")) << error;
+	EXPECT_TRUE(Mentions(error, "same flag set")) << error;
+	EXPECT_TRUE(Mentions(error, "lookup.csv:1")) << error;
+	EXPECT_EQ(store.RowCount(0), 0u);
+	EXPECT_TRUE(Mentions(Error(LoadPivot(store, "label,None,Injured,Injured|Injured\n1,n,i,j\n")), "same flag set"))
+		<< "a combo of one header is that header";
+}
+
+TEST(PivotCsv, ALaterNoneHeaderIsRefusedNotMadeAFlagBit)
+{
+	relation_store store = StoreFrom(kLookup);
+	for (char const* none : {"none", "None", "NONE", "nOnE"})
+	{
+		std::vector<std::string> names = {"kept"};
+		std::string error = Error(LoadPivot(store, std::string("label,None,Injured,") + none + "\n1,n,i,x\n", &names));
+		EXPECT_TRUE(Mentions(error, "None")) << none << ": " << error;
+		EXPECT_TRUE(Mentions(error, "0 value")) << none << ": " << error;
+		EXPECT_EQ(names, (std::vector<std::string>{"kept"})) << none;
+	}
+	EXPECT_EQ(store.RowCount(0), 0u);
 }
 
 TEST(PivotCsv, AHeaderWithNoFlagHeadersIsRefused)
@@ -291,4 +311,43 @@ tables:
 	std::string error = Error(LoadPivot(store, "label,None,Injured\n1,n26963,n50336\n"));
 	EXPECT_TRUE(Mentions(error, "'n50336' has the same hash as 'n26963'")) << error;
 	EXPECT_TRUE(Mentions(error, "lookup.csv:2")) << error;
+}
+
+// The same rows must meet the same verdict whichever front end brings them in.
+// Owner 2's row for label 1 with req A is covered by owner 1's, which has the
+// same flags and sorts first, however the file spelled it.
+TEST(PivotCsv, RowsAndPivotedCsvGiveOneOutcome)
+{
+	constexpr std::string_view kBands = R"(
+tables:
+  - name: lookup
+    read_only: true
+    pick: best
+    inputs:
+      - {name: mode, type: flags}
+      - {name: t, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true}
+      - {name: req, type: flags, input: mode}
+      - {name: window, type: band, input: t}
+    order_by: {columns: [label]}
+    pivot: {headers: req, cells: window}
+)";
+	for (bool pivoted : {false, true})
+	{
+		relation_store store = StoreFrom(kBands);
+		ASSERT_EQ(Error(LoadPivot(store, "label,None,A\n1,0..1,0..1\n")), "") << "owner 1, pivoted";
+		std::string error;
+		if (pivoted)
+		{
+			error = Error(LoadPivot(store, "label,None,A\n1,,0..0.5\n", nullptr, 2));
+		}
+		else
+		{
+			error = Error(LoadCsv(store, csv_rows{0, 2, "label,req,window\n1,1,0..0.5\n", "rows.csv"}));
+		}
+		EXPECT_TRUE(Mentions(error, "loaded row 0 is never picked; owner 1's row 1 of the current version covers it"))
+			<< (pivoted ? "pivoted: " : "rows: ") << error;
+		EXPECT_EQ(store.RowCount(0), 2u) << "the refused load changes nothing";
+	}
 }

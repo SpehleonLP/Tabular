@@ -1,4 +1,5 @@
 #include "csv_cells.h"
+#include "table_layout.h"
 #include "Utility/load_csv.h"
 
 #include <cctype>
@@ -71,6 +72,13 @@ tl::expected<std::vector<flag_header>, ErrorContext> ReadHeaders(std::vector<std
 			out.push_back({std::string(name), 0, false});
 			continue;
 		}
+		// None is the 0 value, a best table's first header; spelled anywhere
+		// else it would silently become a flag bit that no one meant.
+		if (IsNone(name))
+		{
+			return tl::make_unexpected(ErrorContext("flag header ", h + 1, " is '", name,
+				"'; None names the 0 value, which only a best table's first header is"));
+		}
 		for (flag_header const& earlier : out)
 		{
 			if (earlier.name == name)
@@ -113,6 +121,16 @@ tl::expected<std::vector<flag_header>, ErrorContext> ReadHeaders(std::vector<std
 			}
 			rest = rest.substr(bar + 1);
 		}
+		// Two spellings of one flag set would be two columns with one rank,
+		// and nothing but row order to tell them apart: refused by value.
+		for (flag_header const& earlier : out)
+		{
+			if (earlier.flags == flags)
+			{
+				return tl::make_unexpected(ErrorContext("flag headers '", earlier.name, "' and '", name,
+					"' are the same flag set; headers are distinct flag sets"));
+			}
+		}
 		out.push_back({std::string(name), flags, false});
 	}
 	return out;
@@ -131,14 +149,10 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 
 	// Slots as the store numbers them: keys and headers are values; the cells
 	// column is a value, a band or a string.
-	std::vector<uint32_t> slot(def.columns.size());
-	uint32_t valueCount  = 0;
-	uint32_t stringCount = 0;
-	for (uint32_t c = 0; c < def.columns.size(); ++c)
-	{
-		slot[c] = def.columns[c].type == column_type::String ? stringCount++ : valueCount++;
-	}
-	column_def const& cells = def.columns[def.pivot_cells];
+	slot_layout const layout(def);
+	std::vector<uint32_t> const& slot       = layout.slot;
+	uint32_t const               valueCount = layout.valueCount;
+	column_def const&            cells      = def.columns[def.pivot_cells];
 
 	std::string_view text = command.text;
 	if (text.starts_with("\xEF\xBB\xBF"))
@@ -177,12 +191,6 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		return tl::make_unexpected(ErrorContext("the header names no flag headers after the keys of '", def.name, "'")
 			.with(label(headerLine)));
 	}
-	// The pivot column is 16 bits; past that, header order would wrap.
-	if (width - def.key_count > size_t(UINT16_MAX) + 1)
-	{
-		return tl::make_unexpected(ErrorContext("the header names ", width - def.key_count,
-			" flag headers; a pivot holds at most ", size_t(UINT16_MAX) + 1).with(label(headerLine)));
-	}
 	std::vector<std::string_view> names;
 	for (size_t h = def.key_count; h < width; ++h)
 	{
@@ -196,7 +204,6 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 
 	std::vector<cell>      values;
 	std::vector<string_in> strings;
-	std::vector<uint16_t>  pivot;
 	std::vector<uint32_t>  lineOf;   // per loaded row
 	hash_names             hashed;
 	for (size_t r = 1; r < file.rows(); ++r)
@@ -210,7 +217,8 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		std::vector<cell> keys;
 		for (uint32_t k = 0; k < def.key_count; ++k)
 		{
-			auto key = ReadCell(def.columns[def.order[k]], file.cell(k, r), hashed, line);
+			column_def const& keyColumn = def.columns[def.order[k]];
+			auto key = ReadCell(keyColumn, file.cell(k, r), hashed, line);
 			if (!key)
 			{
 				return tl::make_unexpected(std::move(key.error()).with(label(line)));
@@ -230,44 +238,31 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 				row[slot[def.order[k]]] = keys[k];
 			}
 			row[slot[def.pivot_headers]] = cell::Integer((*headers)[h].flags);
+			auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText, hashed, line);
+			if (!value)
+			{
+				return tl::make_unexpected(std::move(value.error()).with(label(line)));
+			}
 			if (cells.type == column_type::String)
 			{
 				strings.emplace_back(cellText);
 			}
 			else
 			{
-				auto value = ReadCell(column_def{(*headers)[h].name, cells.type}, cellText, hashed, line);
-				if (!value)
-				{
-					return tl::make_unexpected(std::move(value.error()).with(label(line)));
-				}
 				row[slot[def.pivot_cells]] = *value;
 			}
 			values.insert(values.end(), row.begin(), row.end());
-			pivot.push_back(static_cast<uint16_t>(h));
 			lineOf.push_back(line);
 		}
 	}
 
 	load_refusal refusal;
-	auto loaded = store.Load(load_rows{command.table, command.owner, pivot.size(), values, {}, &refusal, {},
-		strings, pivot});
+	auto loaded = store.Load(load_rows{command.table, command.owner, lineOf.size(), values, {}, &refusal, {},
+		strings});
 	if (!loaded)
 	{
-		ErrorContext error = std::move(loaded.error());
-		if (refusal.earlier < lineOf.size())
-		{
-			error = std::move(error).with("same key as line ", lineOf[refusal.earlier]);
-		}
-		if (refusal.covered_by < lineOf.size())
-		{
-			error = std::move(error).with("covered by line ", lineOf[refusal.covered_by]);
-		}
-		if (refusal.row < lineOf.size())
-		{
-			return tl::make_unexpected(std::move(error).with(label(lineOf[refusal.row])));
-		}
-		return tl::make_unexpected(std::move(error).with(std::string(command.label)));
+		return tl::make_unexpected(LocateRefusal(std::move(loaded.error()), refusal, lineOf.size(), command.label,
+			[&](size_t row) { return lineOf[row]; }));
 	}
 	// Only now: a refused load changes nothing, the caller's names included.
 	if (command.flag_names)

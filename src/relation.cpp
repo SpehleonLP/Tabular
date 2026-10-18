@@ -234,7 +234,21 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 	}
 	if (c.pick == pick_policy::None)
 	{
+		// Only a pick reads an input, so a declared input is written and never
+		// read. A band or ranking column here has no input it could name, and
+		// CheckInput has already refused it for that.
+		if (!out.inputs.empty())
+		{
+			return tl::make_unexpected(ErrorContext("table '", c.name, "' has no pick, so nothing reads its ",
+				out.inputs.size(), " declared inputs; give the table a pick or drop them"));
+		}
 		return {};
+	}
+	if (c.pick != pick_policy::Best && out.ranking != UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("table '", c.name, "' is ", c.pick == pick_policy::All ? "an all" : "an or",
+			" table, and its flags column '", out.columns[out.ranking].name,
+			"' ranks by an input; only a best table ranks"));
 	}
 	if (!out.read_only)
 	{
@@ -353,6 +367,12 @@ tl::expected<table_def, ErrorContext> BuildGrid(create_table const& c)
 	{
 		return tl::make_unexpected(ErrorContext("the cells of grid '", c.name, "' are ", TypeName(g.cells),
 			"s; a grid holds values, strings or commands"));
+	}
+	// A grid is replaced whole by its one contributor, so it is never a table
+	// that rows are inserted into.
+	if (!c.read_only)
+	{
+		return tl::make_unexpected(ErrorContext("grid '", c.name, "' is read-only; it cannot be declared writable"));
 	}
 	table_def out{std::string(c.name), {}, {}, false, true};
 	out.is_grid      = true;
@@ -481,31 +501,6 @@ bool IsValueColumn(column_type type)
 		&& type != column_type::Band;
 }
 
-// A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
-// carried as int64_t, widened without sign. Anything outside [0, 2^32) is
-// either not one of them or a sign-extended copy, which would be a different
-// key that never matches the zero-extended one.
-bool Is32BitColumn(column_type type)
-{
-	return type == column_type::Hash || type == column_type::Flags;
-}
-
-bool Fits32(int64_t v)
-{
-	return v >= 0 && v <= INT64_C(0xFFFFFFFF);
-}
-
-tl::expected<void, ErrorContext> Check32(column_def const& column, table_def const& def, int64_t v)
-{
-	if (Is32BitColumn(column.type) && !Fits32(v))
-	{
-		return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name, "' is a ",
-			column.type == column_type::Hash ? "hash" : "flag set",
-			" and holds a 32-bit value widened without sign; got ", v));
-	}
-	return {};
-}
-
 void ReleaseAll(std::span<closure const> closures)
 {
 	for (closure const& c : closures)
@@ -519,6 +514,12 @@ void ReleaseAll(std::span<closure const> closures)
 bool IsMalformed(closure const& c)
 {
 	return c.function == nullptr && (c.data != nullptr || c.release != nullptr);
+}
+
+ErrorContext MalformedBand(column_def const& column, table_def const& def, cell band)
+{
+	return ErrorContext("band '", column.name, "' of '", def.name, "' is ", FloatText(band.v[0]), "..",
+		FloatText(band.v[1]), "; a band runs low to high, both ends finite");
 }
 
 counted_string Intern(string_in s)
@@ -635,27 +636,32 @@ schema const& relation_store::definition() const
 	return _storage->definition;
 }
 
+// A grid's rows live in its GridVersion; the empty row layout beside it would
+// answer 0 forever, or be indexed past its end.
 size_t relation_store::RowCount(uint32_t table) const
 {
-	// A grid's rows live in its GridVersion; the empty row layout beside it
-	// would answer 0 forever.
-	if (_storage->definition.tables()[table].is_grid)
+	if (GridVersion const* grid = _storage->GridOf(table))
 	{
-		return _storage->grids[table]->Rows();
+		return grid->Rows();
 	}
 	return _storage->RowsOf(table).RowCount();
 }
 
 uint64_t relation_store::OwnerOf(uint32_t table, size_t row) const
 {
+	// A grid has one contributor, so every row of it is that owner's.
+	if (GridVersion const* grid = _storage->GridOf(table))
+	{
+		return grid->Owner();
+	}
 	return _storage->RowsOf(table).owners[row];
 }
 
 uint64_t relation_store::Generation(uint32_t table) const
 {
-	if (_storage->definition.tables()[table].is_grid)
+	if (GridVersion const* grid = _storage->GridOf(table))
 	{
-		return _storage->grids[table]->Generation();
+		return grid->Generation();
 	}
 	return _storage->RowsOf(table).generation;
 }
@@ -676,7 +682,7 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	}
 	table_def const& def  = defs[command.table];
 	auto&            rows = _storage->tables[command.table];
-	if (def.is_grid)
+	if (_storage->GridOf(command.table))
 	{
 		return refuse(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
 	}
@@ -707,6 +713,8 @@ tl::expected<void, ErrorContext> relation_store::Insert(insert_row const& comman
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		column_def const& column = def.columns[c];
+		// No band case: a band must name an input, only a pick has inputs, and a
+		// picked table is read-only, so a writable table never holds one.
 		if (IsValueColumn(column.type))
 		{
 			auto fits = Check32(column, def, command.values[rows.slot[c]].i);
@@ -791,7 +799,7 @@ void relation_store::Retract(retract_owner const& command)
 	auto defs = _storage->definition.tables();
 	for (uint32_t t = 0; t < defs.size(); ++t)
 	{
-		if (defs[t].is_grid)
+		if (_storage->GridOf(t))
 		{
 			GridVersion::Data const& data = *_storage->grids[t]->_data;
 			// A grid of zero rows still holds its owner's column keys.
@@ -872,7 +880,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		return tl::make_unexpected(ErrorContext("load into table ", command.table, ", but the schema has ", defs.size(), " tables"));
 	}
 	table_def const& def = defs[command.table];
-	if (def.is_grid)
+	if (_storage->GridOf(command.table))
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; it is loaded with LoadGrid"));
 	}
@@ -907,11 +915,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
 			command.strings.size(), " strings, but the table has ", current.stringCount, " string columns"));
 	}
-	if (!command.pivot.empty() && command.pivot.size() != command.count)
-	{
-		return tl::make_unexpected(ErrorContext("load into '", def.name, "' of ", command.count, " rows has ",
-			command.pivot.size(), " pivot columns; give none or one per row"));
-	}
 	for (size_t i = 0; i < command.conditions.size(); ++i)
 	{
 		if (IsMalformed(command.conditions[i]))
@@ -942,20 +945,28 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					return tl::make_unexpected(std::move(fits.error()).with("row ", r));
 				}
 			}
-			if (def.columns[c].type == column_type::Band && def.inputs[def.columns[c].input].ranged)
+			if (def.columns[c].type == column_type::Band)
 			{
-				input_def const& in   = def.inputs[def.columns[c].input];
-				cell const       band = command.values[r * current.valueCount + current.slot[c]];
+				cell const band = command.values[r * current.valueCount + current.slot[c]];
+				if (!IsWellFormedBand(band))
+				{
+					if (command.refusal)
+					{
+						command.refusal->row = r;
+					}
+					return tl::make_unexpected(MalformedBand(def.columns[c], def, band).with("row ", r));
+				}
+				input_def const& in = def.inputs[def.columns[c].input];
 				// Clamped inputs never reach past the range, so a band that does
-				// is partly dead, and one running backwards holds nowhere.
-				if (!(in.lo <= band.v[0] && band.v[0] < band.v[1] && band.v[1] <= in.hi))
+				// is partly dead.
+				if (in.ranged && !(in.lo <= band.v[0] && band.v[1] <= in.hi))
 				{
 					if (command.refusal)
 					{
 						command.refusal->row = r;
 					}
 					return tl::make_unexpected(ErrorContext("band '", def.columns[c].name, "' of '", def.name, "' is ",
-						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it runs low to high inside the range ",
+						FloatText(band.v[0]), "..", FloatText(band.v[1]), "; it lies inside the range ",
 						FloatText(in.lo), "..", FloatText(in.hi), " of input '", in.name, "'").with("row ", r));
 				}
 			}
@@ -1037,9 +1048,10 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	}
 
 	// A best table always picks a row (totality) and every row in it can be
-	// picked (no dead rows). Checked for the key runs this load adds rows to;
-	// runs it does not touch are not re-checked, so removing rows is never
-	// refused (Retract relies on it).
+	// picked (no dead rows). Checked for the key runs this load adds rows to
+	// and, when it brings rows, for the runs the owner's replaced rows were
+	// in: a reload can take a run's only default away. A load of no rows is
+	// never refused (Retract relies on it), and other runs are not re-checked.
 	if (def.pick == pick_policy::Best)
 	{
 		// One axis per ranged input a band reads, in input order.
@@ -1093,10 +1105,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 		{
 			return def.ranking == UINT32_MAX ? 0u : static_cast<uint32_t>(cellsOf(s)[current.slot[def.ranking]].i);
 		};
-		auto pivotOf = [&](source s) -> uint16_t
-		{
-			return s.loaded ? (command.pivot.empty() ? uint16_t(0) : command.pivot[s.row]) : current.pivots[s.row];
-		};
 		auto sameKey = [&](source a, source b)
 		{
 			for (uint32_t k = 0; k < def.key_count; ++k)
@@ -1109,6 +1117,28 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			}
 			return true;
 		};
+		// The keys of the runs the owner's rows leave, sorted for lookup.
+		auto keyOf = [&](source s)
+		{
+			std::vector<int64_t> key;
+			for (uint32_t k = 0; k < def.key_count; ++k)
+			{
+				key.push_back(cellsOf(s)[current.orderSlots[k]].i);
+			}
+			return key;
+		};
+		std::vector<std::vector<int64_t>> vacated;
+		if (command.count > 0)
+		{
+			for (size_t r = 0; r < current.RowCount(); ++r)
+			{
+				if (current.owners[r] == command.owner)
+				{
+					vacated.push_back(keyOf({false, r}));
+				}
+			}
+			std::sort(vacated.begin(), vacated.end());
+		}
 		auto keyText = [&](source s)
 		{
 			std::string key;
@@ -1138,7 +1168,7 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 					firstLoaded = order[i].row;
 				}
 			}
-			if (firstLoaded == SIZE_MAX)
+			if (firstLoaded == SIZE_MAX && !std::binary_search(vacated.begin(), vacated.end(), keyOf(order[start])))
 			{
 				start = end;
 				continue;
@@ -1178,40 +1208,22 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			// Without a ranking column that is row order. With one, only the
 			// same flags can: at input F = R_B, B is a full match with hit R_B,
 			// and any other full match has R a strict subset of R_B, so a
-			// smaller hit. Same flags tie by pivot column, then row; the R == 0
-			// rows come last, in row order, after every ranked row.
+			// smaller hit. Same flags tie by row order; the R == 0 rows come
+			// last, in row order, after every ranked row.
 			for (size_t b = start; b < end; ++b)
 			{
 				source const   B  = order[b];
 				uint32_t const RB = flagsOf(B);
-				auto triedBefore = [&](size_t a)
-				{
-					if (a == b || scripted(order[a]) || flagsOf(order[a]) != RB)
-					{
-						return false;
-					}
-					if (RB == 0)
-					{
-						return a < b;
-					}
-					uint16_t const pa = pivotOf(order[a]);
-					uint16_t const pb = pivotOf(B);
-					return pa < pb || (pa == pb && a < b);
-				};
-				// The rows tried before B, in try order, so the last is the one
-				// tried just before it.
+				// The rows tried before B, in try order (row order), so the last
+				// is the one tried just before it.
 				std::vector<size_t> before;
-				for (size_t a = start; a < end; ++a)
+				for (size_t a = start; a < b; ++a)
 				{
-					if (triedBefore(a))
+					if (!scripted(order[a]) && flagsOf(order[a]) == RB)
 					{
 						before.push_back(a);
 					}
 				}
-				std::stable_sort(before.begin(), before.end(), [&](size_t x, size_t y)
-				{
-					return RB != 0 && pivotOf(order[x]) < pivotOf(order[y]);
-				});
 				std::vector<detail::interval> own;
 				boxOf(B, own);
 				boxes.clear();
@@ -1223,8 +1235,9 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 				{
 					continue;   // some input reaches B
 				}
-				// B is dead. A survivor can be made dead only by a loaded row
-				// ahead of it in tie order, so one of before is loaded.
+				// B is dead. A survivor can be made dead by a loaded row ahead
+				// of it only through order columns past the keys, so one of
+				// before is loaded.
 				auto nameOf = [&](source s)
 				{
 					return s.loaded ? cc(std::string("loaded row "), s.row)
@@ -1298,7 +1311,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 	next.conditions.reserve(order.size() * next.conditionCount);
 	next.strings.reserve(order.size() * next.stringCount);
 	next.owners.reserve(order.size());
-	next.pivots.reserve(order.size());
 	for (source s : order)
 	{
 		std::span<cell const> from = cellsOf(s);
@@ -1325,8 +1337,6 @@ tl::expected<void, ErrorContext> relation_store::Load(load_rows const& command)
 			                                : current.strings[s.row * next.stringCount + k]);
 		}
 		next.owners.push_back(ownerOf(s));
-		next.pivots.push_back(s.loaded ? (command.pivot.empty() ? uint16_t(0) : command.pivot[s.row])
-		                               : current.pivots[s.row]);
 	}
 	next.RebuildIndex(def);
 	next.generation = current.generation + 1;
@@ -1341,7 +1351,7 @@ tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Vers
 	{
 		return tl::make_unexpected(ErrorContext("no table ", table));
 	}
-	if (defs[table].is_grid)
+	if (_storage->GridOf(table))
 	{
 		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is a grid; read it with Grid"));
 	}
@@ -1360,10 +1370,6 @@ namespace
 tl::expected<column_def const*, ErrorContext> CheckAddress(table_def const& def, size_t rowCount,
 	size_t row, uint32_t column, column_type const* wanted, char const* wantedName)
 {
-	if (def.is_grid)
-	{
-		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
-	}
 	if (row >= rowCount)
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no row ", row));
@@ -1440,10 +1446,6 @@ tl::expected<counted_string, ErrorContext> ReadString(table_def const& def, tabl
 tl::expected<std::vector<size_t>, ErrorContext> FindText(table_def const& def, table_rows const& rows, uint32_t column,
 	std::string_view text)
 {
-	if (def.is_grid)
-	{
-		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
-	}
 	if (column >= def.columns.size())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
@@ -1466,10 +1468,6 @@ tl::expected<std::vector<size_t>, ErrorContext> FindText(table_def const& def, t
 
 tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, table_rows const& rows, uint32_t column, cell value)
 {
-	if (def.is_grid)
-	{
-		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
-	}
 	if (column >= def.columns.size())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no column ", column));
@@ -1502,10 +1500,6 @@ tl::expected<std::vector<size_t>, ErrorContext> FindKey(table_def const& def, ta
 
 tl::expected<row_range, ErrorContext> FindPrefix(table_def const& def, table_rows const& rows, std::span<cell const> prefix)
 {
-	if (def.is_grid)
-	{
-		return tl::make_unexpected(ErrorContext("table '", def.name, "' is a grid; read it with Grid"));
-	}
 	if (rows.orderSlots.empty())
 	{
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' has no order to look up by"));
@@ -1559,11 +1553,12 @@ tl::expected<row_range, ErrorContext> TableVersion::FindOrdered(std::span<cell c
 
 tl::expected<cell, ErrorContext> relation_store::Value(uint32_t table, size_t row, uint32_t column) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return ReadValue(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+	return ReadValue(_storage->definition.tables()[table], **rows, row, column);
 }
 
 tl::expected<counted_string, ErrorContext> TableVersion::StringAt(size_t row, uint32_t column) const
@@ -1578,29 +1573,32 @@ tl::expected<std::vector<size_t>, ErrorContext> TableVersion::Find(uint32_t colu
 
 tl::expected<counted_string, ErrorContext> relation_store::StringAt(uint32_t table, size_t row, uint32_t column) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return ReadString(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+	return ReadString(_storage->definition.tables()[table], **rows, row, column);
 }
 
 tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, std::string_view text) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return FindText(_storage->definition.tables()[table], _storage->RowsOf(table), column, text);
+	return FindText(_storage->definition.tables()[table], **rows, column, text);
 }
 
 tl::expected<bool, ErrorContext> relation_store::Holds(uint32_t table, size_t row, uint32_t column, void const* this_in) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return ReadHolds(_storage->definition.tables()[table], _storage->RowsOf(table), row, column, this_in);
+	return ReadHolds(_storage->definition.tables()[table], **rows, row, column, this_in);
 }
 
 tl::expected<bool, ErrorContext> TableVersion::Holds(size_t row, uint32_t column, void const* this_in) const
@@ -1610,29 +1608,32 @@ tl::expected<bool, ErrorContext> TableVersion::Holds(size_t row, uint32_t column
 
 tl::expected<std::string_view, ErrorContext> relation_store::CommandAt(uint32_t table, size_t row, uint32_t column) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return ReadCommand(_storage->definition.tables()[table], _storage->RowsOf(table), row, column);
+	return ReadCommand(_storage->definition.tables()[table], **rows, row, column);
 }
 
 tl::expected<std::vector<size_t>, ErrorContext> relation_store::Find(uint32_t table, uint32_t column, cell value) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return FindKey(_storage->definition.tables()[table], _storage->RowsOf(table), column, value);
+	return FindKey(_storage->definition.tables()[table], **rows, column, value);
 }
 
 tl::expected<row_range, ErrorContext> relation_store::FindOrdered(uint32_t table, std::span<cell const> prefix) const
 {
-	if (table >= _storage->tables.size())
+	auto rows = _storage->RowTable(table);
+	if (!rows)
 	{
-		return tl::make_unexpected(ErrorContext("no table ", table));
+		return tl::make_unexpected(std::move(rows.error()));
 	}
-	return FindPrefix(_storage->definition.tables()[table], _storage->RowsOf(table), prefix);
+	return FindPrefix(_storage->definition.tables()[table], **rows, prefix);
 }
 
 }

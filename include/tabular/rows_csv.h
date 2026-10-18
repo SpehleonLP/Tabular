@@ -25,13 +25,15 @@ namespace tabular
 //
 // A condition cell's text is handed to condition, which returns the compiled
 // closure or an error; that is the whole of Tabular's part in compiling
-// conditions. A table with condition columns needs one. A blank condition cell
-// is no condition: it is not handed to condition.
+// conditions. It is needed only when a non-blank condition cell appears. A
+// blank condition cell is no condition: it is not handed to condition. Every
+// other blank cell is refused.
 //
 // A pivoted load reads the table's pivot: the header row names the key
 // columns, in key order, then the flag headers, whose order gives the flag
 // domain (a best table's first is None, the 0 value; each simple header after
-// takes the next bit; `A|B` ORs headers to its left). Each non-empty cell is
+// takes the next bit; `A|B` ORs headers to its left; headers are distinct flag
+// sets, and None anywhere but a best table's first header is refused). Each non-empty cell is
 // one row, its header's flags in the headers column and the cell in the cells
 // column; blank cells give no row.
 struct csv_rows

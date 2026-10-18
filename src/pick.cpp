@@ -46,13 +46,13 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 	for (uint32_t i = 0; i < def.inputs.size(); ++i)
 	{
 		int64_t const v = query.inputs[i].i;
-		if (def.inputs[i].type == column_type::Flags && (v < 0 || v > INT64_C(0xFFFFFFFF)))
+		if (def.inputs[i].type == column_type::Flags && !Fits32(v))
 		{
 			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
 				"' is a flag set, a 32-bit value widened without sign; got ", v));
 		}
-		// A ranged input is clamped into its range, and NaN has no place in
-		// it; answering "nothing holds" would break the totality Load proved.
+		// A clamp has no place for NaN, in any policy: the range declaration
+		// is what refuses it, not the pick.
 		if (def.inputs[i].ranged && std::isnan(query.inputs[i].d))
 		{
 			return tl::make_unexpected(ErrorContext("input '", def.inputs[i].name, "' of '", def.name,
@@ -153,11 +153,11 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 
 	uint32_t const F        = static_cast<uint32_t>(query.inputs[def.columns[def.ranking].input].i);
 	uint32_t const rankSlot = rows.slot[def.ranking];
-	// Larger is better: a full match, then R & F, then R, then the lower pivot
-	// column, then the earlier row. The last two make it a total order, so
-	// rows are tried best first by scanning for the best below the last one
-	// tried; the first try usually holds.
-	using rank = std::tuple<bool, uint32_t, uint32_t, uint32_t, size_t>;
+	// Larger is better: a full match, then R & F, then R, then the earlier
+	// row. The last makes it a total order, so rows are tried best first by
+	// scanning for the best below the last one tried; the first try usually
+	// holds.
+	using rank = std::tuple<bool, uint32_t, uint32_t, size_t>;
 	auto rankOf = [&](size_t r) -> std::optional<rank>
 	{
 		uint32_t const R   = static_cast<uint32_t>(rows.cells[r * rows.valueCount + rankSlot].i);
@@ -166,7 +166,7 @@ tl::expected<std::optional<size_t>, ErrorContext> PickBest(TableVersion const& v
 		{
 			return std::nullopt;   // the default, or a row matching nothing in the input
 		}
-		return rank{hit == R, hit, R, UINT16_MAX - uint32_t(rows.pivots[r]), SIZE_MAX - r};
+		return rank{hit == R, hit, R, SIZE_MAX - r};
 	};
 	std::optional<rank> below;
 	while (true)
