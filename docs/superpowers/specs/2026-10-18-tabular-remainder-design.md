@@ -97,6 +97,29 @@ owner with my recommendation. Merges still need the owner's approval.
     picks do not). `Prepare` proves over the domain, so a prepared machine must watch the
     generation of every table its domains read, not only the tables it picks from.
 
+  Applied in slice 3a (coordinator, from the slice 3a review; the owner may overrule at code
+  review):
+  - **A clause answers one value per column, not one row.** So a clause may read a best, an
+    `or` or a `weighted` table (definition.md's phase → lookup → bridge chain reads an `or`
+    table; §3's per-row site salt reads a weighted one). An `all` table has no single answer
+    and is refused. An `or` clause exposes only its flags output and cannot `emit`.
+  - **A source that does not close a key leaves the table's declared domain.** An input, an
+    int/double state column and an `or` clause's output close nothing, so that key is proved
+    over what the table declares. The machine's own sources close the rest (state members,
+    an earlier best clause's reachable answers, a literal). This is how "a machine clause's
+    output" as a domain reads: the machine supplies it at `Prepare`, and the table keeps its
+    declared domain for `Load`. One domain builder serves both.
+  - **`Prepare` reports orphans** as `Load` does: runs no clause can reach are noted, so a
+    typo'd key in a `rows` domain is visible.
+  - **P9's `writes:` is dropped.** A clause's `set:` names the state column; a table read by
+    two machines could not carry one `writes:`. The member check on a written hash therefore
+    runs at `Prepare`, not at load.
+  - **A literal for a ranged input must be finite and inside the range** (R12: a clamp has no
+    place for NaN; a constant outside the range is a mistake).
+  - **For 3b:** an input-bound key is proved only over the table's declared domain. A step
+    whose input value has no run holds that table and reports once, as P15 does for a failing
+    pick.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
