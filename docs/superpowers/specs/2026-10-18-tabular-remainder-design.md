@@ -120,6 +120,19 @@ owner with my recommendation. Merges still need the owner's approval.
     whose input value has no run holds that table and reports once, as P15 does for a failing
     pick.
 
+  Applied in slice 3b (coordinator, from the slice 3b review; the owner may overrule at code
+  review):
+  - **An entry clause may not set a hash state column.** Entry runs once per step, after the
+    step list; a state an entry write reached would get no entry of its own, so its state
+    function (R6) would silently never start. A transition belongs in the step list. Entry
+    may still write int/double columns. "Entered" means "differs from current at the end of
+    the step", so A → B → A within one step enters nothing.
+  - **A step allocates nothing, holds included.** Tabular builds no error text on the step
+    path; the slice 4 report site adds context. A host's own failure message past small-string
+    size allocates on the host side.
+  - **Holds cascade:** a clause reading a held clause holds. Inputs are read once per step, as
+    one snapshot every clause shares.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
@@ -178,7 +191,7 @@ Each row names the premises that must produce it. Its test uses only them.
 | **State functions restart on reload.** The binding is dropped, the host aborts what it started, and entering the state again starts it with the new code. | P14 + entry tables + P12 | §6 |
 | **Orthogonal regions.** Several machines on one object are several instances. | P8 | §6 |
 | **Edges are machine state.** | P13 + P8 | Consequences |
-| **A seed per instance and step.** The site salt is (machine, table, row). | P4 + P8 | Consequences |
+| **A seed per instance and step.** The site salt is (machine, clause list, clause): a table alone would make two clauses on one table draw alike, and the row is what the draw chooses. | P4 + P8 | Consequences |
 | **Delays are a message to self with `:delay`.** | P12 + no clock | Consequences |
 | **Every query picks a row at run time.** | built totality + P10 + built clamp | Consequences |
 | **A command cell can hold a comma.** | P3 | §2 |
@@ -304,9 +317,11 @@ struct host_binding {
     std::function<void(uint64_t instance, uint32_t table, std::string_view command)> sink;    // P12
     std::function<void(uint32_t table, size_t row, ErrorContext const&)>         report;      // P15
 };
-tl::expected<counted_ptr<Binding>, ErrorContext> Bind(counted_ptr<Definition>, host_binding&&);
-tl::expected<instance, ErrorContext> CreateInstance(Binding const&, uint64_t id, uint64_t seed);  // runs create + entry
-void Step(instance&, uint64_t seed);                                                              // step tables, swap
+tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const>, host_binding&&);
+instance CreateInstance(Binding const&, uint64_t id, uint64_t seed, void const* self);  // runs create + entry; cannot refuse
+void Step(instance&, void const* self, uint64_t seed);                                 // step list, entry on change, swap
+// self is the host object, passed per call: getters and conditions read it, and the instance
+// stores no pointer that a moved host object would leave dangling.
 tl::expected<void, ErrorContext> Rebind(instance&, counted_ptr<Binding>);                        // P14
 ```
 
