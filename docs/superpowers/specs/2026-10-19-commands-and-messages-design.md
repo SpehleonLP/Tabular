@@ -426,24 +426,39 @@ the list, and the runner does the rest.
   no exit row is needed for every state. Tabular needs one small API for it: run the exit list
   and return its commands. `Rebind` already does this internally.
 
-## Authoring note: priority is bit order
+## Authoring note: first match wins (gambits)
 
-The craft bench's Back does three things in priority order: close the sort panel, else back
-out of the basket, else leave. As rows:
+The craft bench's Back is a gambit list, as in FFXII: try each line from the top, and the first
+that matches is the answer. Close the sort panel if it's open, else back out of the basket,
+else leave. Tabular already has this ordering, through **conditions**:
 
 ```csv
-page,       modal, kind, can,       next_page,  next_modal, command
-experiment, none,  back, sort_open, experiment, none,       (toggle-sort)
-experiment, none,  back, can_back,  experiment, none,       (basket-back)
-experiment, none,  back, ,          experiment, none,       (close)
+page,       modal, kind, when,           next_page,  next_modal, command
+experiment, none,  back, sort_open,      experiment, none,       (toggle-sort)
+experiment, none,  back, can_back,       experiment, none,       (basket-back)
+experiment, none,  back, ,               experiment, none,       (close)
 ```
 
-With both flags set, both flagged rows pass the first test (all their flags are in the input),
-so the second test decides: the larger `R & F` as an integer, so the higher bit wins. The
-script's order holds exactly when `sort_open` is a higher bit than `can_back`. A flags
-input's bits are assigned by whoever produces it (the host for a wire, header order for a
-pivoted table), so whoever assigns them assigns the priority. Nothing needs to change in
-Tabular.
+- Rows with the same flags (here, none) are tried **in row order**. A row whose conditions
+  don't hold falls through to the next, and the first that holds wins (definition.md,
+  Picking: "ranked fall-through").
+- `when` is a script condition column. The host's condition compiler turns `sort_open` and
+  `can_back` into closures against the bench object.
+- The last row has no condition, so the run is total. A row after it could never be reached,
+  and the load refuses it as dead.
+
+**This is not the flags rule.** Flags rank rather than filter. Among rows whose flags are all in
+the input, the larger `R & F` wins, so the higher bit wins regardless of row order. Written
+with flags, the bench's order would hold only if `sort_open` happened to be a higher bit than
+`can_back`. Use flags when priority belongs to the input (the host decides which wire matters
+most), and conditions when it belongs to the table (the author's line order).
+
+**A gap, proposed:** a gambit over host wires costs a closure call per tried row, because
+conditions are scripts. A flags column declared as a plain condition (spelling to settle, e.g.
+`rank: false`) would make a row count only when its flags are all in the input, `R & F == R`,
+and leave the order to the rows. That gives first-match over wires with no script. The
+contract already lists "flags subset" among condition kinds, but only the ranking column is
+built.
 
 ## Open questions
 
