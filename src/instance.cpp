@@ -79,7 +79,6 @@ struct Binding::Data
 	counted_ptr<Machine const>                         machine;
 	// Per machine input; an input the message carries has none (no read).
 	immutable_array<input_getter>                      getters;
-	std::function<void(uint64_t, uint32_t, std::string_view)>             sink;
 	std::function<void(uint64_t, uint32_t, size_t, ErrorContext const&)>  report;
 	// Per list: where its clauses' answers start in an instance's answers,
 	// then one end; and per clause, its weighted draw site.
@@ -100,6 +99,9 @@ struct Binding::Data
 	std::array<immutable_array<uint32_t>, kTriggerCount> rankStart;
 	std::array<immutable_array<uint32_t>, kTriggerCount> rowRank;
 	size_t                                             reportBits = 0;
+	// The clauses that can emit, across every list: the most commands one run
+	// returns, so an instance's result buffer is sized once.
+	size_t                                             emitters   = 0;
 	// The widest any clause needs: keys, table inputs, layout axes.
 	size_t                                             maxKeys   = 0;
 	size_t                                             maxInputs = 0;
@@ -140,6 +142,9 @@ struct instance_access
 	static std::vector<cell>&          Given(instance& i) { return i._given; }
 	static std::vector<float>&         Axes(instance& i) { return i._axes; }
 	static bool&                       Absorbed(instance& i) { return i._absorbed; }
+	static std::vector<emitted>&       Emitted(instance& i) { return i._emitted; }
+	static size_t&                     EmittedCount(instance& i) { return i._emittedCount; }
+	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
 #if TABULAR_PROVENANCE
 	static std::vector<provenance_entry>& Ring(instance& i) { return i._provenance; }
 	static size_t&                        RingNext(instance& i) { return i._provenanceNext; }
@@ -213,24 +218,6 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 		}
 	}
 
-	// A command nobody receives is a state function never started, so a
-	// machine that emits needs the sink; one that emits nothing does not.
-	if (!host.sink)
-	{
-		for (size_t list = 0; list < kTriggerCount; ++list)
-		{
-			for (size_t i = 0; i < def.lists[list].size(); ++i)
-			{
-				if (def.lists[list][i].emit != UINT32_MAX)
-				{
-					return tl::make_unexpected(ErrorContext("the clause emits, and the host binding has no sink to take it")
-						.with(detail::ClausePlace(def.name, list, i,
-							version_access::Def(*prepared.lists[list][i].version).name)));
-				}
-			}
-		}
-	}
-
 	uint32_t              answers = 0;
 	size_t                bits    = def.inputs.size() + 1;   // the getters, then extra arguments
 	std::vector<uint64_t> sites;
@@ -257,6 +244,7 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 				ranks.push_back(RowIsScripted(*pc.version, r) ? scripted++ : UINT32_MAX);
 			}
 			bits += 1 + clauses[i].inputs.size() + scripted;
+			data->emitters += clauses[i].emit != UINT32_MAX ? 1 : 0;
 			data->maxKeys   = std::max(data->maxKeys, clauses[i].keys.size());
 			data->maxInputs = std::max(data->maxInputs, clauses[i].inputs.size());
 			data->maxAxes   = std::max(data->maxAxes, pc.runs.layout.dims);
@@ -269,7 +257,6 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	}
 	data->answerStart[kTriggerCount] = answers;
 	data->reportBits                 = bits;
-	data->sink                       = std::move(host.sink);
 	data->report                     = std::move(host.report);
 	data->getters                    = staged.Adopt();
 	return binding_access::Make(std::move(data));
@@ -883,16 +870,14 @@ bool Entered(machine_access::Data const& machine, std::vector<cell> const& curre
 	return false;
 }
 
-// Hands the sink the command of each clause of list that answered and emits,
-// in clause order: a view into the version the binding holds, so nothing is
-// copied.
+// Adds to the run's results the command of each clause of list that answered
+// and emits, in clause order: a view into the version the binding holds, so
+// nothing is copied, into room SizeFor made.
 void Emit(instance& subject, trigger list)
 {
 	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
-	if (!binding.sink)
-	{
-		return;
-	}
+	std::vector<emitted>&       results = instance_access::Emitted(subject);
+	size_t&                     count   = instance_access::EmittedCount(subject);
 	machine_access::Data const&       machine = machine_access::Of(*binding.machine);
 	std::vector<clause_answer> const& answers = instance_access::Answers(subject);
 	std::vector<resolved_clause> const& clauses = machine.def.lists[size_t(list)];
@@ -905,8 +890,17 @@ void Emit(instance& subject, trigger list)
 		}
 		table_rows const& rows = version_access::Rows(*machine.lists[size_t(list)][i].version);
 		std::string const& command = rows.commands[size_t(answer.row) * rows.commandCount + rows.slot[clauses[i].emit]];
-		binding.sink(subject.id(), clauses[i].table, command);
+		assert(count < results.size() && "more clauses emitted than Bind counted");
+		results[count++] = emitted{list, clauses[i].table, command};
 	}
+}
+
+// A run's results start empty. The binding a rebind left is let go here, at
+// the next run, since its exit's commands were views into its versions.
+void BeginResults(instance& subject)
+{
+	instance_access::EmittedCount(subject) = 0;
+	instance_access::Left(subject)         = nullptr;
 }
 
 // Every buffer a step uses, sized for binding, so a step allocates nothing;
@@ -923,6 +917,8 @@ void SizeFor(instance& subject, binding_access::Data const& data)
 	instance_access::GivenBefore(subject).assign(data.maxInputs, cell::Integer(0));
 	instance_access::Previous(subject).assign(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
 	instance_access::Axes(subject).assign(data.maxAxes, 0.f);
+	// Results already returned by this run (a rebind's exit) are kept.
+	instance_access::Emitted(subject).resize(instance_access::EmittedCount(subject) + data.emitters);
 	instance_access::Absorbed(subject) = false;
 }
 
@@ -1051,7 +1047,7 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	return out;
 }
 
-void Step(instance& subject, void const* self, uint64_t seed, message const& msg)
+std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg)
 {
 	// A moved-from instance has no binding, and stepping one is caller misuse.
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is stepped: caller misuse");
@@ -1059,6 +1055,7 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 	std::vector<cell>&          current = instance_access::Current(subject);
 	std::vector<cell>&          next    = instance_access::Next(subject);
 	instance_access::Absorbed(subject)  = false;
+	BeginResults(subject);
 #if TABULAR_PROVENANCE
 	++instance_access::Pass(subject);
 	instance_access::Run(subject) = provenance_run::Step;
@@ -1083,14 +1080,14 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 	AdvancePrevious(subject);
 	// Swapping two vectors moves their buffers, so nothing is allocated.
 	std::swap(current, next);
-	// After the swap, so a sink sees the step's state current; in the order the
-	// lists ran.
+	// In the order the lists ran.
 	Emit(subject, trigger::Step);
 	Emit(subject, trigger::Exit);
 	Emit(subject, trigger::Entry);
+	return subject.Emitted();
 }
 
-void Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed)
+std::span<emitted const> Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed)
 {
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is rebound: caller misuse");
 	// Both bindings live to the end: holding fresh keeps a rebind onto the
@@ -1102,6 +1099,7 @@ void Rebind(instance& subject, Binding const& binding, void const* self, uint64_
 	detail::machine_def const&       to    = machine_access::Of(fresh->machine()).def;
 	std::vector<cell>&               current = instance_access::Current(subject);
 	std::vector<cell>&               next    = instance_access::Next(subject);
+	BeginResults(subject);
 #if TABULAR_PROVENANCE
 	++instance_access::Pass(subject);
 	instance_access::Run(subject) = provenance_run::Rebind;
@@ -1130,6 +1128,9 @@ void Rebind(instance& subject, Binding const& binding, void const* self, uint64_
 	{
 		carried.push_back(CarriedPrevious(to, i, from, history));
 	}
+	// Exit's commands view the old binding's versions, so it is kept until the
+	// next run, when the caller is done with them.
+	instance_access::Left(subject)      = old;
 	instance_access::BindingOf(subject) = fresh;
 	SizeFor(subject, binding_access::Of(binding));
 	current = migrated;
@@ -1148,6 +1149,7 @@ void Rebind(instance& subject, Binding const& binding, void const* self, uint64_
 		}
 	}
 	Emit(subject, trigger::Entry);
+	return subject.Emitted();
 }
 
 }

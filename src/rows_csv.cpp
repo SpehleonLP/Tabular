@@ -2,6 +2,7 @@
 #include "csv_cells.h"
 #include "table_layout.h"
 #include "csv_text.h"
+#include "command_text.h"
 #include "cityhash/src/city.h"
 
 #include <charconv>
@@ -41,25 +42,16 @@ struct pending_conditions
 	}
 };
 
-// A suffix row's command text: its cells from the first undeclared one on,
-// the empty ones (a spreadsheet's padding) left out.
-std::string SuffixText(detail::csv_text const& file, size_t row, size_t first)
+// A suffix row's command: its cells from the first undeclared one on, as one
+// list (see CommandList).
+std::string SuffixList(detail::csv_text const& file, size_t row, size_t first)
 {
-	std::string text;
+	std::vector<std::string_view> cells;
 	for (size_t c = first; c < file.width(row); ++c)
 	{
-		std::string_view const part = file.cell(c, row);
-		if (part.empty())
-		{
-			continue;
-		}
-		if (!text.empty())
-		{
-			text += ", ";
-		}
-		text += part;
+		cells.push_back(file.cell(c, row));
 	}
-	return text;
+	return detail::CommandList(cells);
 }
 
 }
@@ -293,7 +285,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 		}
 		if (def.suffix)
 		{
-			suffixes[r] = SuffixText(file, r + 1, declared);
+			suffixes[r] = SuffixList(file, r + 1, declared);
 		}
 		for (size_t h = 0; h < width; ++h)
 		{

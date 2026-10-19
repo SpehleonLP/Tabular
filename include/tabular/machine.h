@@ -63,8 +63,8 @@ struct add_clause
 	std::span<clause_bind const>  where;   // exactly one per key column
 	std::span<clause_bind const>  given;   // exactly one per table input
 	std::span<set_state const>    set;
-	// A Command column of the table (its suffix included) whose text the step
-	// hands to the host's sink; empty for none.
+	// A Command column of the table (its suffix included) whose command the
+	// run returns when the clause answers; empty for none.
 	std::string_view              emit;
 };
 

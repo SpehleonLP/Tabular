@@ -19,6 +19,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 using namespace tabular;
@@ -113,14 +114,15 @@ tl::expected<closure, ErrorContext> Conditions(std::string_view text)
 	return tl::make_unexpected(ErrorContext("no condition '", text, "'"));
 }
 
-// A store, the document whose tables it holds, and the commands every sink of
-// its bindings received (prefixed with the binding's label), in order.
+// A store, the document whose tables it holds, and the commands every run of
+// its bindings returned (prefixed with the label of the binding whose clause
+// emitted it), in order.
 struct World
 {
 	schema_document          document;
 	relation_store           store;
-	std::vector<std::string> sunk;
-	bool                     quiet  = false;   // the sinks count instead of logging, so they allocate nothing
+	std::vector<std::string> logged;
+	bool                     quiet  = false;   // commands are counted instead of logged, so nothing allocates
 	size_t                   counted = 0;
 
 	explicit World(std::string_view yaml) : document(Parse(yaml)), store(std::move(document.tables)) {}
@@ -144,7 +146,7 @@ struct World
 	}
 
 	// The document's first machine prepared against the store as it is now,
-	// bound to getters for energy, t and food_near and to a sink logging
+	// bound to getters for energy, t and food_near, its commands logged as
 	// "label:command".
 	counted_ptr<Binding const> Bound(std::string const& label)
 	{
@@ -170,27 +172,82 @@ struct World
 			}
 			return input_getter{found->second, nullptr, nullptr};
 		};
-		host.sink = [this, label](uint64_t, uint32_t, std::string_view command)
-		{
-			if (quiet)
-			{
-				++counted;
-				return;
-			}
-			sunk.push_back(label + ":" + std::string(command));
-		};
 		auto bound = Bind(*prepared, std::move(host));
 		EXPECT_TRUE(bound.has_value()) << RefusalOf(bound);
-		return bound ? *bound : counted_ptr<Binding const>{};
+		if (!bound)
+		{
+			return {};
+		}
+		Targets()[bound->get()] = log_target{this, label};
+		return *bound;
+	}
+
+	void Log(std::string const& label, emitted const& result)
+	{
+		if (quiet)
+		{
+			++counted;
+			return;
+		}
+		logged.push_back(label + ":" + std::string(result.command));
+	}
+
+	struct log_target
+	{
+		World*      world = nullptr;
+		std::string label;
+	};
+
+	// The world and label each binding's commands go to, set when it binds.
+	static std::unordered_map<Binding const*, log_target>& Targets()
+	{
+		static std::unordered_map<Binding const*, log_target> targets;
+		return targets;
 	}
 
 	std::vector<std::string> Take()
 	{
 		std::vector<std::string> out;
-		out.swap(sunk);
+		out.swap(logged);
 		return out;
 	}
 };
+
+void Log(Binding const& binding, emitted const& result)
+{
+	auto const found = World::Targets().find(&binding);
+	ASSERT_NE(found, World::Targets().end()) << "a binding no world made";
+	found->second.world->Log(found->second.label, result);
+}
+
+// Creation, a step and a rebind with their results logged.
+instance Created(Binding const& binding, uint64_t id, uint64_t seed, void const* self)
+{
+	instance out = CreateInstance(binding, id, seed, self);
+	for (emitted const& result : out.Emitted())
+	{
+		Log(binding, result);
+	}
+	return out;
+}
+
+void Stepped(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+{
+	for (emitted const& result : Step(subject, self, seed, msg))
+	{
+		Log(subject.binding(), result);
+	}
+}
+
+// A rebind's exit commands are the old binding's, and its entry's the new one's.
+void Rebound(instance& subject, Binding const& binding, void const* self, uint64_t seed)
+{
+	counted_ptr<Binding const> const old = CountedWrap(&subject.binding());
+	for (emitted const& result : Rebind(subject, binding, self, seed))
+	{
+		Log(result.list == trigger::Exit ? *old : binding, result);
+	}
+}
 
 cell ValueOf(TableVersion const& version, size_t row, std::string_view column)
 {
@@ -520,7 +577,7 @@ TEST(ListParity, CreationsCreateAndEntryListsMatchPickWeightedPickOrAndPickBest)
 		cell const idle     = cell::Integer(Hash("idle"));
 		std::vector<cell> const keys = {idle};
 		auto const drawn = PickWeighted(*mood, pick_query{keys, {}, &host}, seed, DrawSite("life", trigger::Create, 0));
-		instance subject = CreateInstance(*bound, uint64_t(i), seed, &host);
+		instance subject = Created(*bound, uint64_t(i), seed, &host);
 		auto where = [&]() { return "creation " + std::to_string(i) + " "; };
 		ExpectSameAnswer(drawn, subject.Answer(trigger::Create, 0), where);
 		int64_t const created = drawn && *drawn ? ValueOf(*mood, **drawn, "mood").i : 0;
@@ -555,7 +612,7 @@ TEST(ListParity, StepExitAndEntryListsMatchTheInterpretedPicksStepByStep)
 	int64_t const messages[] = {0, Hash("scared"), Hash("calm"), Hash("sneeze"), 0};
 	int64_t const flags[]    = {0, 1, 2, 3, 5, 6, 9, 0xFFFFFFFF, int64_t(1) << 32};
 	host_object host;
-	instance subject = CreateInstance(*bound, 1, 1, &host);
+	instance subject = Created(*bound, 1, 1, &host);
 	w->Take();
 	int entered = 0, exitHeld = 0, settleHeld = 0, fell = 0;
 	for (int i = 0; i < 6000; ++i)
@@ -571,19 +628,19 @@ TEST(ListParity, StepExitAndEntryListsMatchTheInterpretedPicksStepByStep)
 		std::vector<cell> const brainKeys   = {before[Mode], cell::Integer(type)};
 		std::vector<cell> const brainInputs = {cell::Real(host.energy), cell::Integer(host.food_near)};
 		auto const moved = PickBest(*brain, pick_query{brainKeys, brainInputs, &host});
-		Step(subject, &host, seed, Message(type));
+		Stepped(subject, &host, seed, Message(type));
 		auto where = [&]() { return "step " + std::to_string(i) + " "; };
 		ExpectSameAnswer(moved, subject.Answer(trigger::Step, 0), where);
 		cell const next = moved && *moved ? ValueOf(*brain, **moved, "next") : before[Mode];
 		EXPECT_EQ(subject.State(Mode).i, next.i) << where();
 		fell += type == Hash("sneeze") && moved && *moved ? 1 : 0;
 
-		std::vector<std::string> const sunk = w->Take();
+		std::vector<std::string> const logged = w->Take();
 		if (next.i == before[Mode].i)
 		{
 			EXPECT_EQ(subject.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun) << where();
 			EXPECT_EQ(subject.Answer(trigger::Entry, 0).outcome, clause_outcome::NotRun) << where();
-			EXPECT_TRUE(sunk.empty()) << where();
+			EXPECT_TRUE(logged.empty()) << where();
 			EXPECT_EQ(subject.State(Left).i, before[Left].i) << where();
 		}
 		else
@@ -597,13 +654,13 @@ TEST(ListParity, StepExitAndEntryListsMatchTheInterpretedPicksStepByStep)
 			if (left && *left)
 			{
 				EXPECT_EQ(subject.State(Left).i, ValueOf(*leave, **left, "left").i) << where();
-				EXPECT_EQ(sunk, std::vector<std::string>{"v1:" + CommandOf(*leave, **left)}) << where();
+				EXPECT_EQ(logged, std::vector<std::string>{"v1:" + CommandOf(*leave, **left)}) << where();
 			}
 			else
 			{
 				++exitHeld;
 				EXPECT_EQ(subject.State(Left).i, before[Left].i) << where();
-				EXPECT_TRUE(sunk.empty()) << where() << "a held exit emits nothing";
+				EXPECT_TRUE(logged.empty()) << where() << "a held exit emits nothing";
 			}
 			entry_oracle const entry = EntryOracle(*arrive, *settle, *mood, next, host, seed, before[Tone].i,
 				before[MoodState].i);
@@ -630,7 +687,7 @@ TEST(ListParity, RebindsOldExitAndNewEntryMatchThePicksOnTheirOwnVersions)
 	int64_t const messages[] = {0, Hash("scared"), Hash("calm")};
 	std::string currentLabel = "v0";
 	host_object host;
-	instance subject = CreateInstance(*current, 1, 1, &host);
+	instance subject = Created(*current, 1, 1, &host);
 	int rebinds = 0, exitHeld = 0;
 	for (int i = 0; i < 3000; ++i)
 	{
@@ -640,7 +697,7 @@ TEST(ListParity, RebindsOldExitAndNewEntryMatchThePicksOnTheirOwnVersions)
 		host.broken    = rng() % 15 == 0;
 		if (i % 7 != 6)
 		{
-			Step(subject, &host, rng(), Message(messages[rng() % std::size(messages)]));
+			Stepped(subject, &host, rng(), Message(messages[rng() % std::size(messages)]));
 			continue;
 		}
 		// A reload: the exit and arrive rows change, every few times back and
@@ -662,10 +719,10 @@ TEST(ListParity, RebindsOldExitAndNewEntryMatchThePicksOnTheirOwnVersions)
 		std::vector<cell> const leaveKeys   = {before[Mode]};
 		std::vector<cell> const leaveInputs = {cell::Real(host.energy)};
 		auto const left = PickBest(*oldLeave, pick_query{leaveKeys, leaveInputs, &host});
-		Rebind(subject, *next, &host, seed);
+		Rebound(subject, *next, &host, seed);
 		auto where = [&]() { return "rebind at " + std::to_string(i) + " "; };
-		std::vector<std::string> const sunk = w->Take();
-		// The old exit, against the old version, to the old sink.
+		std::vector<std::string> const logged = w->Take();
+		// The old exit, against the old version, tagged with the old binding.
 		std::vector<std::string> expected;
 		if (left && *left)
 		{
@@ -677,8 +734,8 @@ TEST(ListParity, RebindsOldExitAndNewEntryMatchThePicksOnTheirOwnVersions)
 			++exitHeld;
 			EXPECT_EQ(subject.State(Left).i, before[Left].i) << where();
 		}
-		// The life machine's entry emits nothing, so the old sink's abort is all.
-		EXPECT_EQ(sunk, expected) << where();
+		// The life machine's entry emits nothing, so the old binding's abort is all.
+		EXPECT_EQ(logged, expected) << where();
 		// The new entry, against the new versions, on the migrated state.
 		EXPECT_EQ(subject.State(Mode).i, before[Mode].i) << where() << "every member survives";
 		entry_oracle const entry = EntryOracle(*newArrive, *settle, *mood, before[Mode], host, seed, before[Tone].i,
@@ -721,7 +778,7 @@ TEST(Provenance, TheRingKeepsTheLastPicksOldestFirstAcrossCreationStepsAndRebind
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.energy = 0.9;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
+	instance subject = Created(*v1, 1, 1, &host);
 	// Creation: create's one clause, then entry's three.
 	std::vector<expected_pick> expected = {{0, trigger::Create, 0}, {0, trigger::Entry, 0}, {0, trigger::Entry, 1},
 		{0, trigger::Entry, 2}};
@@ -734,7 +791,7 @@ TEST(Provenance, TheRingKeepsTheLastPicksOldestFirstAcrossCreationStepsAndRebind
 		cell const before = subject.State(Mode);
 		if (pass % 9 == 0)
 		{
-			Rebind(subject, *v1, &host, pass);
+			Rebound(subject, *v1, &host, pass);
 			expected.push_back({pass, trigger::Exit, 0});
 			for (uint32_t c = 0; c < 3; ++c)
 			{
@@ -742,7 +799,7 @@ TEST(Provenance, TheRingKeepsTheLastPicksOldestFirstAcrossCreationStepsAndRebind
 			}
 			continue;
 		}
-		Step(subject, &host, pass, Message(pass % 4 == 0 ? Hash("scared") : 0));
+		Stepped(subject, &host, pass, Message(pass % 4 == 0 ? Hash("scared") : 0));
 		expected.push_back({pass, trigger::Step, 0});
 		if (subject.State(Mode).i != before.i)
 		{
@@ -778,9 +835,9 @@ TEST(Provenance, AnEntryHoldsTheTableRowAndTheValuesTheStepRead)
 	host_object host;
 	host.energy    = 0.2;
 	host.food_near = 1;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
+	instance subject = Created(*v1, 1, 1, &host);
 	ASSERT_EQ(subject.State(Mode).i, Hash("idle"));
-	Step(subject, &host, 5);
+	Stepped(subject, &host, 5);
 	ASSERT_EQ(subject.State(Mode).i, Hash("eat")) << "idle, energy 0.2 and food near: eat";
 	provenance_view const ring = subject.Provenance();
 	// The step's brain pick, then exit (leave idle) and entry's three.
@@ -817,7 +874,7 @@ TEST(Provenance, AnEntryHoldsTheTableRowAndTheValuesTheStepRead)
 	// Out of the input's 0..1 range: the pick clamps it, the entry keeps it.
 	host.energy    = 1.5;
 	host.food_near = 0;
-	Step(subject, &host, 6);
+	Stepped(subject, &host, 6);
 	provenance_entry const* outside = nullptr;
 	for (provenance_entry const& entry : subject.Provenance())
 	{
@@ -839,8 +896,8 @@ TEST(Provenance, AFallThroughIsMarkedAndKeepsTheTypeAsRead)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.energy = 0.9;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
-	Step(subject, &host, 1, Message(Hash("sneeze")));
+	instance subject = Created(*v1, 1, 1, &host);
+	Stepped(subject, &host, 1, Message(Hash("sneeze")));
 	provenance_entry const* brain = nullptr;
 	for (provenance_entry const& entry : subject.Provenance())
 	{
@@ -855,7 +912,7 @@ TEST(Provenance, AFallThroughIsMarkedAndKeepsTheTypeAsRead)
 	EXPECT_EQ(brain->Keys()[1].i, Hash("sneeze")) << "the type read, not the blank it fell to";
 	EXPECT_FALSE(subject.Absorbed());
 
-	Step(subject, &host, 2, Message(Hash("scared")));
+	Stepped(subject, &host, 2, Message(Hash("scared")));
 	provenance_view const ring = subject.Provenance();
 	provenance_entry const* scared = nullptr;
 	for (provenance_entry const& entry : ring)
@@ -878,7 +935,7 @@ TEST(Provenance, HoldsAreRecordedWithWhatWasRead)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.energy = 0.9;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
+	instance subject = Created(*v1, 1, 1, &host);
 	auto lastStep = [&]() -> provenance_entry
 	{
 		provenance_view const ring = subject.Provenance();
@@ -896,7 +953,7 @@ TEST(Provenance, HoldsAreRecordedWithWhatWasRead)
 	// A script that cannot answer: idle's cornered row with food near 2.
 	host.food_near = 2;
 	host.broken    = true;
-	Step(subject, &host, 1);
+	Stepped(subject, &host, 1);
 	provenance_entry const raised = lastStep();
 	EXPECT_EQ(raised.answer.outcome, clause_outcome::Failed);
 	EXPECT_EQ(raised.answer.row, subject.Answer(trigger::Step, 0).row);
@@ -906,7 +963,7 @@ TEST(Provenance, HoldsAreRecordedWithWhatWasRead)
 	// A NaN: refused on the input, which is kept as read.
 	host.broken = false;
 	host.energy = kNaN;
-	Step(subject, &host, 2);
+	Stepped(subject, &host, 2);
 	provenance_entry const nan = lastStep();
 	EXPECT_EQ(nan.answer.outcome, clause_outcome::Failed);
 	EXPECT_EQ(nan.answer.input, 0u);
@@ -917,7 +974,7 @@ TEST(Provenance, HoldsAreRecordedWithWhatWasRead)
 	// A getter that failed: nothing whole was read.
 	host.energy  = 0.9;
 	host.unwired = true;
-	Step(subject, &host, 3);
+	Stepped(subject, &host, 3);
 	provenance_entry const held = lastStep();
 	EXPECT_EQ(held.answer.outcome, clause_outcome::SourceHeld);
 	EXPECT_TRUE(held.Keys().empty());
@@ -965,9 +1022,9 @@ TEST(Provenance, AnEdgeTablesEntryKeepsThePreviousValueItCrossedFrom)
 	ASSERT_TRUE(bound);
 	host_object host;
 	host.t = 0.2;
-	instance subject = CreateInstance(*bound, 1, 1, &host);
+	instance subject = Created(*bound, 1, 1, &host);
 	host.t = 0.9;
-	Step(subject, &host, 1);
+	Stepped(subject, &host, 1);
 	EXPECT_EQ(subject.State(1).i, 7) << "0.2 -> 0.9 passed through 0.4..0.5";
 	provenance_view const ring = subject.Provenance();
 	ASSERT_EQ(ring.size(), 1u);
@@ -987,7 +1044,7 @@ TEST(Provenance, RecordingAllocatesNothing)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
+	instance subject = Created(*v1, 1, 1, &host);
 	w->quiet = true;
 	size_t allocated = 0;
 	{
@@ -997,7 +1054,7 @@ TEST(Provenance, RecordingAllocatesNothing)
 			host.energy    = (i % 11) / 10.0;
 			host.food_near = i % 10;
 			host.cornered  = i % 3 == 0;
-			Step(subject, &host, uint64_t(i), Message(i % 5 == 0 ? Hash("scared") : (i % 5 == 1 ? Hash("calm") : 0)));
+			Stepped(subject, &host, uint64_t(i), Message(i % 5 == 0 ? Hash("scared") : (i % 5 == 1 ? Hash("calm") : 0)));
 		}
 		allocated = count.Count();
 	}
@@ -1014,7 +1071,7 @@ TEST(Provenance, AMovedFromInstancesRingAborts)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance subject = CreateInstance(*v1, 1, 1, &host);
+	instance subject = Created(*v1, 1, 1, &host);
 	instance moved   = std::move(subject);
 	EXPECT_EQ(moved.Provenance().size(), 4u);
 	EXPECT_DEATH((void)subject.Provenance(), "moved-from");

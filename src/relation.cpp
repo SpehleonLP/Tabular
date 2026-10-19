@@ -1,5 +1,6 @@
 #include "tabular/relation.h"
 
+#include "command_text.h"
 #include "float_text.h"
 #include "relation_internal.h"
 #include "version_checks.h"
@@ -948,10 +949,21 @@ tl::expected<void, ErrorContext> CheckRow(table_def const& def, slot_layout cons
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
 		column_def const& column = def.columns[c];
-		// A row that does nothing is a property of the row, like a band's shape.
-		if (column.type == column_type::Command && commands[slots.slot[c]].empty())
+		// A command's shape is a property of the row, like a band's; a row
+		// that does nothing says so with `()`, so empty text is a slip.
+		if (column.type == column_type::Command)
 		{
-			return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name, "' got an empty command"));
+			std::string_view const command = commands[slots.slot[c]];
+			if (command.empty())
+			{
+				return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name,
+					"' got an empty command; a row that does nothing holds ()"));
+			}
+			auto shaped = detail::CheckCommandShape(command);
+			if (!shaped)
+			{
+				return tl::make_unexpected(std::move(shaped.error()).with("column '", column.name, "' of '", def.name, "'"));
+			}
 		}
 		if (IsValueColumn(column.type))
 		{

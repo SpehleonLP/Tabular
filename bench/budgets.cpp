@@ -162,7 +162,6 @@ host_binding BenchHost()
 		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
-	host.sink = [](uint64_t, uint32_t, std::string_view) {};
 	return host;
 }
 

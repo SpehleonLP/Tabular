@@ -1,6 +1,7 @@
 # Commands and messages
 
-**Status:** design, not built. Taken from the owner's conversation of 2026-10-19, after slices
+**Status:** Parts 1 and 2 built (2026-10-19, branch tabular-commands; see "As built" under
+each); Parts 3 and 4 are design, not built. Taken from the owner's conversation of 2026-10-19, after slices
 0–8 landed. It replaces the slice-4 message design (R3: the message type as a key, arguments
 as positional input slots). **Contract:** `docs/definition.md`; each part below names the
 contract text it changes.
@@ -68,6 +69,12 @@ quote; a stray `"` in an unquoted cell; a quoted cell spanning two lines, with a
 following row naming the right line; the same tables saved by LibreOffice and by Excel
 (fixtures).
 
+**As built.** `src/csv_text.h` is the one reader for the rows, pivoted and grid front ends;
+Spehleon/lib's `CSV::File` is untouched. Decided in building: a spreadsheet's padding is
+ignored (trailing empty cells, and a row of nothing but separators is a blank line), while a
+non-empty cell past the header is still refused; a row shorter than the header is still
+refused. Tests: `CsvQuoting`.
+
 ## Part 2. Commands as lists
 
 **Why.** `definition.md` already says "the suffix *as a whole* is the command: `(C, D, E)` is
@@ -127,6 +134,29 @@ give a three-item list; an empty suffix gives `()`; `message this hard-land` rea
 unbalanced paren and an unterminated string are each refused with a line; the step's result order matches step, exit,
 entry; the allocation-free step test still passes with results returned; the budget gate is
 re-measured.
+
+**As built.** The CSV front end builds the list (`src/command_text.h`, `CommandList`); the
+store checks the shape of every command column, whichever surface wrote it, and keeps what it
+is given, so a builder caller writes the list itself. Decided in building:
+
+- The wrap rule counts items, not whitespace: a cell holding only a string (`"a b"`, written
+  `"""a b"""` in CSV) is one item and is not wrapped. A cell that is not whole by itself (an
+  unclosed paren or string) is left as written, so the shape check refuses it rather than the
+  wrap balancing it.
+- A backslash inside a string escapes whatever follows it; only an unterminated string is
+  refused.
+- A declared (non-suffix) command column keeps its cell verbatim, shape-checked; an empty one
+  is still refused, as every empty CSV cell is. An empty command reaching the store is refused
+  too: "do nothing" is `()`.
+- Each result is `emitted{list, table, command}`; the list lets a host tell an exit's abort
+  from an entry's start, and lets a rebind's results be attributed to the old or new binding.
+- `CreateInstance` returns the instance, so creation's results are read from
+  `instance::Emitted()`, the last run's span, which `Step` and `Rebind` also return.
+- The buffer holds one entry per clause that can emit across all four lists, counted at `Bind`
+  from the prepared machine; a rebind sizes it for the exit results already taken plus the new
+  binding's emitters.
+- A rebind's exit commands view the old binding's versions, so the instance keeps the old
+  binding until its next run; a host may drop its own reference straight after `Rebind`.
 
 ### Bridge tables
 

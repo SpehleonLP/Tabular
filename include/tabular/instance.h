@@ -48,13 +48,6 @@ struct input_getter
 // those a message carries), at Bind, with the input's name; it is the only
 // place a name meets the host, and there is no symbol table.
 //
-// sink receives every command a step emits (P12): for each clause with an
-// emit that answered, the instance's id, the clause's table and the picked
-// row's command text, a view into the version the binding holds (valid while
-// the binding lives). Tabular does not interpret it. A machine that emits
-// needs one; Bind refuses it otherwise, since a dropped command is a state
-// function never started.
-//
 // report receives each failure that held a clause (P15), once per instance
 // for each (clause, row) whose script condition could not answer, (clause,
 // table input) a pick refused (NaN for a ranged input, a flag set wider than
@@ -67,18 +60,19 @@ struct input_getter
 // its report carries what it said then. Building it allocates, the first
 // time only. Optional: without it the failures still hold, unreported.
 //
-// Both are called from Step, CreateInstance and Rebind (the old binding's for
-// its exit, the new one's for its entry), on the thread running them;
-// instances sharing a binding may step concurrently, so a host stepping them
-// on several threads gives functions safe to call that way. Neither may step
-// or rebind the instance it is told about.
+// Both are called from Step, CreateInstance and Rebind (the old binding's
+// report for its exit, the new one's for its entry), on the thread running
+// them; instances sharing a binding may step concurrently, so a host stepping
+// them on several threads gives functions safe to call that way. Neither may
+// step or rebind the instance it is told about.
+//
+// Commands are not handed to the host: each run returns them (see emitted).
 inline constexpr uint32_t kNoTable = UINT32_MAX;
 inline constexpr size_t   kNoRow   = SIZE_MAX;
 
 struct host_binding
 {
 	std::function<tl::expected<input_getter, ErrorContext>(std::string_view name)> resolve;
-	std::function<void(uint64_t instance, uint32_t table, std::string_view command)> sink;
 	std::function<void(uint64_t instance, uint32_t table, size_t row, ErrorContext const& error)> report;
 };
 
@@ -94,6 +88,19 @@ struct message
 {
 	uint32_t              type = 0;
 	std::span<cell const> arguments;
+};
+
+// One command a run emitted (P12): a clause with an emit answered, and this
+// is the list it is in (so a host tells an exit's abort from an entry's
+// start), its table and the picked row's command, the row's list of commands
+// as the store keeps it (`((anim chew) (message food "eat"))`, `()` for
+// none). A view into the version the binding that ran the clause holds;
+// Tabular does not interpret it.
+struct emitted
+{
+	trigger          list  = {};
+	uint32_t         table = 0;
+	std::string_view command;
 };
 
 struct binding_access;
@@ -128,9 +135,8 @@ private:
 // Binds machine to host: calls host.resolve once per machine input a getter
 // reads, in declaration order. Refused, naming the machine and the input, when
 // resolve is missing, when it refuses an input, or when it returns a getter
-// with no read function; and, naming the machine and a clause, when a clause
-// emits and the host gives no sink. Bind adopts every getter resolve returns,
-// succeed or fail: on a refusal those already returned are released.
+// with no read function. Bind adopts every getter resolve returns, succeed or
+// fail: on a refusal those already returned are released.
 tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const> machine, host_binding&& host);
 
 // The draw site of a weighted clause: the machine's name hashed (CityHash32)
@@ -321,6 +327,13 @@ public:
 	// the machine did not absorb to the object's script (R3).
 	bool Absorbed() const { return _absorbed; }
 
+	// What the last run (creation, a step or a rebind) emitted, in the order
+	// its lists ran: the span Step and Rebind return, and creation's, which
+	// CreateInstance cannot. Valid until the instance next runs, is moved or
+	// destroyed: a rebind's exit commands view the old binding's versions, so
+	// the instance keeps that binding until then.
+	std::span<emitted const> Emitted() const { return std::span<emitted const>(_emitted.data(), _emittedCount); }
+
 #if TABULAR_PROVENANCE
 	// The last kProvenanceDepth clauses that ran, oldest first, across
 	// creation, steps and rebinds (a rebind keeps the history: its entries name
@@ -350,6 +363,11 @@ private:
 	std::vector<cell>          _given;       // scratch: one clause's table inputs
 	std::vector<cell>          _givenBefore; // scratch: one clause's table inputs' previous values, for its edges
 	std::vector<float>         _axes;        // scratch: one best clause's clamped band inputs
+	// The last run's commands: room for every clause that can emit, so a step
+	// that emits allocates nothing.
+	std::vector<emitted>       _emitted;
+	size_t                     _emittedCount = 0;
+	counted_ptr<Binding const> _left;        // the binding a rebind left, while its exit's commands are returned
 	bool                       _absorbed = false;
 #if TABULAR_PROVENANCE
 	std::vector<provenance_entry> _provenance;           // the ring, kProvenanceDepth entries
@@ -364,7 +382,7 @@ private:
 // initial value. It reads every input once (with no message), then runs the
 // create list and the entry list (creation enters the initial state; no exit
 // runs) against the next vector, as a step runs its lists, makes the result
-// current, and hands the sink what the create, then the entry clauses
+// current, and returns in Emitted() what the create, then the entry clauses
 // emitted. seed draws for weighted clauses; self is the host object, handed to
 // getters and script conditions. It cannot be refused: a clause that cannot
 // answer holds, as in a step. The inputs read here are the previous values
@@ -388,9 +406,9 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 //    then the entry list, reading next; both write next, entry's writes last.
 //    Neither writes a hash state column (the definition build refuses it), so
 //    neither enters again.
-// 5. Next becomes current, and the sink is handed what the clauses that
+// 5. Next becomes current, and the step returns what the clauses that
 //    answered emitted: the step list's, then exit's, then entry's, each list
-//    in clause order. So a sink sees the step's state already current.
+//    in clause order (the same span as Emitted()).
 //
 // An edge (P13) crosses from its input's previous value: the last value read
 // for it on an earlier step or at creation, whatever the clauses did with it,
@@ -404,7 +422,7 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // and is reported once (see host_binding). Allocates nothing, holds included,
 // except a report's first occurrence (see input_getter for a host's own
 // failure message).
-void Step(instance& subject, void const* self, uint64_t seed, message const& msg = {});
+std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg = {});
 
 // Moves subject onto binding (P14): a reload, which the host runs on each
 // instance once it has prepared the changed machine again and bound it. Like a
@@ -412,10 +430,9 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 //
 // 1. Leaving, under the old binding: every input is read once with its getter
 //    (no message), next is set to a copy of current, the old exit list runs
-//    against current, next becomes current, and the old binding's sink is
-//    handed what exit emitted. So the host hears the abort of what a state
-//    started (R6) from the code that started it, before the new code starts
-//    it again.
+//    against current, and next becomes current. What exit emitted comes
+//    first in the result, so the host hears the abort of what a state started
+//    (R6) from the code that started it, before the new code starts it again.
 // 2. Migration by name: each state column of the new machine takes the old
 //    column of the same name, its value kept when the column has the same type
 //    and, for a hash, the value is still a member, and otherwise its new
@@ -426,8 +443,8 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 //    and rows) and every clause answers NotRun.
 // 3. Entering again, under the new binding: every input is read once with the
 //    new getters, the new entry list runs against the migrated state, next
-//    becomes current, and the new binding's sink is handed what entry
-//    emitted. The create list does not run: the instance is not new.
+//    becomes current, and what entry emitted follows exit's in the result.
+//    The create list does not run: the instance is not new.
 //
 // A reload is no movement of an input, so it crosses no edge and spends none:
 // the exit and entry lists see each input's previous value as the value read
@@ -444,7 +461,7 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 // be the one subject already has, which restarts its state. self and seed are
 // as for Step: getters, script conditions and weighted draws need them.
 // Allocates (it sizes the new buffers); it is not a step.
-void Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed);
+std::span<emitted const> Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed);
 
 }
 

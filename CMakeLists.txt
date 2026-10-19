@@ -38,6 +38,7 @@ set(TABULAR_SOURCES
 	src/instance.cpp
 	src/grid.cpp
 	src/schema_yaml.cpp
+	src/command_text.cpp
 	src/csv_text.cpp
 	src/rows_csv.cpp
 	src/pivot_csv.cpp
@@ -56,6 +57,7 @@ set(TABULAR_HEADERS
 	include/tabular/rows_csv.h
 	include/tabular/schema_yaml.h
 	src/csv_cells.h
+	src/command_text.h
 	src/csv_text.h
 	src/float_text.h
 	src/layout.h

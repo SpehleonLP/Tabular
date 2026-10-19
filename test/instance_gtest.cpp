@@ -127,8 +127,6 @@ host_binding HostGetters()
 		}
 		return input_getter{found->second, nullptr, nullptr};
 	};
-	// The grazers emit; these tests read what they emit through Answer.
-	host.sink = [](uint64_t, uint32_t, std::string_view) {};
 	return host;
 }
 
@@ -383,20 +381,23 @@ TEST(GrazerStep, TheWorkedExampleRunsThroughFleeFightAndGraze)
 	EXPECT_EQ(grazer.State(Anim).i, 4);
 }
 
-TEST(GrazerStep, TheEntryClausePicksTheEnteredStatesRowForTheSink)
+TEST(GrazerStep, TheEntryClausePicksTheEnteredStatesRowAndReturnsItsCommand)
 {
 	machine_fixture f = Grazer();
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
 	host.threat = 0.9;
-	Step(grazer, &host, 1);
+	std::span<emitted const> const results = Step(grazer, &host, 1);
 	clause_answer const entry = grazer.Answer(trigger::Entry, 0);
 	ASSERT_EQ(entry.outcome, clause_outcome::Answered);
 	TableVersion const& enter = f.Version(trigger::Entry, 0);
 	auto command = enter.CommandAt(entry.row, uint32_t(enter.definition().columns.size() - 1));
 	ASSERT_TRUE(command.has_value()) << RefusalOf(command);
-	EXPECT_EQ(*command, "(anim run)") << "slice 4 hands this to the sink";
+	EXPECT_EQ(*command, "((anim run))");
+	ASSERT_EQ(results.size(), 1u);
+	EXPECT_EQ(results[0].list, trigger::Entry);
+	EXPECT_EQ(results[0].command, *command);
 }
 
 TEST(GrazerStep, ACornerCheckThatCannotAnswerHoldsTheBrain)
@@ -605,7 +606,6 @@ host_binding LoggedGetters(getter_log& log, std::string_view refuse = {})
 		}
 		return getter;
 	};
-	host.sink = HostGetters().sink;
 	return host;
 }
 

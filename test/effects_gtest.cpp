@@ -20,7 +20,7 @@
 
 using namespace tabular;
 
-// A step's effects: the commands it hands the sink (P12), the failures it
+// A step's effects: the commands it returns (P12), the failures it
 // reports once (P15), the message it is given (R3) and the exit list it runs
 // when a state is left (R6). The worked example is the spec's grazer (§4)
 // with an exit table that aborts what entry started.
@@ -150,8 +150,9 @@ tl::expected<closure, ErrorContext> Conditions(std::string_view text)
 	return tl::make_unexpected(ErrorContext("no condition '", text, "'"));
 }
 
-// What the sink and the report were handed. With record off nothing is kept
-// but the counts, so a counted step allocates nothing on the host's side.
+// What the runs returned and the report was handed. With record off nothing
+// is kept but the counts, so a counted step allocates nothing on the host's
+// side.
 struct effect_log
 {
 	struct command
@@ -169,9 +170,22 @@ struct effect_log
 	};
 	std::vector<command> commands;
 	std::vector<report>  reports;
-	int                  sinkCalls   = 0;
+	int                  commandCount = 0;
 	int                  reportCalls = 0;
 	bool                 record      = true;
+
+	void Record(uint64_t instance, std::span<emitted const> results)
+	{
+		commandCount += static_cast<int>(results.size());
+		if (!record)
+		{
+			return;
+		}
+		for (emitted const& e : results)
+		{
+			commands.push_back(command{instance, e.table, std::string(e.command)});
+		}
+	}
 
 	// The commands since the last call, as "table-index:text".
 	std::vector<std::string> Take()
@@ -208,14 +222,6 @@ host_binding LoggingHost(effect_log& log)
 			return input_getter{&ReadT};
 		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
-	};
-	host.sink = [&log](uint64_t instance, uint32_t table, std::string_view command)
-	{
-		++log.sinkCalls;
-		if (log.record)
-		{
-			log.commands.push_back(effect_log::command{instance, table, std::string(command)});
-		}
 	};
 	host.report = [&log](uint64_t instance, uint32_t table, size_t row, ErrorContext const& error)
 	{
@@ -280,7 +286,17 @@ struct effects_fixture
 
 	instance Create(host_object const& host, uint64_t id = 7)
 	{
-		return CreateInstance(*binding, id, 1, &host);
+		instance out = CreateInstance(*binding, id, 1, &host);
+		log.Record(out.id(), out.Emitted());
+		return out;
+	}
+
+	// A step, its commands kept in log.
+	std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+	{
+		std::span<emitted const> const results = tabular::Step(subject, self, seed, msg);
+		log.Record(subject.id(), results);
+		return results;
 	}
 };
 
@@ -391,47 +407,47 @@ enum grazer_table : uint32_t { Brain, Enter, Exit };
 
 }
 
-TEST(GrazerEffects, TheSinkSeesEveryEntryAndExitInOrder)
+TEST(GrazerEffects, EveryEntryAndExitIsReturnedInOrder)
 {
 	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:(anim stand)"})) << "creation enters idle and leaves nothing";
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((anim stand))"})) << "creation enters idle and leaves nothing";
 	EXPECT_EQ(grazer.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
 
-	Step(grazer, &host, 1);   // no message: idle's blank run, energy 0.8, no food
+	f.Step(grazer, &host, 1);   // no message: idle's blank run, energy 0.8, no food
 	EXPECT_EQ(grazer.State(0).i, Hash("walk"));
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:(abort stand)", "1:(anim walk)"}))
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort stand))", "1:((anim walk))"}))
 		<< "exit, keyed on the idle being left, then entry";
 	EXPECT_FALSE(grazer.Absorbed());
 
-	Step(grazer, &host, 2, Message("sneeze"));
+	f.Step(grazer, &host, 2, Message("sneeze"));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "sneeze fell through to walk's blank run";
 	EXPECT_FALSE(grazer.Absorbed()) << "the host routes sneeze to the script";
 	EXPECT_TRUE(f.log.Take().empty()) << "nothing was entered, so nothing was emitted";
 	EXPECT_EQ(grazer.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
 
 	cell const far[] = {cell::Real(5)};
-	Step(grazer, &host, 3, Message("food_found", far));
+	f.Step(grazer, &host, 3, Message("food_found", far));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "far food: noted, still walking";
 	EXPECT_TRUE(grazer.Absorbed()) << "walk has a food_found run, and it answered";
 	EXPECT_TRUE(f.log.Take().empty());
 
 	cell const near[] = {cell::Real(1)};
-	Step(grazer, &host, 4, Message("food_found", near));
+	f.Step(grazer, &host, 4, Message("food_found", near));
 	EXPECT_EQ(grazer.State(0).i, Hash("eat"));
 	EXPECT_TRUE(grazer.Absorbed());
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:(abort walk)", "1:(anim chew), (message food \"eat\")"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort walk))", "1:((anim chew) (message food \"eat\"))"}));
 
-	Step(grazer, &host, 5, Message("scared"));
+	f.Step(grazer, &host, 5, Message("scared"));
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:(abort chew), (drop food)",
-		"1:(anim run), (message this \"calm\" :delay random(0.4, 1.0))"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort chew) (drop food))",
+		"1:((anim run) (message this \"calm\" :delay random(0.4, 1.0)))"}));
 
-	Step(grazer, &host, 6, Message("calm"));
+	f.Step(grazer, &host, 6, Message("calm"));
 	EXPECT_EQ(grazer.State(0).i, Hash("idle"));
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:(abort run)", "1:(anim stand)"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort run))", "1:((anim stand))"}));
 	for (effect_log::command const& c : f.log.commands)
 	{
 		EXPECT_EQ(c.instance, 7u);
@@ -445,12 +461,12 @@ TEST(GrazerEffects, ARaisingConditionHoldsAndIsReportedOnce)
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
-	Step(grazer, &host, 1, Message("scared"));
+	f.Step(grazer, &host, 1, Message("scared"));
 	ASSERT_EQ(grazer.State(0).i, Hash("panic"));
 	f.log.Take();
 
 	host.broken = true;
-	Step(grazer, &host, 2);
+	f.Step(grazer, &host, 2);
 	clause_answer const first = grazer.Answer(trigger::Step, 0);
 	ASSERT_EQ(first.outcome, clause_outcome::Failed);
 	EXPECT_EQ(grazer.State(0).i, Hash("panic")) << "the brain held";
@@ -464,13 +480,13 @@ TEST(GrazerEffects, ARaisingConditionHoldsAndIsReportedOnce)
 	EXPECT_TRUE(Mentions(report.error, "table 'grazer_brain' row " + std::to_string(first.row))) << report.error;
 	EXPECT_TRUE(Mentions(report.error, "dead target")) << report.error;
 
-	Step(grazer, &host, 3);
+	f.Step(grazer, &host, 3);
 	EXPECT_EQ(grazer.Answer(trigger::Step, 0).outcome, clause_outcome::Failed);
 	EXPECT_EQ(f.log.reports.size(), 1u) << "the same (clause, row) is reported once";
 
 	instance another = f.Create(host, 8);
-	Step(another, &host, 1, Message("scared"));
-	Step(another, &host, 2);
+	f.Step(another, &host, 1, Message("scared"));
+	f.Step(another, &host, 2);
 	ASSERT_EQ(f.log.reports.size(), 2u) << "the memory is the instance's, not the binding's";
 	EXPECT_EQ(f.log.reports[1].instance, 8u);
 }
@@ -483,14 +499,14 @@ TEST(MachineMessage, AnArgumentTheMessageDoesNotCarryReadsZero)
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
-	Step(grazer, &host, 1);
+	f.Step(grazer, &host, 1);
 	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
-	Step(grazer, &host, 2, Message("food_found"));
+	f.Step(grazer, &host, 2, Message("food_found"));
 	EXPECT_EQ(grazer.State(0).i, Hash("eat")) << "distance 0 is near";
 	grazer = f.Create(host);
-	Step(grazer, &host, 1);
+	f.Step(grazer, &host, 1);
 	cell const two[] = {cell::Real(5), cell::Real(0)};
-	Step(grazer, &host, 2, Message("food_found", two));
+	f.Step(grazer, &host, 2, Message("food_found", two));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "an argument past the declared ones is not read";
 }
 
@@ -719,19 +735,19 @@ TEST(MachineExit, ExitReadsTheStateBeingLeftAndEntryWritesLast)
 	instance door = f.Create(host);
 	EXPECT_EQ(door.State(1).i, 0) << "creation runs no exit";
 	EXPECT_EQ(door.State(2).i, 10);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:(at a)"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((at a))"}));
 
-	Step(door, &host, 1);   // a -> b
+	f.Step(door, &host, 1);   // a -> b
 	EXPECT_EQ(door.State(0).i, Hash("b"));
 	EXPECT_EQ(door.State(1).i, 1) << "exit picked a's row: it read current, the state being left";
 	EXPECT_EQ(door.State(2).i, 20) << "both wrote last; entry ran after exit and its write won";
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:(left a)", "2:(at b)"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((left a))", "2:((at b))"}));
 
-	Step(door, &host, 2);   // b -> c
+	f.Step(door, &host, 2);   // b -> c
 	EXPECT_EQ(door.State(1).i, 2);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:(left b)", "2:(at c)"}));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((left b))", "2:((at c))"}));
 
-	Step(door, &host, 3);   // c -> c: nothing left, nothing entered
+	f.Step(door, &host, 3);   // c -> c: nothing left, nothing entered
 	EXPECT_EQ(door.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
 	EXPECT_EQ(door.Answer(trigger::Entry, 0).outcome, clause_outcome::NotRun);
 	EXPECT_EQ(door.State(1).i, 2);
@@ -747,7 +763,7 @@ TEST(MachineExit, AnExitClauseMayNotSetAHashState)
 	EXPECT_TRUE(Mentions(error, "a transition belongs in the step list")) << error;
 }
 
-// ---- Sinks --------------------------------------------------------------------------
+// ---- Results -------------------------------------------------------------------------
 
 namespace
 {
@@ -800,39 +816,36 @@ constexpr std::string_view kTalkWords = "mode,say\na,(in a)\nb,(in b)\nstart,(st
 
 }
 
-TEST(MachineSink, CommandsGoOutInTheOrderTheListsRan)
+TEST(MachineResults, CommandsComeBackInTheOrderTheListsRan)
 {
 	effects_fixture f(kTalker, {kTalkGo, kTalkWords});
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance talker = f.Create(host);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:(start)", "1:(in a)"})) << "create, then entry";
-	Step(talker, &host, 1);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:(in b)", "1:(leave)", "1:(in b)"}))
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((start))", "1:((in a))"})) << "create, then entry";
+	f.Step(talker, &host, 1);
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((in b))", "1:((leave))", "1:((in b))"}))
 		<< "the step list (reading the b it moved to), then exit, then entry";
 }
 
-TEST(MachineSink, TheSinkSeesTheStepsStateCurrent)
+// The span a step returns is the instance's Emitted(), which is how creation's
+// commands are read; it holds the last run only.
+TEST(MachineResults, EmittedHoldsTheLastRunsCommands)
 {
 	effects_fixture f(kTalker, {kTalkGo, kTalkWords});
 	ASSERT_TRUE(f.binding);
 	host_object host;
-	instance talker = f.Create(host);
-	std::vector<int64_t> seen;
-	auto bound = Bind(f.machine, [&]()
-	{
-		host_binding h;
-		h.sink = [&](uint64_t, uint32_t, std::string_view) { seen.push_back(talker.State(0).i); };
-		return h;
-	}());
-	ASSERT_TRUE(bound.has_value()) << RefusalOf(bound);
-	talker = CreateInstance(**bound, 1, 1, &host);
-	seen.clear();
-	Step(talker, &host, 1);
-	EXPECT_EQ(seen, (std::vector<int64_t>(3, Hash("b"))));
+	instance talker = CreateInstance(*f.binding, 1, 1, &host);
+	ASSERT_EQ(talker.Emitted().size(), 2u);
+	EXPECT_EQ(talker.Emitted()[0].command, "((start))");
+	std::span<emitted const> const stepped = Step(talker, &host, 1);
+	EXPECT_EQ(stepped.data(), talker.Emitted().data());
+	ASSERT_EQ(stepped.size(), 3u);
+	EXPECT_EQ(stepped[2].command, "((in b))");
+	EXPECT_EQ(talker.State(0).i, Hash("b")) << "the state is current when the results come back";
 }
 
-TEST(MachineSink, AHeldClauseEmitsNothing)
+TEST(MachineResults, AHeldClauseEmitsNothing)
 {
 	// The careful row's condition raises when the host is broken: the clause
 	// holds with that row as its answer's row, and its command is not sent.
@@ -858,23 +871,23 @@ machines:
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance speaker = f.Create(host);
-	Step(speaker, &host, 1);
-	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(plain)"}));
+	f.Step(speaker, &host, 1);
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:((plain))"}));
 	host.broken = true;
-	Step(speaker, &host, 2);
+	f.Step(speaker, &host, 2);
 	clause_answer const held = speaker.Answer(trigger::Step, 0);
 	ASSERT_EQ(held.outcome, clause_outcome::Failed);
 	EXPECT_TRUE(f.log.Take().empty());
 	EXPECT_EQ(f.log.reports.size(), 1u);
 }
 
-TEST(MachineBind, AMachineThatEmitsNeedsASink)
+// Commands are returned, so a machine that emits needs nothing from the host
+// to take them.
+TEST(MachineBind, AMachineThatEmitsBindsWithNoHostFunctions)
 {
 	effects_fixture f(kTalker, {kTalkGo, kTalkWords});
 	ASSERT_TRUE(f.machine);
-	std::string const error = RefusalOf(Bind(f.machine, host_binding{}));
-	EXPECT_TRUE(Mentions(error, "machine 'talker' create clause 0 (table 'words')")) << error;
-	EXPECT_TRUE(Mentions(error, "the clause emits, and the host binding has no sink to take it")) << error;
+	EXPECT_EQ(RefusalOf(Bind(f.machine, host_binding{})), "(accepted)");
 }
 
 // ---- Reports ------------------------------------------------------------------------
@@ -947,10 +960,10 @@ TEST(MachineReport, AValueWithNoRunIsReportedOncePerClause)
 	instance counter = f.Create(host);
 	f.log.reports.clear();
 	host.level = 5;
-	Step(counter, &host, 1);
+	f.Step(counter, &host, 1);
 	EXPECT_EQ(counter.Answer(trigger::Step, 0).outcome, clause_outcome::NoRun);
 	host.level = 6;
-	Step(counter, &host, 2);
+	f.Step(counter, &host, 2);
 	ASSERT_EQ(f.log.reports.size(), 1u) << "a second value with no run is the same clause's NoRun";
 	effect_log::report const& report = f.log.reports[0];
 	EXPECT_EQ(report.table, 0u);
@@ -967,8 +980,8 @@ TEST(MachineReport, AGetterThatFailsIsReportedOnceAndItsCascadeNever)
 	host_object host;
 	instance counter = f.Create(host);
 	host.unwired = true;
-	Step(counter, &host, 1);
-	Step(counter, &host, 2);
+	f.Step(counter, &host, 1);
+	f.Step(counter, &host, 2);
 	EXPECT_EQ(counter.Answer(trigger::Step, 0).outcome, clause_outcome::SourceHeld);
 	ASSERT_EQ(f.log.reports.size(), 1u);
 	effect_log::report const& report = f.log.reports[0];
@@ -985,8 +998,8 @@ TEST(MachineReport, AnOrClausesRaisingRowIsReportedAndTheReaderHoldsUnreported)
 	host_object host;
 	instance counter = f.Create(host);
 	host.broken = true;
-	Step(counter, &host, 1);
-	Step(counter, &host, 2);
+	f.Step(counter, &host, 1);
+	f.Step(counter, &host, 2);
 	clause_answer const phase = counter.Answer(trigger::Step, 1);
 	ASSERT_EQ(phase.outcome, clause_outcome::Failed);
 	EXPECT_EQ(counter.Answer(trigger::Step, 2).outcome, clause_outcome::SourceHeld);
@@ -1006,8 +1019,8 @@ TEST(MachineReport, ANanInputIsReportedOncePerClauseAndInput)
 	host_object host;
 	instance counter = f.Create(host);
 	host.t = std::numeric_limits<double>::quiet_NaN();
-	Step(counter, &host, 1);
-	Step(counter, &host, 2);
+	f.Step(counter, &host, 1);
+	f.Step(counter, &host, 2);
 	clause_answer const phase = counter.Answer(trigger::Step, 1);
 	ASSERT_EQ(phase.outcome, clause_outcome::Failed);
 	EXPECT_EQ(phase.input, 0u);
@@ -1034,7 +1047,7 @@ TEST(MachineReport, WithNoReportTheHoldsStillHold)
 	host_object host;
 	host.level      = 5;
 	instance counter = CreateInstance(**bound, 1, 1, &host);
-	Step(counter, &host, 1);
+	f.Step(counter, &host, 1);
 	EXPECT_EQ(counter.Answer(trigger::Step, 0).outcome, clause_outcome::NoRun);
 	EXPECT_EQ(counter.State(1).i, 10) << "lookup still wrote; tally held";
 }
@@ -1060,14 +1073,14 @@ TEST(GrazerEffects, StepsThatEmitTakeMessagesExitAndRepeatReportsAllocateNothing
 		host.broken = false;
 		switch (i % 8)
 		{
-		case 0: Step(grazer, &host, 1); break;
-		case 1: Step(grazer, &host, 2, Message("sneeze")); break;
-		case 2: Step(grazer, &host, 3, Message("food_found", near)); break;
-		case 3: Step(grazer, &host, 4, Message("scared")); break;
-		case 4: host.broken = true; Step(grazer, &host, 5); break;
-		case 5: Step(grazer, &host, 6, Message("calm", nan)); break;
-		case 6: Step(grazer, &host, 7, Message("calm")); break;
-		default: Step(grazer, &host, 8); break;
+		case 0: f.Step(grazer, &host, 1); break;
+		case 1: f.Step(grazer, &host, 2, Message("sneeze")); break;
+		case 2: f.Step(grazer, &host, 3, Message("food_found", near)); break;
+		case 3: f.Step(grazer, &host, 4, Message("scared")); break;
+		case 4: host.broken = true; f.Step(grazer, &host, 5); break;
+		case 5: f.Step(grazer, &host, 6, Message("calm", nan)); break;
+		case 6: f.Step(grazer, &host, 7, Message("calm")); break;
+		default: f.Step(grazer, &host, 8); break;
 		}
 	};
 	// The first round reports the raise and the NaN, building their errors.
@@ -1077,7 +1090,7 @@ TEST(GrazerEffects, StepsThatEmitTakeMessagesExitAndRepeatReportsAllocateNothing
 	}
 	ASSERT_EQ(f.log.reportCalls, 2) << "the raise and the NaN";
 	f.log.record     = false;
-	int const sinks  = f.log.sinkCalls;
+	int const commands = f.log.commandCount;
 	AllocationCount count;
 	for (int i = 0; i < 80; ++i)
 	{
@@ -1085,7 +1098,7 @@ TEST(GrazerEffects, StepsThatEmitTakeMessagesExitAndRepeatReportsAllocateNothing
 	}
 	EXPECT_EQ(count.Count(), 0u);
 	EXPECT_EQ(f.log.reportCalls, 2) << "repeats are not reported";
-	EXPECT_EQ(f.log.sinkCalls - sinks, 10 * 8) << "four changes a round, each an exit and an entry";
+	EXPECT_EQ(f.log.commandCount - commands, 10 * 8) << "four changes a round, each an exit and an entry";
 }
 
 TEST(MachineMessage, APivotedTablesBlankMessageKeyIsNoMessage)
@@ -1171,7 +1184,7 @@ machines:
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance asker = f.Create(host);
-	Step(asker, &host, 1);
+	f.Step(asker, &host, 1);
 	EXPECT_EQ(host.flakyCalls, 1) << "the best clause's condition was asked once";
 	EXPECT_EQ(host.flakyOrCalls, 1) << "the or clause's condition was asked once";
 	ASSERT_EQ(asker.Answer(trigger::Step, 0).outcome, clause_outcome::Failed);
@@ -1184,7 +1197,7 @@ machines:
 	EXPECT_TRUE(Mentions(f.log.reports[1].error, "table 'bits' row 0")) << f.log.reports[1].error;
 	EXPECT_TRUE(Mentions(f.log.reports[1].error, "machine 'asker' step clause 1 (table 'bits')")) << f.log.reports[1].error;
 
-	Step(asker, &host, 2);
+	f.Step(asker, &host, 2);
 	EXPECT_EQ(host.flakyCalls, 2);
 	EXPECT_EQ(host.flakyOrCalls, 2);
 	EXPECT_EQ(asker.Answer(trigger::Step, 0).outcome, clause_outcome::Answered);
@@ -1334,12 +1347,12 @@ machines:
 	for (int round = 0; round < 3; ++round)
 	{
 		host.level = 0;
-		Step(levels, &host, 1);
+		f.Step(levels, &host, 1);
 		host.level = 20;
-		Step(levels, &host, 2);
+		f.Step(levels, &host, 2);
 		EXPECT_EQ(levels.State(1).i, 20) << "an unscripted row answers";
 		host.level = 41;
-		Step(levels, &host, 3);
+		f.Step(levels, &host, 3);
 	}
 	ASSERT_EQ(f.log.reports.size(), 2u) << "one report per scripted row, however often each fails";
 	EXPECT_EQ(f.log.reports[0].row, 0u);
@@ -1380,7 +1393,7 @@ machines:
 	instance poker = f.Create(host);
 	f.log.reports.clear();
 	host.level = 5;
-	Step(poker, &host, 1, Message("poke"));
+	f.Step(poker, &host, 1, Message("poke"));
 	EXPECT_EQ(poker.Answer(trigger::Step, 0).outcome, clause_outcome::NoRun) << "(5, poke) and its blank twin (5, 0) miss";
 	ASSERT_EQ(f.log.reports.size(), 1u);
 	EXPECT_TRUE(Mentions(f.log.reports[0].error, "table 'poke' key (5, " + std::to_string(Hash("poke")) + ") has no run"))
@@ -1395,10 +1408,10 @@ TEST(MachineMessage, ExtraArgumentsAreReportedOnceAndTheStepStillRuns)
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
-	Step(grazer, &host, 1);
+	f.Step(grazer, &host, 1);
 	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
 	cell const two[] = {cell::Real(5), cell::Real(0)};
-	Step(grazer, &host, 2, Message("food_found", two));
+	f.Step(grazer, &host, 2, Message("food_found", two));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "the declared argument, distance 5, was read: far food";
 	EXPECT_TRUE(grazer.Absorbed());
 	ASSERT_EQ(f.log.reports.size(), 1u);
@@ -1408,11 +1421,11 @@ TEST(MachineMessage, ExtraArgumentsAreReportedOnceAndTheStepStillRuns)
 	EXPECT_TRUE(Mentions(f.log.reports[0].error, "a message carries 2 arguments, and the machine declares 1"))
 		<< f.log.reports[0].error;
 	cell const three[] = {cell::Real(5), cell::Real(0), cell::Real(0)};
-	Step(grazer, &host, 3, Message("food_found", three));
+	f.Step(grazer, &host, 3, Message("food_found", three));
 	EXPECT_EQ(f.log.reports.size(), 1u) << "reported once per instance";
 
 	// A missing argument is no failure: it reads 0, as on a step with no message.
-	Step(grazer, &host, 4, Message("food_found"));
+	f.Step(grazer, &host, 4, Message("food_found"));
 	EXPECT_EQ(grazer.State(0).i, Hash("eat"));
 	EXPECT_EQ(f.log.reports.size(), 1u);
 }
@@ -1431,9 +1444,9 @@ TEST(MachineReport, RepeatedNoRunsAndGetterFailuresWithAReportAllocateNothing)
 	instance counter = f.Create(host);
 	// The first of each builds its report.
 	host.level = 5;
-	Step(counter, &host, 1);
+	f.Step(counter, &host, 1);
 	host.unwired = true;
-	Step(counter, &host, 2);
+	f.Step(counter, &host, 2);
 	ASSERT_EQ(f.log.reportCalls, 2) << "the missing run and the getter";
 	f.log.record = false;
 	AllocationCount count;
@@ -1441,7 +1454,7 @@ TEST(MachineReport, RepeatedNoRunsAndGetterFailuresWithAReportAllocateNothing)
 	{
 		host.unwired = i % 2 == 0;
 		host.level   = 5 + i;
-		Step(counter, &host, uint64_t(i));
+		f.Step(counter, &host, uint64_t(i));
 	}
 	EXPECT_EQ(count.Count(), 0u);
 	EXPECT_EQ(f.log.reportCalls, 2) << "repeats are not reported";

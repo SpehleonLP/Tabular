@@ -460,13 +460,7 @@ cell ReadEnergy(void*, void const* self, ErrorContext*)
 	return cell::Real(HostOf(self).energy);
 }
 
-// The commands a binding's sink received, in order.
-struct sink_log
-{
-	std::vector<std::string> commands;
-};
-
-host_binding EdgeGetters(sink_log* log)
+host_binding EdgeGetters()
 {
 	host_binding host;
 	host.resolve = [](std::string_view name) -> tl::expected<input_getter, ErrorContext>
@@ -481,13 +475,6 @@ host_binding EdgeGetters(sink_log* log)
 		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
-	host.sink = [log](uint64_t, uint32_t, std::string_view command)
-	{
-		if (log)
-		{
-			log->commands.emplace_back(command);
-		}
-	};
 	return host;
 }
 
@@ -496,7 +483,6 @@ struct edge_fixture
 	schema_document            document;
 	relation_store             store;
 	counted_ptr<Binding const> binding;
-	sink_log                   log;
 
 	// pivoted names the tables whose rows are loaded as pivoted CSV.
 	edge_fixture(std::string_view yaml, std::vector<std::string_view> const& rows, std::vector<uint32_t> const& pivoted = {})
@@ -517,7 +503,7 @@ struct edge_fixture
 		{
 			return;
 		}
-		auto bound = Bind(*prepared, EdgeGetters(&log));
+		auto bound = Bind(*prepared, EdgeGetters());
 		EXPECT_TRUE(bound.has_value()) << RefusalOf(bound);
 		if (bound)
 		{
@@ -587,12 +573,12 @@ edge_fixture Startle()
 	return edge_fixture(kStartle, {kStartleRows, kStartleEnterRows});
 }
 
-int Startles(sink_log const& log)
+int Startles(std::span<emitted const> results)
 {
 	int n = 0;
-	for (std::string const& c : log.commands)
+	for (emitted const& e : results)
 	{
-		n += c == "(anim startle)" ? 1 : 0;
+		n += e.command == "((anim startle))" ? 1 : 0;
 	}
 	return n;
 }
@@ -613,7 +599,7 @@ TEST(GrazerEdge, AStartleFiresOnceWhenThreatCrossesUpwards)
 	ASSERT_TRUE(f.binding);
 	edge_host host;
 	instance  grazer = CreateInstance(*f.binding, 1, 0, &host);
-	f.log.commands.clear();
+	int startles = 0;
 	// 0.6 crosses 0.5; staying above never refires; down and up again fires;
 	// a jump from 0.1 to 0.9 fires once.
 	double const walk[]  = {0.6, 0.7, 0.8, 0.95, 0.3, 0.55, 0.55, 0.1, 0.9, 0.9, 0.49, 0.5};
@@ -621,8 +607,8 @@ TEST(GrazerEdge, AStartleFiresOnceWhenThreatCrossesUpwards)
 	for (size_t i = 0; i < std::size(walk); ++i)
 	{
 		host.threat = walk[i];
-		Step(grazer, &host, i);
-		EXPECT_EQ(Startles(f.log), fired[i]) << "step " << i << " threat " << walk[i];
+		startles += Startles(Step(grazer, &host, i));
+		EXPECT_EQ(startles, fired[i]) << "step " << i << " threat " << walk[i];
 	}
 }
 
@@ -1360,14 +1346,14 @@ TEST(CyclicMachine, AFootstepStepsOncePerPassOfThePhase)
 	edge_host host;
 	host.threat     = 0.1;
 	instance walker = CreateInstance(*f.binding, 1, 0, &host);
-	f.log.commands.clear();
+	int startles = 0;
 	double const phase[] = {0.3, 0.52, 0.7, 0.95, 0.05, 0.2, 0.45, 0.6, 0.9, 0.15, 0.4, 0.8};
 	int const    steps[] = {0,   1,    1,   1,    1,    1,   1,    2,   2,   2,    2,   3};
 	for (size_t i = 0; i < std::size(phase); ++i)
 	{
 		host.threat = phase[i];
-		Step(walker, &host, i);
-		EXPECT_EQ(Startles(f.log), steps[i]) << "step " << i << " phase " << phase[i];
+		startles += Startles(Step(walker, &host, i));
+		EXPECT_EQ(startles, steps[i]) << "step " << i << " phase " << phase[i];
 	}
 }
 

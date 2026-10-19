@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -126,8 +127,9 @@ cell ReadAlarm(void*, void const* self, ErrorContext*)
 	return cell::Real(Host(self).alarm);
 }
 
-// Every binding's commands land in one order, each tagged with the binding it
-// came from, so the order across an old and a new sink is visible.
+// Every binding's commands land in one order, each tagged with the binding
+// whose clause emitted it, so the order across an old and a new binding is
+// visible.
 struct reload_log
 {
 	std::vector<std::string> order;
@@ -166,19 +168,64 @@ host_binding TaggedHost(reload_log& log, std::string tag, bool integerThreat = f
 		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
-	host.sink = [&log, tag](uint64_t, uint32_t, std::string_view command)
-	{
-		if (log.record)
-		{
-			log.order.push_back(tag + ":" + std::string(command));
-		}
-	};
 	host.report = [&log, tag](uint64_t, uint32_t, size_t, ErrorContext const&)
 	{
 		++log.reports;
 		log.reported.push_back(tag);
 	};
 	return host;
+}
+
+// The log and tag each binding's commands go to, set when a world binds.
+struct log_target
+{
+	reload_log* log = nullptr;
+	std::string tag;
+};
+
+std::unordered_map<Binding const*, log_target>& Targets()
+{
+	static std::unordered_map<Binding const*, log_target> targets;
+	return targets;
+}
+
+void Log(Binding const& binding, emitted const& result)
+{
+	auto const found = Targets().find(&binding);
+	ASSERT_NE(found, Targets().end()) << "a binding no world made";
+	if (found->second.log->record)
+	{
+		found->second.log->order.push_back(found->second.tag + ":" + std::string(result.command));
+	}
+}
+
+// Creation, a step and a rebind with their results logged.
+instance Created(Binding const& binding, uint64_t id, uint64_t seed, void const* self)
+{
+	instance out = CreateInstance(binding, id, seed, self);
+	for (emitted const& result : out.Emitted())
+	{
+		Log(binding, result);
+	}
+	return out;
+}
+
+void Stepped(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+{
+	for (emitted const& result : Step(subject, self, seed, msg))
+	{
+		Log(subject.binding(), result);
+	}
+}
+
+// A rebind's exit commands are the old binding's, and its entry's the new one's.
+void Rebound(instance& subject, Binding const& binding, void const* self, uint64_t seed)
+{
+	counted_ptr<Binding const> const old = CountedWrap(&subject.binding());
+	for (emitted const& result : Rebind(subject, binding, self, seed))
+	{
+		Log(result.list == trigger::Exit ? *old : binding, result);
+	}
 }
 
 schema_document Parse(std::string_view yaml)
@@ -237,7 +284,7 @@ struct reload_world
 	}
 
 	// Prepared (from yaml, or the first document when empty) and bound, its
-	// sink tagged tag.
+	// commands logged tagged tag.
 	counted_ptr<Binding const> Bound(std::string_view tag, std::string_view yaml = {})
 	{
 		auto prepared = Prepared(yaml);
@@ -248,7 +295,12 @@ struct reload_world
 		}
 		auto bound = Bind(*prepared, TaggedHost(log, std::string(tag), integerThreat));
 		EXPECT_TRUE(bound.has_value()) << RefusalOf(bound);
-		return bound ? *bound : counted_ptr<Binding const>{};
+		if (!bound)
+		{
+			return {};
+		}
+		Targets()[bound->get()] = log_target{&log, std::string(tag)};
+		return *bound;
 	}
 };
 
@@ -355,7 +407,10 @@ std::unique_ptr<reload_world> Mover()
 
 }
 
-TEST(MachineRebind, ValuesStillValidAreKeptAndTheOldExitRunsBeforeTheNewEntry)
+// A rebind returns the old exit's commands, views into the old binding's
+// versions, and a host commonly drops the old binding straight after: the
+// instance keeps it until its next run.
+TEST(MachineRebind, TheOldExitsCommandsOutliveTheOldBindingUntilTheNextRun)
 {
 	auto w = Mover();
 	counted_ptr<Binding const> v1 = w->Bound("v1");
@@ -363,16 +418,35 @@ TEST(MachineRebind, ValuesStillValidAreKeptAndTheOldExitRunsBeforeTheNewEntry)
 	host_object host;
 	instance mover = CreateInstance(*v1, 3, 0, &host);
 	Step(mover, &host, 1, Message("to_b"));
+	counted_ptr<Binding const> v2 = w->Bound("v2", Quiet(kMover));
+	ASSERT_TRUE(v2);
+	std::span<emitted const> const results = Rebind(mover, *v2, &host, 2);
+	v1 = counted_ptr<Binding const>{};
+	ASSERT_EQ(results.size(), 2u);
+	EXPECT_EQ(results[0].list, trigger::Exit);
+	EXPECT_EQ(results[0].command, "((exit b))");
+	EXPECT_EQ(results[1].list, trigger::Entry);
+	EXPECT_EQ(results[1].command, "((enter b))");
+}
+
+TEST(MachineRebind, ValuesStillValidAreKeptAndTheOldExitRunsBeforeTheNewEntry)
+{
+	auto w = Mover();
+	counted_ptr<Binding const> v1 = w->Bound("v1");
+	ASSERT_TRUE(v1);
+	host_object host;
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_EQ(mover.State(0).i, Hash("b"));
 	EXPECT_EQ(mover.State(1).i, 2);
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(enter a)", "v1:(exit a)", "v1:(enter b)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((enter a))", "v1:((exit a))", "v1:((enter b))"}));
 
 	counted_ptr<Binding const> v2 = w->Bound("v2", Quiet(kMover));
 	ASSERT_TRUE(v2);
-	Rebind(mover, *v2, &host, 2);
+	Rebound(mover, *v2, &host, 2);
 	EXPECT_EQ(&mover.binding(), v2.get());
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(exit b)", "v2:(enter b)"}))
-		<< "the old code's exit, to the old sink, then the new code's entry, to the new sink";
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((exit b))", "v2:((enter b))"}))
+		<< "the old code's exit, then the new code's entry";
 	ASSERT_EQ(mover.StateCount(), 3u);
 	EXPECT_EQ(mover.State(0).i, Hash("b")) << "still a member";
 	EXPECT_EQ(mover.State(1).i, 20) << "the old exit's write, migrated: exit writes next, which becomes current";
@@ -385,8 +459,8 @@ TEST(MachineRebind, AMemberThatIsGoneResetsToTheNewInitialValue)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_c"));
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_c"));
 	ASSERT_EQ(mover.State(0).i, Hash("c"));
 	w->Take();
 
@@ -396,9 +470,9 @@ TEST(MachineRebind, AMemberThatIsGoneResetsToTheNewInitialValue)
 	std::string const v2yaml = Replace(Quiet(kMover), "members: [a, b, c], initial: a", "members: [a, b], initial: b");
 	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
 	ASSERT_TRUE(v2);
-	Rebind(mover, *v2, &host, 2);
+	Rebound(mover, *v2, &host, 2);
 	EXPECT_EQ(mover.State(0).i, Hash("b")) << "c is no member: the new initial value, not the first member";
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(exit c)", "v2:(enter b)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((exit c))", "v2:((enter b))"}));
 	EXPECT_EQ(mover.State(1).i, 30);
 }
 
@@ -408,8 +482,8 @@ TEST(MachineRebind, ColumnsMigrateByNameNotPositionAndAGoneColumnIsDropped)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_b"));
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_EQ(mover.State(2).d, 0.5);
 
 	std::string const v2yaml = Replace(Quiet(kMover),
@@ -421,7 +495,7 @@ TEST(MachineRebind, ColumnsMigrateByNameNotPositionAndAGoneColumnIsDropped)
 		"      - {name: mode,  type: hash, members: [a, b, c], initial: a}\n");
 	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
 	ASSERT_TRUE(v2);
-	Rebind(mover, *v2, &host, 2);
+	Rebound(mover, *v2, &host, 2);
 	ASSERT_EQ(mover.StateCount(), 3u) << "level is gone";
 	EXPECT_EQ(mover.State(0).d, 0.5) << "speed, kept by name";
 	EXPECT_EQ(mover.State(1).i, Hash("cross")) << "mood is new: its initial value";
@@ -434,15 +508,15 @@ TEST(MachineRebind, ATypeChangeResetsIncludingIntToDoubleAndBack)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_b"));
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_EQ(mover.State(1).i, 2);
 
 	std::string v2yaml = Replace(Quiet(kMover), "{name: level, type: int, initial: 5}", "{name: level, type: double, initial: 0.125}");
 	v2yaml = Replace(v2yaml, "{name: speed, type: double, initial: 1.5}", "{name: speed, type: int, initial: 7}");
 	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
 	ASSERT_TRUE(v2);
-	Rebind(mover, *v2, &host, 2);
+	Rebound(mover, *v2, &host, 2);
 	EXPECT_EQ(mover.State(0).i, Hash("b"));
 	EXPECT_EQ(mover.State(1).d, 0.125) << "an int that became a double is reset, not converted";
 	EXPECT_EQ(mover.State(2).i, 7) << "a double that became an int is reset, not truncated";
@@ -454,14 +528,14 @@ TEST(MachineRebind, AfterRebindOnlyTheNewEntryHasAnsweredAndNoMessageWasAbsorbed
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_b"));
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_TRUE(mover.Absorbed());
 	ASSERT_EQ(mover.Answer(trigger::Step, 0).outcome, clause_outcome::Answered);
 
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(mover, *v2, &host, 2);
+	Rebound(mover, *v2, &host, 2);
 	EXPECT_FALSE(mover.Absorbed());
 	EXPECT_EQ(mover.Answer(trigger::Step, 0).outcome, clause_outcome::NotRun);
 	EXPECT_EQ(mover.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun)
@@ -476,12 +550,12 @@ TEST(MachineRebind, RebindingOntoItsOwnBindingRestartsTheState)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_c"));
+	instance mover = Created(*v1, 3, 0, &host);
+	Stepped(mover, &host, 1, Message("to_c"));
 	w->Take();
 	v1 = counted_ptr<Binding const>{};   // the instance holds the only reference
-	Rebind(mover, mover.binding(), &host, 2);
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(exit c)", "v1:(enter c)"}));
+	Rebound(mover, mover.binding(), &host, 2);
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((exit c))", "v1:((enter c))"}));
 	EXPECT_EQ(mover.State(0).i, Hash("c"));
 	EXPECT_EQ(mover.State(1).i, 3);
 }
@@ -606,20 +680,20 @@ TEST(MachineRebind, AReloadCrossesNoEdgeAndSpendsNone)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.threat     = 0.1;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(anim graze)"}));
+	instance grazer = Created(*v1, 1, 0, &host);
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((anim graze))"}));
 
 	host.threat = 0.9;   // crossed since the last read, and no step has seen it
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 1);
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:(anim graze)"}))
+	Rebound(grazer, *v2, &host, 1);
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:((anim graze))"}))
 		<< "entering again is no movement of threat: the entry's edge does not hold";
 	EXPECT_EQ(grazer.State(0).i, Hash("graze"));
 
-	Step(grazer, &host, 2);
+	Stepped(grazer, &host, 2);
 	EXPECT_EQ(grazer.State(0).i, Hash("startled")) << "the crossing from 0.1 is still the next step's";
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:(anim startle)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:((anim startle))"}));
 }
 
 TEST(MachineRebind, TheOldExitReadsTheInputsAsTheyAreAndCrossesNoEdge)
@@ -632,14 +706,14 @@ TEST(MachineRebind, TheOldExitReadsTheInputsAsTheyAreAndCrossesNoEdge)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.threat     = 0.1;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
+	instance grazer = Created(*v1, 1, 0, &host);
 	w.Take();
 
 	host.threat = 0.9;
 	counted_ptr<Binding const> v2 = w.Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 1);
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v1:(exit graze high)", "v2:(anim graze)"}))
+	Rebound(grazer, *v2, &host, 1);
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v1:((exit graze high))", "v2:((anim graze))"}))
 		<< "exit reads threat now (high), not as the last step read it, and sees no crossing";
 }
 
@@ -651,14 +725,14 @@ TEST(MachineRebind, AnInputNewToTheMachineTakesTheValueReadAtRebindAsItsPrevious
 	host_object host;
 	host.threat     = 0.1;
 	host.alarm      = 0.1;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
+	instance grazer = Created(*v1, 1, 0, &host);
 	counted_ptr<Binding const> v2 = w->Bound("v2", Alarmed());
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 1);
+	Rebound(grazer, *v2, &host, 1);
 	w->Take();
 
 	host.alarm = 0.9;
-	Step(grazer, &host, 2);
+	Stepped(grazer, &host, 2);
 	EXPECT_EQ(grazer.State(0).i, Hash("startled"))
 		<< "alarm's previous value is the 0.1 read at rebind, as at creation; with none, nothing would cross";
 }
@@ -670,15 +744,15 @@ TEST(MachineRebind, AnInputThatNeverHadAValueTakesTheValueReadAtRebind)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.unwired    = true;   // threat has no previous value
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
+	instance grazer = Created(*v1, 1, 0, &host);
 	host.unwired = false;
 	host.threat  = 0.1;
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 1);
+	Rebound(grazer, *v2, &host, 1);
 
 	host.threat = 0.9;
-	Step(grazer, &host, 2);
+	Stepped(grazer, &host, 2);
 	EXPECT_EQ(grazer.State(0).i, Hash("startled"))
 		<< "with no value to keep, threat's previous is the 0.1 read at rebind, as for a new input";
 }
@@ -695,20 +769,20 @@ TEST(MachineRebind, AnInputWhoseTypeChangedIsANewInput)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.threat     = 0.9;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
+	instance grazer = Created(*v1, 1, 0, &host);
 	w->integerThreat = false;
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 1);
+	Rebound(grazer, *v2, &host, 1);
 
-	Step(grazer, &host, 2);
+	Stepped(grazer, &host, 2);
 	EXPECT_EQ(grazer.State(0).i, Hash("graze"))
 		<< "threat's previous is the 0.9 read at rebind, so it crosses nothing; the int's 90, read as the "
 		   "double's bits, would be a value near 0 and cross";
 	host.threat = 0.1;
-	Step(grazer, &host, 3);
+	Stepped(grazer, &host, 3);
 	host.threat = 0.9;
-	Step(grazer, &host, 4);
+	Stepped(grazer, &host, 4);
 	EXPECT_EQ(grazer.State(0).i, Hash("startled")) << "the machine still crosses an edge it should";
 }
 
@@ -748,14 +822,14 @@ TEST(MachineRebind, AMessageArgumentIsNoPreviousValueForAGetterInput)
 	ASSERT_TRUE(v1 && v2);
 	host_object host;
 	host.threat     = 0.1;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
+	instance grazer = Created(*v1, 1, 0, &host);
 	cell const argument[] = {cell::Real(0.9)};
-	Step(grazer, &host, 1, message{static_cast<uint32_t>(Hash("seen")), argument});
+	Stepped(grazer, &host, 1, message{static_cast<uint32_t>(Hash("seen")), argument});
 
-	Rebind(grazer, *v2, &host, 2);
+	Rebound(grazer, *v2, &host, 2);
 	w.Take();
 	host.threat = 0.9;
-	Step(grazer, &host, 3);
+	Stepped(grazer, &host, 3);
 	EXPECT_EQ(grazer.State(0).i, Hash("startled"))
 		<< "threat crosses from the 0.1 read at rebind, not from the 0.9 the last message carried";
 }
@@ -767,16 +841,16 @@ TEST(MachineRebind, TheReportOnceMemoryIsClearedForTheNewBinding)
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.unwired    = true;
-	instance grazer = CreateInstance(*v1, 1, 0, &host);
-	Step(grazer, &host, 1);
+	instance grazer = Created(*v1, 1, 0, &host);
+	Stepped(grazer, &host, 1);
 	EXPECT_EQ(w->log.reports, 1) << "the lost getter, once";
 
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
-	Rebind(grazer, *v2, &host, 2);
+	Rebound(grazer, *v2, &host, 2);
 	EXPECT_EQ(w->log.reports, 2) << "a new binding is a new set of failures: the getter is reported again";
-	Step(grazer, &host, 3);
-	Step(grazer, &host, 4);
+	Stepped(grazer, &host, 3);
+	Stepped(grazer, &host, 4);
 	EXPECT_EQ(w->log.reports, 2);
 }
 
@@ -818,18 +892,18 @@ machines:
 	counted_ptr<Binding const> v2 = w.Bound("v2");
 	ASSERT_TRUE(v1 && v2);
 	host_object host;
-	instance    healthy = CreateInstance(*v1, 1, 0, &host);
-	instance    broken  = CreateInstance(*v1, 2, 0, &host);
+	instance    healthy = Created(*v1, 1, 0, &host);
+	instance    broken  = Created(*v1, 2, 0, &host);
 	w.Take();
 
-	Rebind(healthy, *v2, &host, 1);
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v1:(abort a)", "v2:(hello)"})) << "the control: a condition that answers aborts";
+	Rebound(healthy, *v2, &host, 1);
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v1:((abort a))", "v2:((hello))"})) << "the control: a condition that answers aborts";
 	EXPECT_EQ(w.log.reports, 0);
 
 	host.broken = true;
-	Rebind(broken, *v2, &host, 2);
+	Rebound(broken, *v2, &host, 2);
 	EXPECT_EQ(broken.Answer(trigger::Entry, 0).outcome, clause_outcome::Answered);
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v2:(hello)"})) << "no abort is sent; the new entry still runs, to the new sink";
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"v2:((hello))"})) << "no abort is sent; the new entry still runs";
 	EXPECT_EQ(w.log.reported, (std::vector<std::string>{"v1"})) << "the failure reached the old binding's report, once";
 }
 
@@ -845,8 +919,8 @@ TEST(MachineRebind, StepsAfterARebindOntoAWiderMachineAllocateNothing)
 	counted_ptr<Binding const> wide   = startle->Bound("s");
 	ASSERT_TRUE(narrow && wide);
 	host_object host;
-	instance subject = CreateInstance(*narrow, 1, 0, &host);
-	Rebind(subject, *wide, &host, 1);
+	instance subject = Created(*narrow, 1, 0, &host);
+	Rebound(subject, *wide, &host, 1);
 	EXPECT_EQ(subject.State(0).i, Hash("graze")) << "mode's a is no member of the grazer's mode";
 	startle->Take();
 	startle->log.record = false;
@@ -855,7 +929,7 @@ TEST(MachineRebind, StepsAfterARebindOntoAWiderMachineAllocateNothing)
 	for (int i = 0; i < 40; ++i)
 	{
 		host.threat = (i % 4) * 0.3;
-		Step(subject, &host, uint64_t(i));
+		Stepped(subject, &host, uint64_t(i));
 	}
 	EXPECT_EQ(count.Count(), 0u);
 }
@@ -975,7 +1049,7 @@ counted_ptr<Binding const> Reload(reload_world& world, std::span<instance* const
 	}
 	for (instance* subject : instances)
 	{
-		Rebind(*subject, *fresh, &host, 9);
+		Rebound(*subject, *fresh, &host, 9);
 	}
 	return fresh;
 }
@@ -988,9 +1062,9 @@ TEST(GrazerReload, ARowsChangeIsStaleAndTheReloadRestartsTheStateWithTheNewRows)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance    first  = CreateInstance(*v1, 1, 0, &host);
-	instance    second = CreateInstance(*v1, 2, 0, &host);
-	Step(second, &host, 1);
+	instance    first  = Created(*v1, 1, 0, &host);
+	instance    second = Created(*v1, 2, 0, &host);
+	Stepped(second, &host, 1);
 	ASSERT_EQ(second.State(0).i, Hash("walk"));
 	w->Take();
 
@@ -1001,15 +1075,15 @@ TEST(GrazerReload, ARowsChangeIsStaleAndTheReloadRestartsTheStateWithTheNewRows)
 	counted_ptr<Binding const> v2 = Reload(*w, both, host, "v2");
 	ASSERT_TRUE(v2);
 	EXPECT_FALSE(v2->machine().Stale(w->store));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(abort stand)", "v2:(anim stand tall)", "v1:(abort walk)",
-		"v2:(anim walk)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort stand))", "v2:((anim stand tall))", "v1:((abort walk))",
+		"v2:((anim walk))"}));
 	v1 = counted_ptr<Binding const>{};   // the host drops the old binding; nothing refers to it now
 
 	host.food_near = 1;
 	host.energy    = 0.1;
-	Step(first, &host, 2);
+	Stepped(first, &host, 2);
 	EXPECT_EQ(first.State(0).i, Hash("eat"));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:(abort stand)", "v2:(anim chew), (message food \"eat\")"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:((abort stand))", "v2:((anim chew) (message food \"eat\"))"}));
 }
 
 TEST(GrazerReload, AddingTheMemberSleepKeepsTheMode)
@@ -1018,8 +1092,8 @@ TEST(GrazerReload, AddingTheMemberSleepKeepsTheMode)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance    grazer = CreateInstance(*v1, 1, 0, &host);
-	Step(grazer, &host, 1);
+	instance    grazer = Created(*v1, 1, 0, &host);
+	Stepped(grazer, &host, 1);
 	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
 	w->Take();
 
@@ -1034,11 +1108,11 @@ TEST(GrazerReload, AddingTheMemberSleepKeepsTheMode)
 	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2yaml);
 	ASSERT_TRUE(v2);
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "walk is still a member";
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(abort walk)", "v2:(anim walk)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort walk))", "v2:((anim walk))"}));
 
-	Step(grazer, &host, 2, Message("tired"));
+	Stepped(grazer, &host, 2, Message("tired"));
 	EXPECT_EQ(grazer.State(0).i, Hash("sleep"));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:(abort walk)", "v2:(anim sleep)"}));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:((abort walk))", "v2:((anim sleep))"}));
 }
 
 TEST(GrazerReload, DeletingPanicWhileAnInstancePanicsResetsItToIdleAndEntersIdle)
@@ -1047,8 +1121,8 @@ TEST(GrazerReload, DeletingPanicWhileAnInstancePanicsResetsItToIdleAndEntersIdle
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance    grazer = CreateInstance(*v1, 1, 0, &host);
-	Step(grazer, &host, 1, Message("scared"));
+	instance    grazer = Created(*v1, 1, 0, &host);
+	Stepped(grazer, &host, 1, Message("scared"));
 	ASSERT_EQ(grazer.State(0).i, Hash("panic"));
 	w->Take();
 
@@ -1067,7 +1141,7 @@ eat,   ,        0..1,   0,    eat
 	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2yaml);
 	ASSERT_TRUE(v2);
 	EXPECT_EQ(grazer.State(0).i, Hash("idle")) << "panic is no member: the initial value";
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(abort run)", "v2:(anim stand)"}))
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort run))", "v2:((anim stand))"}))
 		<< "the old exit aborts the run that the old entry started; the new entry starts idle's";
 }
 
@@ -1077,14 +1151,14 @@ TEST(GrazerReload, AFailedPrepareLeavesTheOldBindingRunning)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance    grazer = CreateInstance(*v1, 1, 0, &host);
+	instance    grazer = Created(*v1, 1, 0, &host);
 	w->Take();
 	// Deleting panic from the members without deleting the rows that move to
 	// it: the new machine is refused, and the host keeps stepping the old one.
 	std::string const v2yaml = Replace(kGrazer, "members: [idle, walk, eat, panic]", "members: [idle, walk, eat]");
 	auto refused = w->Prepared(v2yaml);
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "member")) << RefusalOf(refused);
-	Step(grazer, &host, 1, Message("scared"));
+	Stepped(grazer, &host, 1, Message("scared"));
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
 	EXPECT_EQ(&grazer.binding(), v1.get());
 }
@@ -1174,27 +1248,27 @@ TEST(MachineBridge, ABridgeIsStatesThatMoveAlongWhenTheClipEnds)
 	counted_ptr<Binding const> bound = w.Bound("w");
 	ASSERT_TRUE(bound);
 	host_object host;
-	instance    walker = CreateInstance(*bound, 1, 0, &host);
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:(anim stand)"}));
+	instance    walker = Created(*bound, 1, 0, &host);
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:((anim stand))"}));
 
-	Step(walker, &host, 1, Message("go"));
+	Stepped(walker, &host, 1, Message("go"));
 	EXPECT_EQ(walker.State(0).i, Hash("bridge_c"));
 	EXPECT_EQ(walker.State(1).i, Hash("walk")) << "the transition wrote where the bridge leads";
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:(anim rise_c)"}));
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:((anim rise_c))"}));
 
-	Step(walker, &host, 2);
+	Stepped(walker, &host, 2);
 	EXPECT_EQ(walker.State(0).i, Hash("bridge_c")) << "the clip plays: the bridge holds";
 	EXPECT_TRUE(w.Take().empty());
 
-	char const* const expected[][2] = {{"bridge_d", "w:(anim rise_d)"}, {"bridge_e", "w:(anim rise_e)"}, {"walk", "w:(anim walk)"}};
+	char const* const expected[][2] = {{"bridge_d", "w:((anim rise_d))"}, {"bridge_e", "w:((anim rise_e))"}, {"walk", "w:((anim walk))"}};
 	for (auto const& [mode, command] : expected)
 	{
-		Step(walker, &host, 3, Message("clip_done"));
+		Stepped(walker, &host, 3, Message("clip_done"));
 		EXPECT_EQ(walker.State(0).i, Hash(mode));
 		EXPECT_TRUE(walker.Absorbed());
 		EXPECT_EQ(w.Take(), (std::vector<std::string>{command}));
 	}
-	Step(walker, &host, 4, Message("clip_done"));
+	Stepped(walker, &host, 4, Message("clip_done"));
 	EXPECT_EQ(walker.State(0).i, Hash("walk")) << "a stray clip_done falls through to walk's blank run";
 	EXPECT_FALSE(walker.Absorbed());
 }
@@ -1218,20 +1292,20 @@ bridge_e, (start h)
 	counted_ptr<Binding const> bound = w.Bound("w");
 	ASSERT_TRUE(bound);
 	host_object host;
-	instance    walker = CreateInstance(*bound, 1, 0, &host);
+	instance    walker = Created(*bound, 1, 0, &host);
 	w.Take();
 
-	Step(walker, &host, 1, Message("go"));
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:(start f)"}));
-	Step(walker, &host, 2);
+	Stepped(walker, &host, 1, Message("go"));
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:((start f))"}));
+	Stepped(walker, &host, 2);
 	EXPECT_TRUE(w.Take().empty()) << "f runs: the chain holds";
-	Step(walker, &host, 3, Message("returned"));
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:(start g)"}));
-	Step(walker, &host, 4);
+	Stepped(walker, &host, 3, Message("returned"));
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:((start g))"}));
+	Stepped(walker, &host, 4);
 	EXPECT_EQ(walker.State(0).i, Hash("bridge_d")) << "g runs: the chain holds";
-	Step(walker, &host, 5, Message("returned"));
+	Stepped(walker, &host, 5, Message("returned"));
 	EXPECT_EQ(walker.State(0).i, Hash("walk"));
-	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:(done)"}));
+	EXPECT_EQ(w.Take(), (std::vector<std::string>{"w:((done))"}));
 }
 
 TEST(MachineBridge, ABridgeStateWithNoRowsIsRefusedByTheMachinesProof)
@@ -1332,22 +1406,22 @@ TEST(StateFunction, EntryStartsItTheMachineHoldsUntilItReturnsAndExitAbortsIt)
 	counted_ptr<Binding const> bound = w->Bound("f");
 	ASSERT_TRUE(bound);
 	host_object host;
-	instance    forager = CreateInstance(*bound, 1, 0, &host);
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:(start stand_fn)"}));
+	instance    forager = Created(*bound, 1, 0, &host);
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:((start stand_fn))"}));
 
-	Step(forager, &host, 1, Message("hungry"));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:(abort stand_fn)", "f:(start graze_fn)"}));
+	Stepped(forager, &host, 1, Message("hungry"));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:((abort stand_fn))", "f:((start graze_fn))"}));
 	for (int i = 0; i < 3; ++i)
 	{
-		Step(forager, &host, 2);
+		Stepped(forager, &host, 2);
 		EXPECT_EQ(forager.State(0).i, Hash("graze")) << "graze_fn runs; the state holds";
 	}
 	EXPECT_TRUE(w->Take().empty());
 
-	Step(forager, &host, 3, Message("fn_returned"));
+	Stepped(forager, &host, 3, Message("fn_returned"));
 	EXPECT_EQ(forager.State(0).i, Hash("idle"));
 	EXPECT_TRUE(forager.Absorbed());
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:(abort graze_fn)", "f:(start stand_fn)"}))
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:((abort graze_fn))", "f:((start stand_fn))"}))
 		<< "leaving aborts it whether or not it returned; for one that returned the host has nothing to abort";
 }
 
@@ -1357,8 +1431,8 @@ TEST(StateFunction, AReloadAbortsItWithTheOldCodeAndStartsItWithTheNew)
 	counted_ptr<Binding const> v1 = w->Bound("v1");
 	ASSERT_TRUE(v1);
 	host_object host;
-	instance    forager = CreateInstance(*v1, 1, 0, &host);
-	Step(forager, &host, 1, Message("hungry"));
+	instance    forager = Created(*v1, 1, 0, &host);
+	Stepped(forager, &host, 1, Message("hungry"));
 	w->Take();
 
 	w->Load(1, Replace(kForagerEnterRows, "(start graze_fn)", "(start graze_fn_v2)"));
@@ -1368,9 +1442,9 @@ TEST(StateFunction, AReloadAbortsItWithTheOldCodeAndStartsItWithTheNew)
 	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2");
 	ASSERT_TRUE(v2);
 	EXPECT_EQ(forager.State(0).i, Hash("graze"));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:(abort graze_fn)", "v2:(start graze_fn_v2)"}))
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort graze_fn))", "v2:((start graze_fn_v2))"}))
 		<< "the abort names the function the old code started; the new code starts its own";
 
-	Step(forager, &host, 2, Message("fn_returned"));
-	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:(abort graze_fn_v2)", "v2:(start stand_fn)"}));
+	Stepped(forager, &host, 2, Message("fn_returned"));
+	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v2:((abort graze_fn_v2))", "v2:((start stand_fn))"}));
 }

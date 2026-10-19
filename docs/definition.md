@@ -64,7 +64,7 @@ the feature is wrong, not the rule.
    also know by reading it.
 3. **Isolation.** A step touches only its own instance. It reads inputs only through names the
    host resolves and writes only its own state. Everything else leaves as opaque records
-   (commands, messages) handed to a host sink. So steps for different instances may run in
+   (commands, messages) returned to the host that ran the step. So steps for different instances may run in
    parallel.
 4. **Determinism.** Given the same definition, inputs and seed, a step produces the same
    state and records. Randomness is a counter-based draw from a seed the host supplies, salted
@@ -140,17 +140,34 @@ the feature is wrong, not the rule.
   kept across steps becomes visible at the swap.
 - **Suffix:** N trailing cells that are not declared columns, as in the bridge table's C, D, E.
   It is what the row does when picked: **a command, which is enqueued, not written.** A
-  command is not a value. The suffix *as a whole* is the command: `(C, D, E)` is passed, as an
-  s-expression, to whoever consumes it, and that consumer interprets it. Tabular does not.
+  command is not a value. The suffix *as a whole* is the command: `C D E` is passed, as one
+  s-expression list `(C D E)`, to whoever consumes it, and that consumer interprets it. Tabular
+  does not.
   Bridge steps are such a command.
   Built (2026-10-18): a table declares `suffix: <name>` (YAML) or `create_table::suffix`
   (builder), which adds one Command column of that name after its declared columns, so the
-  store and the picks see an ordinary command column. In CSV the suffix is the row's cells
-  after the declared ones, each read as any cell is (quoted or trimmed), empty ones dropped. The header names
+  store and the picks see an ordinary command column. **Commands as lists** (built
+  2026-10-19, commands-and-messages spec Part 2). In CSV the suffix is the row's cells after the
+  declared ones, each read as any cell is (quoted or trimmed). Cell boundaries mean nothing: the
+  cells are joined with one space and read as a sequence of s-expressions, so `(emit sound)` in
+  one cell and `(emit` | `sound)` across two read the same, and Tabular wraps the sequence into
+  the one list the store keeps: `((emit sound) (play particle) (message target hit 3))`. No
+  suffix cells (or only empty ones) is `()`, "do nothing", and is not refused. A top-level item
+  is a list, which names what it does by its head, or a single word (`hard-land`, `idle`,
+  `:lock`), which the consumer reads (the animation consumer: a clip, or a directive to
+  itself). Outside an open parenthesis, a cell of more than one item that does not start with
+  `(` is one command written without its parentheses and is wrapped: `message this hard-land`
+  reads as `(message this hard-land)`. A string is one item, so a cell holding just a string is
+  not wrapped; a cell that is not whole by itself (an unclosed paren or string) is left as
+  written, for the shape check to refuse. The store checks every command's shape, whichever
+  surface wrote it, and nothing more: lexically, parentheses, double-quoted strings (`\"` and
+  `\\` escape inside one; a backslash escapes whatever follows it) and atoms. A `)` that closes
+  nothing, a `(` or a string never closed, or an empty command is refused, naming the line in
+  CSV. The list is built once, at load, so a step never parses or builds text. A builder caller
+  writes the list itself, as the store keeps it. The header names
   the declared columns and ends with the suffix column's name (the reader needs that last
-  header cell to know where the rest of each line starts); a header that names anything else
-  extra, or puts the suffix column anywhere but last, is refused. A row with no suffix text is
-  refused naming its line. A grid or a pivoted table cannot have a suffix
+  header cell to know where the suffix cells start); a header that names anything else
+  extra, or puts the suffix column anywhere but last, is refused. A grid or a pivoted table cannot have a suffix
   (a pivot cell holds one value), and a pivoted load into a suffix table is refused because the
   table has no pivot.
 
@@ -395,8 +412,16 @@ the binding is dropped. `Bind` refuses, naming the machine and the input, when `
 missing (a machine with no inputs needs none), refuses an input, or returns a getter with no
 `read`; it adopts every getter `resolve` returns, so a refusal releases those already
 returned. Message inputs (below) are filled by `Step`, not by a getter, and are never
-resolved. `host_binding::sink(instance, table, command)` takes every emitted command (P12);
-`Bind` refuses a machine with an emitting clause when it is missing, naming the clause.
+resolved. Emitted commands are not handed to the host but returned (P12; built 2026-10-19,
+commands-and-messages spec Part 2): `Step` and `Rebind` return a `std::span<emitted const>`,
+and `instance::Emitted()` is the same span for the last run, which is how creation's commands
+are read. An `emitted` is `{list, table, command}`: the list the clause is in (so a host tells
+an exit's abort from an entry's start), its table, and the row's command, a view into the
+version the binding that ran the clause holds. The span is valid until the instance next runs,
+is moved or destroyed; a rebind's exit commands view the old binding's versions, so the
+instance keeps the old binding until its next run. The buffer behind it holds one entry per
+clause that can emit, across every list, sized when the instance is created (and again by a
+rebind), so a step that emits allocates nothing and makes no indirect call per command.
 `host_binding::report(instance, table, row, error)` takes a failure once (P15); it is optional,
 and without it holds still hold, silently. A binding keeps its `Machine`, and so the versions it was proved against: a store change never
 reaches a running binding. The host asks `binding.machine().Stale(store)` (an instance gives
@@ -413,7 +438,7 @@ first occurrence of a failure the instance reports (below), whose report carries
 error from the step's one asking. The interpreted picks, and the report, are the callers that
 name the table and row. Tests count the global `operator new` calls of steps that answer,
 raise in a script condition, see NaN, lose a getter, find no run, run an or → best → weighted
-chain, emit to a sink, take a message (absorbed or falling through), run exit, cross edges, and repeat a
+chain, emit, take a message (absorbed or falling through), run exit, cross edges, and repeat a
 reported failure (a raise, a NaN, a key with no run and a lost getter, each with `report`
 set): zero, after a first round in which each report builds its error once.
 A host's own failure message longer than the small-string size allocates on the host's side,
@@ -467,10 +492,10 @@ with every state column at its initial value, after running the `create` list an
    exit: nothing is left.
 6. Next becomes current (the two vectors are swapped).
 7. **Emits.** Every clause of the step, exit and entry lists (in that order, each in clause
-   order) that answered and has an `emit` hands its row's command to the sink, a view into the
-   version the binding holds. It happens after the swap, so a sink that reads the instance
-   sees the step's state as current. A held clause emits nothing. Creation emits the create
-   list, then entry.
+   order) that answered and has an `emit` adds its row's command to the step's results, a view
+   into the version the binding holds; the step returns them, with the step's state already
+   current. A held clause emits nothing. Creation's results are the create list's, then
+   entry's.
 
 **Reports (P15).** A failure reaches `report` once per instance: a getter failure once per
 input (`table` is `kNoTable`, `row` `kNoRow`, the error the getter's, naming the machine and
@@ -504,13 +529,13 @@ message allocates nothing: the arguments are a span the host owns for the call.
 
 **Reload (P14).** `Rebind(instance, binding, self, seed)` moves an instance onto a new binding. It
 is a step that enters a state with migration where the step list would be, and it uses the step's
-own pieces (the input read, the exit and entry lists, the sink), so a reload has no list or pick
+own pieces (the input read, the exit and entry lists, the results), so a reload has no list or pick
 path of its own:
 
 1. **Leaving, under the old binding.** Every input is read once with the old getters (no message),
-   next is set to a copy of current, the old `exit` list runs against current, next becomes
-   current, and the old binding's sink gets what exit emitted. So the host hears the abort of
-   what a state started (R6) from the code that started it, before the new code starts it again.
+   next is set to a copy of current, the old `exit` list runs against current, and next becomes
+   current. What exit emitted comes first in the results, so the host hears the abort of what a
+   state started (R6) from the code that started it, before the new code starts it again.
 2. **Migration by name**, from the state exit left (an exit's int or double write is kept like a
    step's). Each state column of the new machine takes the old column of the same name. The value
    is kept when the type is the same and, for a hash, the value is still a member; otherwise the
@@ -520,8 +545,8 @@ path of its own:
    tested), the report-once memory is cleared, since a new binding is a new set of clauses and
    rows, and every clause answers `NotRun`.
 3. **Entering again, under the new binding.** Every input is read with the new getters, the new
-   `entry` list runs against the migrated state, next becomes current, and the new sink gets what
-   entry emitted. The `create` list does not run: the instance is not new. Afterwards only the new
+   `entry` list runs against the migrated state, next becomes current, and what entry emitted
+   follows exit's in the results. The `create` list does not run: the instance is not new. Afterwards only the new
    entry clauses have answered, and `Absorbed()` is false.
 
 A reload is no movement of an input, so it **crosses no edge and spends none**. The exit and entry
@@ -581,7 +606,7 @@ NaN, over-wide flags and scripts that fail:
 - the other lists, on a machine whose lists hold every clause kind (`ListParity`): creation's
   create (a weighted draw) and entry lists; a step's exit, reading the state left, with a band,
   a script and an emit, and its entry chain (or → best keyed by its answer → weighted); and
-  `Rebind`'s old exit, against the old version and to the old sink, and new entry, against the
+  `Rebind`'s old exit, against the old version and tagged with the old binding, and new entry, against the
   new versions on the migrated state, over hundreds of reloads that change the rows both read.
 
 What parity tests is `Step`'s own code: the tuple search, the laid-out groups, cells and lists,
@@ -664,8 +689,8 @@ and its instances rebound, which runs the old exit and the new entry: see Reload
 |---|---|---|
 | Definition | table section of a bundle | tables, machines (`create_machine`), snippet text; immutable |
 | Machine | definition × the table versions it was proved against | the proof's layout (the compiled pick) and those versions; immutable, `Stale` when a table it read changed |
-| Binding | machine × host object type | the machine, one resolved input getter per input, the sink and report |
-| Instance | object | state vector, each input's previous value (the edges' history) |
+| Binding | machine × host object type | the machine, one resolved input getter per input, the report |
+| Instance | object | state vector, each input's previous value (the edges' history), the last run's results |
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them (`owner_handle`) |
 
 **Owner handles (P1).** An `owner_handle` (`tabular/owner_handle.h`) holds a store
@@ -783,8 +808,9 @@ The host supplies:
   function passed to it. That is the script engine's problem, not Tabular's.
 - **Input resolution** for every name a table reads that Tabular does not own (built: a
   machine's inputs, through `host_binding::resolve` once per input at `Bind`; see Machines).
-- **A sink** for emitted commands (`host_binding::sink`, required when the machine emits) and,
-  optionally, **a report** for failures (`host_binding::report`); see Machines.
+- **Running the commands** each `Step`, `CreateInstance` and `Rebind` returns (Tabular never
+  interprets one) and, optionally, **a report** for failures (`host_binding::report`); see
+  Machines.
 - **The message** a step is given, if any (`Step`'s `message`).
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
 - **Running state functions:** start a named function for an instance on the command an entry
@@ -836,8 +862,8 @@ dropped or rebuilt, a running state function is aborted and its state is entered
 restarts with the current code. Whatever it had already done stays done. A function for which
 that matters must be safe to restart, or its state's entry rows must decide what happens.
 Built as a consequence of `Rebind`: it runs the old binding's exit list, whose command aborts the
-function the old code started, to the old sink, and then the new binding's entry list, whose
-command starts the function as the new code names it, to the new sink.
+function the old code started, and then the new binding's entry list, whose command starts the
+function as the new code names it; both come back from the one `Rebind` call, exit's first.
 
 ## Budgets
 
@@ -875,7 +901,7 @@ only the operation it names: a build repeat frees the previous repeat's workload
 clock starts, and an insert repeat's rows are retracted (to put the table back for the next) on
 a clock of their own, which is the retract row. Memory is
 glibc's heap in use (`mallinfo2`) before and after making many objects, malloc's overhead
-included, plus `sizeof(instance)` (288 bytes) for an instance; Windows' heap differs only in its
+included, plus `sizeof(instance)` (328 bytes, 40 of them the last run's results and the binding a rebind left) for an instance; Windows' heap differs only in its
 overhead. **Margin:** times 2×, except the grazer's whole build, which varies most (0.2 ms of
 allocation-bound parsing; its runs here have reached 536 µs), held to about 2.2× that slowest
 run; bytes 1.25×; rounded up.
@@ -896,12 +922,12 @@ run 1,000 instances × 50 ticks, inputs varying per instance and tick from a tab
 | build a definition: brain machine | 204,200 bytes | 260000 bytes |
 | bind: grazer | 0.89 to 0.91 us | 1.8 us |
 | bind: brain | 71 to 73 us | 150 us |
-| bind: grazer binding | 1,010 bytes | 1300 bytes |
+| bind: grazer binding | 996 bytes | 1300 bytes |
 | bind: brain binding | 37,100 bytes | 47000 bytes |
 | create an instance: grazer | 0.43 to 0.45 us | 0.9 us |
 | create an instance: brain | 0.40 to 0.42 us | 0.9 us |
-| create an instance: grazer instance | 656 bytes | 820 bytes |
-| create an instance: brain instance | 1,100 bytes | 1400 bytes |
+| create an instance: grazer instance | 728 bytes | 820 bytes |
+| create an instance: brain instance | 1,140 bytes | 1400 bytes |
 | step: per row evaluated | 124 to 126 ns | 250 ns |
 | step: grazer | 251 to 275 ns | 550 ns |
 | relation insert: mutable | 11.3 to 12.3 us | 25 us |
@@ -966,7 +992,7 @@ changed through the table's generation counter (see Generation).
 3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
    table. The header names the columns in any order, every non-condition column exactly once.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
-   an int is signed decimal; a double is read whole; a command is the text verbatim. A cell
+   an int is signed decimal; a double is read whole; a declared command column's cell is its text verbatim (shape-checked), a suffix's cells one list (see Suffix). A cell
    must parse whole, and an empty cell is refused in every column type, except a blank
    condition cell, which is no condition. A condition cell is handed, as text, to a
    function the caller passes to the loader (`csv_rows::condition`, returning
@@ -1057,7 +1083,7 @@ open there, not here:
   "doable"), and how `random(...)` inside a command is drawn (R9);
 - a delayed message that arrives after its state ended and was re-entered: the instance's
   entry count captured by `:delay`, and `message_stale` an input flag the host supplies (R3);
-- mutable-table writes from s-expressions: the sink's consumer turns a command into
+- mutable-table writes from s-expressions: the host, running a returned command, turns it into
   `insert_row`;
 - script reading a machine's state by name (`instance::State` reads by index);
 - a bounded repeat (a head nod 1-4 times) is a command the host runs, such as
