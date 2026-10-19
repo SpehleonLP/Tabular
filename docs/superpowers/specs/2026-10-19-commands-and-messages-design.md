@@ -389,9 +389,9 @@ set of instant effects. The bridge row above:
    authoritative and changes instantly.
 2. The runner starts the list. `(message this hard-land)` takes no time: it goes into the
    object's Mailbox now.
-3. `:lock` tells the runner not to let anything interrupt the list.
+3. `:lock` tells the host not to step this machine for now, so its tables don't run.
 4. `hard-land` plays a clip, which takes seconds.
-5. `:unlock` allows interruption again.
+5. `:unlock` lets the host step the machine again.
 6. `stand-from-hard-land` plays, then `idle`, which is the clip the state wanted all along.
 
 Say the player jumps during `stand-from-hard-land`:
@@ -405,36 +405,47 @@ Some items take zero ticks and some take seconds; some are directives to the run
 an interruption cancels the remainder. None of this is Tabular's business. Tabular hands over
 the list, and the runner does the rest.
 
-**Rules this gives the host** (these were questions 1 and 2):
+**Rules this gives the host** (owner, 2026-10-19):
 
 - **A message a command sends goes into the object's Mailbox,** and the engine's ordinary
   delivery rules decide when it arrives. So the craft bench's `basket_filled` needs no Tabular
   rule. `Step` returns its commands to the caller, which runs them.
+- **A message an instance's own command sends never comes back into that instance's machine.**
+  In the hard-land example the state is already `idle` when `hard-land` arrives, and the
+  transition that sent it must not run the tables again. Mechanically this is the host's to
+  solve, for instance by tagging the message with the instance that sent it and skipping that
+  machine when routing. Tabular needs nothing.
 - **The runner chases the machine's current state.** The state changes instantly. The runner
   works toward it through the list, and when the state changes again it cancels the remainder
-  and bridges from wherever it is, or cuts if no bridge row exists. *Proposed:* under `:lock`
-  the runner defers that re-plan until `:unlock`, then heads for whatever the state is by then.
+  and bridges from wherever it is, or cuts if no bridge row exists.
+- **`:lock` and `:unlock` are commands to the host: "don't step this machine right now" and
+  "step it again".** This is speculative (the owner came up with it on the spot) and the host's
+  business entirely. While locked the machine's state doesn't change, so the runner has nothing
+  to chase, and on unlock the next step decides what happens from there.
 - **Leaving from any state means the host ends the instance.** Closing isn't a transition, so
   no exit row is needed for every state. Tabular needs one small API for it: run the exit list
   and return its commands. `Rebind` already does this internally.
 
+## Authoring note: priority is bit order
+
+The craft bench's Back does three things in priority order: close the sort panel, else back
+out of the basket, else leave. As rows:
+
+```csv
+page,       modal, kind, can,       next_page,  next_modal, command
+experiment, none,  back, sort_open, experiment, none,       (toggle-sort)
+experiment, none,  back, can_back,  experiment, none,       (basket-back)
+experiment, none,  back, ,          experiment, none,       (close)
+```
+
+With both flags set, both flagged rows pass the first test (all their flags are in the input),
+so the second test decides: the larger `R & F` as an integer, so the higher bit wins. The
+script's order holds exactly when `sort_open` is a higher bit than `can_back`. A flags
+input's bits are assigned by whoever produces it (the host for a wire, header order for a
+pivoted table), so whoever assigns them assigns the priority. Nothing needs to change in
+Tabular.
+
 ## Open questions
 
-These need an owner ruling before Part 3 is finished.
-
-1. **Does a command's message come back into its own machine?** In the hard-land example, the
-   state is already `idle` when `hard-land` arrives in the Mailbox, and the owner wants it not
-   to make the tables run again "because it understands the table transition caused it". The
-   candidates:
-   - the host doesn't route a message an instance's own command sent back into that instance's
-     machine (it goes to the script and other handlers);
-   - it does route it, and the machine has no row for it, so it falls through to the blank row
-     and nothing changes;
-   - the message carries its origin, and a table keys on that.
-2. **What a state change does during `:lock`.** Proposed above: the runner defers the re-plan
-   until `:unlock`. Alternatives are dropping the change (the state and the animation then
-   disagree) or queueing every change in order.
-3. **Flag ranking against authored priority.** On Back, the bench closes the sort panel first,
-   then backs out of the basket, then leaves. With `sort_open` and `can_back` both set, check
-   that the flag ranking (full match, then `R & F`, then `R`) gives that order. If it doesn't,
-   the host sets `can_back` only while sort is closed.
+None remain from the craft bench. Messages, the command runner and hierarchy are decided as
+above; `:lock` is marked speculative.
