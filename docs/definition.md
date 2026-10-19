@@ -2,7 +2,11 @@
 
 This is the contract. Every change to Tabular is reviewed against it: does the change keep
 these promises? Changing the contract is a deliberate edit to this file, made before the
-code that depends on it. The reasoning behind each line is in `docs/project-notes/`.
+code that depends on it. The reasoning behind each line is in `docs/project-notes/`. Ruling and
+premise numbers (R1–R12, P1–P17), "the spec" and its worked example (§4) refer to
+`docs/superpowers/landed/specs/2026-10-18-tabular-remainder-design.md`, which also lists what
+was built per premise and the decisions still open for the owner. `docs/feature-checklist.md`
+maps every feature to the tests that hold it.
 
 ## What Tabular is
 
@@ -65,7 +69,7 @@ the feature is wrong, not the rule.
 4. **Determinism.** Given the same definition, inputs and seed, a step produces the same
    state and records. Randomness is a counter-based draw from a seed the host supplies, salted
    per draw site, with no stored generator state. Built: `Draw(seed, site)` in
-   `tabular/draw.h`, a pure hash (Support's pcg3d, two rounds), and `DrawUnit` to turn a
+   `tabular/draw.h`, a pure hash (three rounds of Support's pcg3d), and `DrawUnit` to turn a
    draw into [0, 1).
 5. **Replaceability.** A definition is immutable once built. Hot reload builds a new one, binds
    it and migrates instance state by name. A failed rebuild leaves the old one running.
@@ -104,7 +108,7 @@ the feature is wrong, not the rule.
 | Layer | Contents |
 |---|---|
 | Relations | rows, key columns, match operators, pick policies; queries |
-| Machines | a state vector, transition tables, entry tables, bridges, state-function and function-chain tables, edges |
+| Machines | a state vector, inputs and four clause lists (create, entry, step, exit) over picked tables; transition and entry tables are clauses; bridges, state functions and function chains are states and clauses (R5(b), R6); edges |
 
 **A row (owner, 2026-10-12).**
 
@@ -274,7 +278,7 @@ Notes are ordered by table index, then key, whichever change made them. A refuse
 leaves it empty: the refusal says why. One list of one note type (table, status, key) is all
 a caller needs to find what to fix or retract; there is no callback.
 
-**Machines (built 2026-10-18: definition, `Prepare`, `Bind`, instances and `Step`).** A machine is one query, prepared
+**Machines.** A machine is one query, prepared
 once. `create_machine` (`tabular/machine.h`) is a command struct like `create_table`; YAML
 writes it under `machines:` beside `tables:`, read by `DocumentFromYaml` (`SchemaFromYaml`
 refuses a document with machines rather than drop them). It holds:
@@ -341,8 +345,8 @@ output (the OR of any subset of its rows' flags may come out, a set exponential 
 it is not enumerated). An or or a weighted table declares no key domains, so such a key is over
 the table's rows. Keys declared `rows` then contribute the sub-tuples the rows name, crossed
 with the other keys, as in a load. **An input-bound key is proved only over the table's
-declared domain**: an input value with no run at run time is `Step`'s business (slice 3b), not
-something `Prepare` can rule out.
+declared domain**: an input value with no run at run time holds the clause in `Step` (see
+Holds), not something `Prepare` can rule out.
 
 What the domain must satisfy depends on the table's pick:
 
@@ -561,7 +565,7 @@ reload that keeps the names and places keeps the sites; the host varies the seed
 and step. The picked row of every clause stays readable through `Answer`, which is where an
 `emit` clause's command comes from.
 
-**Parity (slice 7): the interpreted picks are the oracle** for every list a machine runs.
+**Parity: the interpreted picks are the oracle** for every list a machine runs.
 Randomized tests compare every clause's answer, and the state it leaves, with `PickBest`, `PickOr`
 and `PickWeighted` on the version the binding holds, through cuts, the range's ends and beyond,
 NaN, over-wide flags and scripts that fail:
@@ -591,7 +595,7 @@ the OR `PickOr.OverlappingBandsOrTogether`, the crossing
 `EdgePick.PickBestHoldsAnEdgeOnlyWhenTheInputCrossedIntoItsBand`, the fall-through
 `MachineMessage.PickBestFallsThroughToTheBlankRunToo`).
 
-**Provenance (P16, built 2026-10-19; debug builds).** With `TABULAR_PROVENANCE` set (the engine
+**Provenance (P16; debug builds).** With `TABULAR_PROVENANCE` set (the engine
 sets it to 1 in the Debug config and 0 in the release family, in a header it generates,
 `generated/tabular_build_config.h`, that only `tabular/instance.h` includes; a build that
 defines it itself keeps its own, and one with neither has it off), each
@@ -656,12 +660,13 @@ and its instances rebound, which runs the old exit and the new entry: see Reload
 
 | Object | One per | Holds |
 |---|---|---|
-| Definition | table section of a bundle | tables, machines, snippet text; immutable |
-| Binding | definition × host object type | compiled closures, resolved input slots, state layout |
+| Definition | table section of a bundle | tables, machines (`create_machine`), snippet text; immutable |
+| Machine | definition × the table versions it was proved against | the proof's layout (the compiled pick) and those versions; immutable, `Stale` when a table it read changed |
+| Binding | machine × host object type | the machine, one resolved input getter per input, the sink and report |
 | Instance | object | state vector, each input's previous value (the edges' history) |
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them (`owner_handle`) |
 
-**Owner handles (built 2026-10-18).** An `owner_handle` (`tabular/owner_handle.h`) holds a store
+**Owner handles (P1).** An `owner_handle` (`tabular/owner_handle.h`) holds a store
 and an owner id; dropping it, or calling `Release`, retracts every row the owner holds, and a
 moved-from handle retracts nothing. It retracts from every table, read-only tables and grids
 included, because "RAII handles retract them" says nothing of how a row arrived and the handle
@@ -669,7 +674,7 @@ is for crash recovery: loaded rows that outlive their contributor have no one le
 retract them. A reload does not use a handle; it loads again. Retract is never refused, so a
 destructor always finishes.
 
-**Generation (built 2026-10-18).** Each table has `relation_store::Generation(table)`, a counter
+**Generation (P2).** Each table has `relation_store::Generation(table)`, a counter
 that rises on every change a reader can see (an accepted insert, a published load, a retract
 that removed rows, a grid load) and never otherwise (a refused change, a retract of an owner
 with no rows there, a load of no rows for an owner with none). "The rows changed" is the
@@ -691,7 +696,7 @@ clamp has no place for NaN (owner, 2026-10-18).
 in every table whatever its input's range, checked where the cell enters a table. The range
 check then only tests containment.
 
-**Edges (P13, built 2026-10-18).** A band column marked `edge` (`edge: true` in YAML,
+**Edges (P13).** A band column marked `edge` (`edge: true` in YAML,
 `add_column::edge` in the builder) holds when its input **crossed into** the band between its
 previous value and this one, not when the input is in it. Both values are clamped as a band
 input is. With the band `[lo, hi)`, previous `p` and current `x`, the edge holds when `p < lo`
@@ -763,8 +768,9 @@ The host supplies:
   optionally, **a report** for failures (`host_binding::report`); see Machines.
 - **The message** a step is given, if any (`Step`'s `message`).
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
-- **Running state functions:** start a named function for an instance, report when it returns,
-  and abort it.
+- **Running state functions:** start a named function for an instance on the command an entry
+  clause emits, abort it on an exit clause's command, and send the message that says it
+  returned (see State functions).
 
 Closures are `{function, data, release}`. A condition's `release` is called when no version
 holds its row; an input getter's (the same shape) when its binding is dropped.
@@ -815,8 +821,7 @@ command starts the function as the new code names it, to the new sink.
 
 ## Budgets
 
-Each cost has a number and a benchmark that fails when the number is broken (P17, built
-2026-10-19). The numbers are measured; each budget is the measurement with a margin, so the
+Each cost has a number and a benchmark that fails when the number is broken (P17). The numbers are measured; each budget is the measurement with a margin, so the
 gate catches a regression. Whether a number is small enough for the runtime budget (~400 MHz,
 ~150 MB for the slice, about 20× that load for the game) is a separate judgement: see the last paragraph of this section.
 
@@ -972,27 +977,49 @@ changed through the table's generation counter (see Generation).
   table's key domain comes from, so a refused insert into it is never published rather than
   undone. A retract stays unchecked.
 
-**A machine is a SELECT** over read-only tables, checked to always produce exactly one row,
-then compiled to run fast (possibly to machine code; undecided). Immutability is what makes
-that check and that compilation hold.
+**A machine is a SELECT** over immutable table versions, checked to always produce exactly one
+row, then compiled to run fast: the compiled form is `Prepare`'s layout, which `Step` runs.
+Whether to compile further, to machine code, is undecided (see Budgets). Immutability is what
+makes that check and that compilation hold.
 
 ## Undecided
 
-These are open, not missing. Each is decided by editing this file.
+These are open, not missing. Each is decided by editing this file. The spec's Open owner
+decisions lists them with the provisional rulings the built code follows, which the owner may
+overrule the same way.
 
-- Whether a command's consumer compiles its s-expression at bind time (as the host compiles
-  snippets), so a step enqueues a prebuilt record rather than text.
 - A bounded repeat in a bridge (a head nod 1-4 times): rows keyed on an int count, each writing
   the next count as a literal (enumerated, not arithmetic), or a state function. Bridges
-  themselves are states (R5(b), see Reload): a bridge step is a state with its entry and exit
-  commands, and a function-chain step is the same with function commands.
-- Random across the boundary. The oddity to remove: `random()` called from a script snippet
-  inside a table uses a different generator from `random()` in ordinary script. Likely
-  resolved host-side, with access masks choosing the deterministic generator in table context
-  (owner: "doable"). Open: how `random(...)` inside a command's s-expression is drawn.
-- The snapshot rule: wires read other entities' **committed** state as of
-  the start of the step (needed for parallel steps; census §8 strain 5).
-- A delayed message that arrives after its state has already ended and been re-entered.
-- The display relations: one relation with several queries, or several relations.
-- How a host-compiled snippet sees wires. Leaning (owner): free wire names become parameters,
-  and the wirer's closure captures and forces them. See the shape note §3.
+  themselves are states (R5(b), see Bridges are states).
+- Compiling the step to machine code (R8): needs a load target (machines × rows per tick) this
+  file does not state; see Budgets.
+- Per-type message arity: arguments are positional slots every type shares (see Messages).
+- Cyclic inputs for edges: crossing is linear (see Edges).
+- Arithmetic on data values in a value, such as `energy + 50` (see A row): tentative, not
+  built.
+
+## The host's part
+
+These belong to the subsystem that has Tabular (What it is not; The host interface), and are
+open there, not here:
+
+- the `.tabular` bundle file's container;
+- the halting proof and the read-only check on snippets;
+- how a host-compiled snippet sees wires (leaning, owner: free wire names become parameters,
+  and the wirer's closure captures and forces them; shape note §3), and the snapshot rule,
+  that wires read other entities' committed state as of the start of the step (needed for
+  parallel steps; census §8 strain 5);
+- query order for unordered results, and fan-out over a query result (R1);
+- whether a command's consumer compiles its s-expression at bind, so a step enqueues a
+  prebuilt record (R9);
+- random across the boundary: `random()` in a table's script snippet using the deterministic
+  generator ordinary script uses (likely access masks choosing it in table context; owner:
+  "doable"), and how `random(...)` inside a command is drawn (R9);
+- a delayed message that arrives after its state ended and was re-entered: the instance's
+  entry count captured by `:delay`, and `message_stale` an input flag the host supplies (R3);
+- mutable-table writes from s-expressions: the sink's consumer turns a command into
+  `insert_row`;
+- script reading a machine's state by name (`instance::State` reads by index).
+
+The display relations are decided (R2): one relation per question (window, pointer mode,
+camera), each a total mutable best table; nothing new in Tabular.

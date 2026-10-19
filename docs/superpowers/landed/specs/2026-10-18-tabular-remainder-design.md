@@ -1,9 +1,10 @@
 # The rest of Tabular
 
-**Status:** draft 2026-10-18, for the owner's review.
+**Status:** landed 2026-10-19 on `tabular-slice0` (slices 0–8), for the owner's review of the
+branch. What was built is in **As-built** and the decisions left to the owner in **Open owner
+decisions**, both at the end; the rulings blocks are the reasoning behind them.
 
-**Contract:** `Spehleon/Tabular/docs/definition.md`. **Inventory:** `docs/feature-checklist.md`,
-every item not `[x]`.
+**Contract:** `Spehleon/Tabular/docs/definition.md`. **Inventory:** `docs/feature-checklist.md`.
 
 This spec covers everything left on the checklist at once. It does not design each item
 separately. Its main job is to sort the open items into **premises**, which get built, and
@@ -180,6 +181,33 @@ owner with my recommendation. Merges still need the owner's approval.
   - **Bridges, state functions and function chains are consequences** with tests and no code.
     Bounded repeat stays undecided.
 
+  Applied in slice 7 (coordinator, from the slice 7 review; the owner may overrule at code
+  review):
+  - **Provenance is switched by a generated header.** The engine's CMake writes
+    `generated/tabular_build_config.h` (`TABULAR_PROVENANCE` 1 in Debug, 0 in the release
+    family), included only by `tabular/instance.h`, so flipping it rebuilds only the units that
+    use instances, not every command line. A build that defines the macro itself keeps its own
+    (the budget gate sets 0); one with neither has it off. When it is on the instance type
+    carries an ABI tag (and MSVC records the setting per object), so a mixed build fails to
+    link rather than reading another layout.
+  - **The ring is 16 clause runs of up to 8 values,** sized at creation and kept across
+    `Rebind`, so a reload shows the old exit's picks then the new entry's and recording
+    allocates nothing. A wider clause keeps its first eight values and says it was cut.
+  - **Release builds have no provenance API at all,** not an empty ring: a caller cannot read
+    "no picks" from a build that records none.
+  - **Budgets are measurements with margins** (times 2×, bytes 1.25×, the grazer's whole build
+    about 2.2× its slowest run), taken on one stated machine. The gate
+    (`scripts/test-tabular-budgets.sh`) is therefore a regression check for that machine, not a
+    portable bound, and runs on a quiet machine outside the e2e runner and CTest shards.
+    `definition.md`'s budget table and `bench/budgets.cpp` are checked against each other both
+    ways, so neither drifts.
+  - **R8's criterion was ill-posed.** "Strike the compiled path if the budgets are met" cannot
+    fail when every budget is the measurement times a margin. Whether 125 ns per row evaluated
+    (about 1 µs at 400 MHz) is enough needs a load target (machines × rows per tick) that the
+    contract does not state, so compiling to machine code stays open for the owner. The
+    profile says the binary searches to the tuple and the cell are half the step, which
+    machine code would not remove.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
@@ -321,8 +349,11 @@ Applying the method to this table:
   `panic` while an instance is panicking, and `mode` resets to `idle` and `grazer_enter` runs
   for `idle`.
 
-What this example cannot show yet: a blank key cell (`message` empty) must mean "no
-message", which is hash 0. That conflicts with the rule refusing hash 0 (ruling R3).
+The blank `message` cell is hash 0, "no message", allowed only in a `domain: message` key
+(R3, slice 4). The YAML above is the design sketch; the form the front ends read (each key's
+`domain:`, the band and flags inputs declared on the table, `set:` in place of `writes:`, the
+machine's `message: {type: message}`) is `kGrazerTables` / `kGrazerMachine` in
+`test/machine_gtest.cpp`, which the step, effects, reload and parity suites run.
 
 ## 5. Slices
 
@@ -348,7 +379,7 @@ the end (owner, 2026-10-18), and every ruling in §7 is accepted, so no slice is
 8. **Checklist closure:** move host-adapter items (§8) and the rulings' outcomes into the
    checklist and `definition.md`. Land this spec with an As-built section.
 
-## 6. Interfaces (sketch; slice plans fix the details)
+## 6. Interfaces (sketch; the built interface is in As-built)
 
 ```cpp
 // P1
@@ -430,10 +461,10 @@ Each blocks the slice named. Each option is phrased so that it can be decided by
   consumer reads s-expressions, which is the host's business.
   *Recommend:* move them to the host adapter's list (§8).
 
-## 8. The host adapter's list (proposed, not Tabular)
+## 8. The host adapter's list (not Tabular)
 
 These are checklist items that `definition.md` already assigns to the host. The checklist
-should move them out of its open sections so they never read as Tabular's debt:
+lists them under "Host adapter (not Tabular)" so they never read as Tabular's debt:
 
 - halting proof and read-only checks;
 - wire resolution and the snapshot rule;
@@ -442,8 +473,10 @@ should move them out of its open sections so they never read as Tabular's debt:
 - compiling commands at bind, and `random` inside commands (R9);
 - the bundle file's container.
 
-Tabular's part of the bundle is "build one definition from a set of named YAML and CSV
-texts", which slice 2 provides.
+Tabular's part of the bundle is building tables and machines from named YAML and CSV texts
+(`DocumentFromYaml` and the CSV loaders). The checklist's host list also carries the stale
+delayed message (R3), script reading state by name, how a snippet sees wires, and running state
+functions from the commands Tabular emits.
 
 ## 9. The emergence lens (for every slice's review)
 
@@ -550,3 +583,103 @@ anyway.
   *Recommend:* restate the reason as "a clamp has no place for NaN", and keep the refusal for
   every ranged input. That way one rule follows from the range declaration rather than from
   the pick policy.
+
+## As-built
+
+Built on `tabular-slice0`, Tabular `fa8832d` (slice 1) to `0fe82ab` (slice 7); slice 0 is
+§10. Paths are under `Spehleon/Tabular/`; the gtest suites named are in `test/` and are listed
+per item in `docs/feature-checklist.md`.
+
+**Premises.**
+
+| # | As built | Key file |
+|---|---|---|
+| P1 | `owner_handle`: move-only; dropping it or `Release()` retracts the owner from every table, grids included | `include/tabular/owner_handle.h` |
+| P2 | `relation_store::Generation(table)` and `TableVersion::Generation()`: rises on every visible change, never on a refused one | `include/tabular/relation.h` |
+| P3 | `suffix: <name>` / `create_table::suffix` adds one trailing command column; in CSV it is the rest of the line | `src/rows_csv.cpp`, `src/schema_yaml.cpp` |
+| P4 | `Draw(seed, site)`: three rounds of Support's pcg3d, constexpr, avalanche-tested; `DrawUnit` to [0, 1) | `include/tabular/draw.h` |
+| P5 | `pick: weighted` with `weight:`; `PickWeighted` on a version or the store; non-normal weights and overflowing totals refused at load | `src/pick.cpp` |
+| P6 | `source`: a state column, a machine input, an earlier clause's value column, or a literal | `include/tabular/machine.h` |
+| P7 | `create_machine` (state, inputs, message, create/entry/step/exit lists); YAML `machines:` read by `DocumentFromYaml`; `CheckMachine` is the definition build | `include/tabular/machine.h`, `src/schema_yaml.cpp` |
+| P8 | `Bind` makes a shared `Binding` of one `input_getter` per input; `instance` is snake_case, move-only, composited into the host object | `include/tabular/instance.h` |
+| P9 | A step copies current to next, clauses `set:` next, next becomes current. `writes:` was dropped (slice 3a): the clause names the state column | `src/instance.cpp` |
+| P10 | `Prepare` reads each clause's key domain from its sources and runs the load's own check over it; one layout (groups, cuts, lists) is both the proof and the compiled pick | `src/machine.cpp`, `src/layout.cpp`, `src/version_checks.cpp` |
+| P11 | A clause names only earlier clauses; position orders two writers, the later wins; one clause setting a column twice is refused | `src/machine.cpp` (`CheckMachine`) |
+| P12 | `host_binding::sink(instance, table, command)`, after the swap, step then exit then entry | `src/instance.cpp` |
+| P13 | A band column marked `edge`; `detail::Crossed` is the one crossing test for picks and `Step`; `pick_query::previous`; one previous value per machine input | `src/pick_internal.h`, `src/instance.cpp` |
+| P14 | `Rebind`: old exit to the old sink, migration by name, new entry to the new sink; cannot be refused | `src/instance.cpp` |
+| P15 | A clause that cannot answer holds; `host_binding::report` once per (clause, row), (clause, input), clause, input or extra arguments, from a bit set sized at creation | `src/instance.cpp` |
+| P16 | `instance::Provenance()`: a ring of 16 clause runs, debug only, switched by a generated header | `include/tabular/instance.h`, superproject `CMakeLists.txt` |
+| P17 | 19 benchmarks, gated at `-O2` by `scripts/test-tabular-budgets.sh`; `definition.md`'s table is held to them both ways | `bench/budgets.cpp`, superproject `scripts/test-tabular-budgets.sh` |
+
+Beyond §2, slice 2 built key domains (`key_domain`: members, a foreign column, `rows`, and in
+slice 4 `message`), orphans and the `run_note` report, and mutable best tables; slice 4 built
+messages (R3) and the exit trigger (R6). Bridges, state functions and function chains are
+consequences with tests and no code (slice 6). The compiled step is `Prepare`'s layout; nothing
+compiles to machine code (R8, see Open owner decisions).
+
+**Where the interface differs from §6's sketch** (`include/tabular/*.h`):
+
+- The definition is the `create_machine` command struct (views into a `schema_document` when
+  read from YAML). The sketch's prepared `Definition` is `Machine`: `Prepare(create_machine
+  const&, relation_store const&, std::vector<run_note>* report = nullptr)` returns
+  `counted_ptr<Machine const>`, and `Machine::Stale(store)` says when to prepare it again.
+- `host_binding::resolve` returns an `input_getter` (`{read, data, release}`, read as
+  `read(data, self, error_out)`), not a `std::function`, so a step's read is one indirect
+  call. `report(instance, table, row, error)` carries the instance id and uses `kNoTable` /
+  `kNoRow` for a getter failure or extra message arguments.
+- `Bind(counted_ptr<Machine const>, host_binding&&)` returns `counted_ptr<Binding const>`, as
+  sketched.
+- `CreateInstance(Binding const&, uint64_t id, uint64_t seed, void const* self)` returns the
+  `instance`, as sketched.
+- `Step(instance&, void const* self, uint64_t seed, message const& = {})`: the sketch had no
+  message; a step takes at most one (R3).
+- `Rebind(instance&, Binding const&, void const* self, uint64_t seed)` returns `void`; the
+  sketch's `tl::expected<void, ErrorContext> Rebind(instance&, counted_ptr<Binding>)` could not
+  be refused in any case (slice 6), and the exit and entry lists need `self` and `seed`.
+- Added to the sketch: `instance::State`, `Answer(list, clause)` (a `clause_answer`),
+  `Absorbed()`, `Provenance()` (debug builds); `DrawSite(machine, list, clause)`; `DrawUnit`;
+  `CheckMachine`; `DocumentFromYaml`; the `run_note` report on loads, inserts, retracts and
+  `Prepare`; `PickWeighted` and the other picks on a `TableVersion` as well as on the store;
+  `owner_handle::Release()` and `holds()`.
+
+## Open owner decisions
+
+Each was ruled provisionally by the coordinator, or left open, during slices 2–7; the built
+code follows the ruling shown. Each is one edit to `definition.md` if the owner decides
+otherwise.
+
+- **Per-type message arity** (slice 4): arguments are positional slots every type shares; a
+  type's own arity is not declared.
+- **Cyclic inputs for edges** (slice 5): crossing is linear, so a wrapping input (a phase
+  0.95 → 0.05) fires every band between; a cyclic input is not modelled.
+- **R8 load target** (slice 7): compiling the step to machine code needs a load target
+  (machines × rows per tick) the contract does not state; a cheaper search to the tuple is the
+  lever the profile points at.
+- **The stranded-dependent rule** (slice 2): a dependent left not total by a bare retract
+  refuses every change to its source that brings rows until it is made total again.
+- **`rows` columns as sub-tuples** (slice 2): `rows` key columns together contribute the joint
+  sub-tuples the rows name, not a product of per-column values.
+- **Clause outputs supplied by the machine** (slice 3a): "a machine clause's output" as a
+  domain is closed by the machine at `Prepare`, not declared on the table, which keeps one of
+  the four declared kinds for its own loads.
+- **Entry and exit may not set a hash state** (slices 3b, 4): a transition belongs in the step
+  list; entry and exit may write int and double columns.
+- **Clause-to-message-key passing is refused** (slice 4): a key that is not a message key may
+  not read an earlier clause's message-key column, since its blank run answers 0.
+- **Function-chain evidence** (slice 6): the checklist's function-chain item rests on the
+  bridge test with function commands, since Tabular cannot tell those from clips.
+- **Bounded repeat** (slice 6): a head nod 1–4 times as rows keyed on an int count, or as a
+  state function. Undecided.
+- **Plain mutable table change cost ∝ table size** (slice 7): an insert into an ordered plain
+  table moves the rows after it and a retract rebuilds the key indexes (a 10,000-row table:
+  insert 12 µs, retract 200 µs); fine for reloads, not for per-tick churn such as a
+  display-owner relation changing every frame.
+- **The grazer build budget kept at 1200 µs** (slice 7): about 2.2× its slowest measured run
+  rather than the 2× margin every other time budget has, because that build varies most.
+- **An exit that holds sends no abort** (slice 6): the host learns of it only through the
+  report, and the new entry still runs.
+- **The budget gate is single-machine** (slice 7): absolute times on one stated machine; a
+  portable gate would need relative budgets.
+- **Arithmetic on data values** (`energy + 50`) in a value: tentative in the contract, not
+  built; a next state still always names a member.
