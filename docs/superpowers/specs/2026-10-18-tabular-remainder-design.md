@@ -151,6 +151,20 @@ owner with my recommendation. Merges still need the owner's approval.
     with no message does. Extra arguments are reported once. Per-type arity is not declared;
     the owner may want it.
 
+  Applied in slice 5 (coordinator, from the slice 5 review; the owner may overrule at code
+  review):
+  - **An edge holds when its input entered the band or passed through it** since the previous
+    step, in either direction; staying inside or leaving does not. An edge row is a
+    conditional row (like a scripted one), and its layout box is where a crossing can end, so
+    the between-owners overlap rule reads that box.
+  - **`NoEdge` (a blank cell) is "no edge"** in an edge column, as an empty closure is "no
+    condition".
+  - **One previous value per input,** set at creation (so create and entry cross nothing). A
+    held step still spends the crossing; a NaN or failed read does not advance it. Edges read
+    host inputs only: message arguments, state, clauses and literals are refused.
+  - **Crossing is linear.** An input that wraps (an animation phase 0.95 → 0.05) passes
+    through every band between. A cyclic input is not modelled; the owner may want it.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
