@@ -62,15 +62,18 @@ that reason.
 - **Tabular wraps the sequence into one list,** so the row's command is
   `((emit sound) (play particle) (message target hit 3))`. **No suffix cells means `()`,** which
   is "do nothing". A row with an empty suffix is no longer refused.
-- **Every top-level item is a list whose head names what it does** (`(clip HeadDown)`,
-  `(message this calm)`, `(sound no__)`). This retires the animation bridge convention of
-  telling messages from clips by quoting (see Bridge tables).
+- **A top-level item is a list or a single word.** A list names what it does with its head
+  (`(message this calm)`, `(sound no__)`). A single word (`hard-land`, `idle`, `:lock`) stays a
+  word, and the consumer decides what it means. The animation consumer reads a bare word as a
+  clip and a `:word` as a directive to itself. This retires the animation bridge convention of
+  telling messages from clips by quoting: a message is `(message …)` (see Bridge tables).
 - **A cell written without parentheses is wrapped, not refused** (owner, 2026-10-19): its
   meaning is clear, the author just didn't write it lispy. Outside an open parenthesis, a
-  suffix cell whose trimmed text does not start with `(` is one command, and Tabular wraps the
-  whole cell: `clip HeadUp` reads as `(clip HeadUp)`. So the joining rule above applies inside
-  parentheses, where a command may run across cells. A cell that starts with `(` holds one or
-  more s-expressions. *Open:* a cell holding a single word (`HeadDown`), which has no verb.
+  suffix cell whose trimmed text holds whitespace and does not start with `(` is one command,
+  and Tabular wraps the whole cell: `message this hard-land` reads as
+  `(message this hard-land)`. A cell holding one word stays that word. So the joining rule above
+  applies inside parentheses, where a command may run across cells. A cell that starts with `(`
+  holds one or more s-expressions.
 - **The shape is checked at load and nothing more.** Lexically there are parentheses,
   double-quoted strings (with `\"` and `\\` escapes) and atoms. Unbalanced parentheses or an
   unterminated string is refused, naming the line. Tabular still never interprets a command,
@@ -96,7 +99,8 @@ exactly… a row with no suffix text is refused" with the rule above. Emits (ste
 Update the interface in the As-built section.
 
 **Tests.** One command across two cells equals the same command in one cell; three commands
-give a three-item list; an empty suffix gives `()`; `clip HeadUp` reads as `(clip HeadUp)`; an
+give a three-item list; an empty suffix gives `()`; `message this hard-land` reads as
+`(message this hard-land)` and `idle` stays `idle`; an
 unbalanced paren and an unterminated string are each refused with a line; the step's result order matches step, exit,
 entry; the allocation-free step test still passes with results returned; the budget gate is
 re-measured.
@@ -113,15 +117,19 @@ Under Part 2 a bridge table is an ordinary Tabular table with a suffix, and each
 command:
 
 ```csv
-from, phase, mode, to,    steps
-_,    _,     _,    eat,   (clip HeadDown)
-eat,  _,     _,    chew,  clip HeadUp,     (message this "chewed")
-idle, _,     _,    walk,  (clip idle_to_walk)
+from,    phase, mode, to,    steps
+falling, hard,  _,    idle,  message this hard-land, :lock, hard-land, :unlock, stand-from-hard-land, idle
+_,       _,     _,    eat,   HeadDown
+eat,     _,     _,    chew,  HeadUp,     (message this "chewed")
 ```
 
+The first row reads as
+`((message this hard-land) :lock hard-land :unlock stand-from-hard-land idle)`.
+
 - The animation system is the consumer. Its timing idioms ("let X finish", "hard cut to Y",
-  crossfade when no row matches) are how it interprets the list, not Tabular's business.
-- A clip and a message differ by their head, not by quoting.
+  crossfade when no row matches), and `:lock` / `:unlock`, are how it interprets the list, not
+  Tabular's business. See Integration for how the host runs such a list over time.
+- A clip is a bare word and a message is `(message …)`. Quoting no longer carries meaning.
 - Moving the animation cook onto Tabular tables is a follow-on, not part of this spec. Until
   then, the animation CSV keeps its own reader.
 
@@ -193,19 +201,115 @@ hard hit. A fall-through key: an unnamed type answers from the blank run, and a 
 outside a fall-through column is refused. The grazer and craft-bench machines step with no
 message concept.
 
+## Integration (the host side)
+
+How the program uses Tabular, end to end. Everything here is the host's; Tabular's part is
+named at each step. The first attempt at Tabular failed by trying to make it understand the
+things in "The command runner" below. That stays out.
+
+**Loading.** A `.tabular` file is YAML holding tables, machines and wires, plus the CSV texts
+of the tables' rows.
+
+- `DocumentFromYaml(text, label)` reads the tables and machines; each table's rows load
+  through `LoadRows(csv_rows{…})`.
+- **Wires** connect a machine's declared input names (`energy`, `food_near`) to engine data.
+  They are not read by Tabular today. The integration layer reads a `wires:` section (spelling
+  to settle, e.g. `energy: chem.glucose`) and turns each entry into an `input_getter` when
+  `host_binding::resolve` asks for that name. Wire resolution is already on the host adapter
+  list.
+- **Conditions.** Tabular never interprets one. The loader's `condition` callback turns each
+  condition cell's text into a `closure` (function, data, release), and a pick calls it with the
+  object as `this_in`. The integration layer owns that compiler, e.g. compiling the cell as an
+  AngelScript expression against the object type (owner, 2026-10-16: Tabular owning this went
+  badly in the first version).
+
+**Running.** There are two shapes.
+
+```cpp
+// A one-off pick on a plain table: the row, then its cells (a command is a view)
+auto row = PickBest(store, table, {keys, inputs, self});
+
+// A machine, set up once per object type
+auto machine = Prepare(def, store);               // proves totality, builds the layout
+auto binding = Bind(machine, {resolve, report});  // resolve: input name → getter (the wires)
+
+// Once per object: the instance is a snake_case member of the object, never new'd
+creature.brain = CreateInstance(*binding, id, seed, &creature);
+
+// Every tick the object is awake
+for (std::string_view list : Step(creature.brain, &creature, seed))   // Part 2's results
+{
+	runner.Start(creature, list);
+}
+
+// After a store change (hot reload)
+if (machine->Stale(store)) { /* Prepare again, Bind again, Rebind each instance */ }
+```
+
+- A one-off pick has exactly one row, so an out-parameter view (`std::string_view&
+  command_out`) fits it. A step can emit from a step clause, an exit clause and an entry clause
+  in the same call, so it returns a span (Part 2).
+- Results are views into the table version the binding holds, valid until a reload replaces
+  the binding. A consumer that keeps a list past that copies it or holds the binding.
+- The command consumer parses a row's list once, the first time that row emits, and caches it
+  by (table, row) in the binding. That is "compile at bind", already on the host list (R9).
+
+**The command runner.** A command list is a small program that the host runs over time, not a
+set of instant effects. The bridge row above:
+
+```
+((message this hard-land) :lock hard-land :unlock stand-from-hard-land idle)
+```
+
+1. The machine's step moves the state from `falling` to `idle` at once. The table's state is
+   authoritative and changes instantly.
+2. The runner starts the list. `(message this hard-land)` takes no time: it goes into the
+   object's Mailbox now.
+3. `:lock` tells the runner not to let anything interrupt the list.
+4. `hard-land` plays a clip, which takes seconds.
+5. `:unlock` allows interruption again.
+6. `stand-from-hard-land` plays, then `idle`, which is the clip the state wanted all along.
+
+Say the player jumps during `stand-from-hard-land`:
+
+- The machine's state changes to `jumping`.
+- The list is unlocked, so the runner cancels the rest of it.
+- The runner looks for a bridge from `stand-from-hard-land` to `jumping`. There is no row, so it
+  cuts straight to the jump. The character stays responsive.
+
+Some items take zero ticks and some take seconds; some are directives to the runner itself; and
+an interruption cancels the remainder. None of this is Tabular's business. Tabular hands over
+the list, and the runner does the rest.
+
+**Rules this gives the host** (these were questions 1 and 2):
+
+- **A message a command sends goes into the object's Mailbox,** and the engine's ordinary
+  delivery rules decide when it arrives. So the craft bench's `basket_filled` needs no Tabular
+  rule. `Step` returns its commands to the caller, which runs them.
+- **The runner chases the machine's current state.** The state changes instantly. The runner
+  works toward it through the list, and when the state changes again it cancels the remainder
+  and bridges from wherever it is, or cuts if no bridge row exists. *Proposed:* under `:lock`
+  the runner defers that re-plan until `:unlock`, then heads for whatever the state is by then.
+- **Leaving from any state means the host ends the instance.** Closing isn't a transition, so
+  no exit row is needed for every state. Tabular needs one small API for it: run the exit list
+  and return its commands. `Rebind` already does this internally.
+
 ## Open questions
 
-These came out of the craft bench. Each needs an owner ruling before Part 3 is finished.
+These need an owner ruling before Part 3 is finished.
 
-1. **A command that causes a message.** In the bench, `(basket-add)` can fill the basket, and
-   the bench should then move to the confirm modal. Commands go out after the swap, so the step
-   that added the item saw the basket before the add. Something has to step the machine again
-   (`basket_filled`). Does such a message run in the same tick, after the current one, or wait
-   for the next tick?
-2. **Leaving from any state.** Tabular has no "any state" key. Closing the bench applies from
-   every (page, modal) pair. Either each pair gets a row (about 12), or the host ends the
-   instance and its exit list runs. Recommendation: the host ends it, because closing is not a
-   transition.
+1. **Does a command's message come back into its own machine?** In the hard-land example, the
+   state is already `idle` when `hard-land` arrives in the Mailbox, and the owner wants it not
+   to make the tables run again "because it understands the table transition caused it". The
+   candidates:
+   - the host doesn't route a message an instance's own command sent back into that instance's
+     machine (it goes to the script and other handlers);
+   - it does route it, and the machine has no row for it, so it falls through to the blank row
+     and nothing changes;
+   - the message carries its origin, and a table keys on that.
+2. **What a state change does during `:lock`.** Proposed above: the runner defers the re-plan
+   until `:unlock`. Alternatives are dropping the change (the state and the animation then
+   disagree) or queueing every change in order.
 3. **Entry per machine or per column.** Entry runs the whole list when any hash column
    changes. In a two-layer UI (page and modal), a modal-only change re-runs the page's entry
    rows. The options are entry clauses that run only when their own column changes, or one
