@@ -32,6 +32,7 @@ struct column_yaml
 	bool        key  = false;
 	std::string input;
 	bool        domain = false;   // never written: the domain is read from its node (see ReadDomain)
+	bool        edge   = false;
 };
 
 // The mapping form of a column's domain: members, or another table's column.
@@ -153,6 +154,7 @@ YamlField const kColumnFields[] = {
 	// of two kinds. A nested field with no child set accepts either and reads
 	// nothing; ReadDomain reads the node itself.
 	{"domain", FieldType::Nested, offsetof(column_yaml, domain)},
+	{"edge", FieldType::Bool,   offsetof(column_yaml, edge)},
 };
 YamlSet const kColumnSet{kColumnFields, nullptr, "column"};
 
@@ -441,7 +443,7 @@ tl::expected<schema, ErrorContext> BuildTables(document_yaml const& document, LF
 						"' reads input '", c.input, "', which the table does not declare").with(std::string(label)));
 				}
 			}
-			columns[t].push_back(add_column{c.name, static_cast<column_type>(c.type), c.key, input, domain});
+			columns[t].push_back(add_column{c.name, static_cast<column_type>(c.type), c.key, input, domain, c.edge});
 		}
 		uint32_t output = UINT32_MAX;
 		if (tableNode->get("output") != nullptr)

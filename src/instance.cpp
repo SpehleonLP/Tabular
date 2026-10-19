@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -130,6 +132,8 @@ struct instance_access
 	static std::vector<cell>&          Next(instance& i) { return i._next; }
 	static std::vector<cell>&          Inputs(instance& i) { return i._inputs; }
 	static std::vector<uint8_t>&       InputRead(instance& i) { return i._inputRead; }
+	static std::vector<cell>&          Previous(instance& i) { return i._previous; }
+	static std::vector<cell>&          GivenBefore(instance& i) { return i._givenBefore; }
 	static std::vector<clause_answer>& Answers(instance& i) { return i._answers; }
 	static std::vector<uint64_t>&      Reported(instance& i) { return i._reported; }
 	static std::vector<cell>&          Keys(instance& i) { return i._keys; }
@@ -281,10 +285,12 @@ struct list_run
 	std::vector<cell> const&           state;     // what a State source reads: next, or current for exit
 	std::vector<cell> const&           inputs;
 	std::vector<uint8_t> const&        inputRead;
+	std::vector<cell> const&           previous;   // per machine input, for edges
 	std::span<clause_answer>           answers;   // this list's
 	std::vector<uint64_t>&             reported;
 	std::vector<cell>&                 keys;
 	std::vector<cell>&                 given;
+	std::vector<cell>&                 givenBefore;
 	std::vector<float>&                axes;
 	bool&                              absorbed;
 	uint64_t                           id;
@@ -384,7 +390,7 @@ size_t FindTuple(prepared_clause const& clause, std::span<cell const> keys)
 }
 
 // What a best clause's laid-out pick found: Answered with its row, NoRun when
-// every row tried is scripted and none holds, Failed with the row whose script
+// every row tried is conditional and none holds, Failed with the row whose script
 // condition could not answer.
 struct laid_pick
 {
@@ -393,10 +399,15 @@ struct laid_pick
 };
 
 // The first row of group g's list for the input point that holds. The point's
-// cell is found per axis by binary search over the group's cuts.
+// cell is found per axis by binary search over the group's cuts. The cell
+// lies inside every plain band of its rows; an edge row's crossing is tested
+// here, from the table inputs given and their previous values, before its
+// script, as a pick tests bands before scripts.
 laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout, size_t g,
-	std::span<float const> point, void const* self, ErrorContext& error)
+	std::span<float const> point, std::span<cell const> given, std::span<cell const> before, void const* self,
+	ErrorContext& error)
 {
+	bool const edges = version_access::Def(version).edges;
 	size_t const dims = layout.dims;
 	size_t       cell = 0;
 	for (size_t a = 0; a < dims; ++a)
@@ -414,7 +425,11 @@ laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout
 	cell += layout.cellStart[g];
 	for (uint32_t k = layout.listStart[cell]; k < layout.listStart[cell + 1]; ++k)
 	{
-		uint32_t const   row  = layout.lists[k];
+		uint32_t const row = layout.lists[k];
+		if (edges && !detail::EdgesHold(version, row, given, before))
+		{
+			continue;
+		}
 		detail::row_test test = detail::ScriptHolds(version, row, self, error);
 		if (test == detail::row_test::Failed)
 		{
@@ -434,8 +449,8 @@ laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout
 // cell's list in row order. Groups of one run have distinct flags, so the
 // rank alone orders them. An unranked table has one group, flags 0, so it is
 // the last-tried group and nothing else.
-laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell const> given, std::vector<float>& axes,
-	void const* self, ErrorContext& error)
+laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell const> given,
+	std::span<cell const> before, std::vector<float>& axes, void const* self, ErrorContext& error)
 {
 	TableVersion const&        version = *clause.version;
 	table_def const&           def     = version_access::Def(version);
@@ -472,7 +487,7 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 		{
 			break;
 		}
-		laid_pick const picked = TryGroup(version, layout, best, point, self, error);
+		laid_pick const picked = TryGroup(version, layout, best, point, given, before, self, error);
 		if (picked.outcome != clause_outcome::NoRun)
 		{
 			return picked;
@@ -484,7 +499,7 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 	{
 		return laid_pick{};
 	}
-	return TryGroup(version, layout, fallback, point, self, error);
+	return TryGroup(version, layout, fallback, point, given, before, self, error);
 }
 
 // The report-once memory: whether failure bit has been reported by this
@@ -573,6 +588,22 @@ clause_answer RunClause(list_run const& run, size_t index)
 		ReportHold(run, index, bits + 1 + bad.index, kNoRow, [&]() { return detail::BadInputError(def, bad, given); });
 		return answer;
 	}
+	// What each edge crosses from: its machine input's previous value (an edge
+	// reads only a getter's input). Other table inputs keep this step's value,
+	// which no edge reads.
+	std::span<cell const> before;
+	if (def.edges)
+	{
+		std::copy(given.begin(), given.end(), run.givenBefore.begin());
+		for (column_def const& col : def.columns)
+		{
+			if (col.edge)
+			{
+				run.givenBefore[col.input] = run.previous[rc.inputs[col.input].index];
+			}
+		}
+		before = std::span<cell const>(run.givenBefore.data(), rc.inputs.size());
+	}
 	// A message type with no run falls through to the blank run, as every
 	// lookup of the table does; the retry writes run.keys itself.
 	size_t const tuple = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()), rc.messageKey,
@@ -592,7 +623,7 @@ clause_answer RunClause(list_run const& run, size_t index)
 	{
 	case pick_policy::Best:
 	{
-		laid_pick const picked = PickLaid(pc, tuple, given, run.axes, run.self, error);
+		laid_pick const picked = PickLaid(pc, tuple, given, before, run.axes, run.self, error);
 		if (picked.outcome == clause_outcome::Failed)
 		{
 			answer.outcome = clause_outcome::Failed;
@@ -621,7 +652,7 @@ clause_answer RunClause(list_run const& run, size_t index)
 		detail::row_span const rows = pc.rowRuns[tuple];
 		size_t                 failed = SIZE_MAX;
 		auto ored = detail::OrOfRows(version, rows.first, size_t(rows.first) + rows.count,
-			pick_query{keys, given, run.self}, error, failed);
+			pick_query{keys, given, run.self, before}, error, failed);
 		if (!ored)
 		{
 			answer.outcome = clause_outcome::Failed;
@@ -668,8 +699,9 @@ list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state,
 	std::span<clause_answer> const own(answers.data() + binding.answerStart[list],
 		binding.answerStart[list + 1] - binding.answerStart[list]);
 	return list_run{binding, machine_access::Of(*binding.machine), instance_access::Next(subject), state,
-		instance_access::Inputs(subject), instance_access::InputRead(subject), own, instance_access::Reported(subject),
-		instance_access::Keys(subject), instance_access::Given(subject), instance_access::Axes(subject),
+		instance_access::Inputs(subject), instance_access::InputRead(subject), instance_access::Previous(subject), own,
+		instance_access::Reported(subject), instance_access::Keys(subject), instance_access::Given(subject),
+		instance_access::GivenBefore(subject), instance_access::Axes(subject),
 		instance_access::Absorbed(subject), subject.id(), self, seed, list};
 }
 
@@ -736,6 +768,25 @@ void ReadInputs(instance& subject, void const* self, message const& msg)
 		{
 			binding.report(subject.id(), kNoTable, kNoRow,
 				std::move(error).with("machine '", def.name, "' input '", def.inputs[i].name, "'"));
+		}
+	}
+}
+
+// The values this step read become the previous values the next step's edges
+// cross from. A getter that failed, or a NaN, is no value read: the previous
+// value stays the last one that was, so a crossing is not lost across it.
+void AdvancePrevious(instance& subject)
+{
+	std::vector<cell> const&    inputs   = instance_access::Inputs(subject);
+	std::vector<uint8_t> const& read     = instance_access::InputRead(subject);
+	std::vector<cell>&          previous = instance_access::Previous(subject);
+	detail::machine_def const&  def      = machine_access::Of(*binding_access::Of(subject.binding()).machine).def;
+	for (size_t i = 0; i < inputs.size(); ++i)
+	{
+		bool const nan = def.inputs[i].type == column_type::Double && std::isnan(inputs[i].d);
+		if (read[i] && !nan)
+		{
+			previous[i] = inputs[i];
 		}
 	}
 }
@@ -819,10 +870,14 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	instance_access::Reported(out).assign((data.reportBits + 63) / 64, 0);
 	instance_access::Keys(out).assign(data.maxKeys, cell::Integer(0));
 	instance_access::Given(out).assign(data.maxInputs, cell::Integer(0));
+	instance_access::GivenBefore(out).assign(data.maxInputs, cell::Integer(0));
+	instance_access::Previous(out).assign(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
 	instance_access::Axes(out).assign(data.maxAxes, 0.f);
 
-	// Creation enters the initial state; nothing is left, so no exit runs.
+	// Creation enters the initial state; nothing is left, so no exit runs. The
+	// values read are their own previous values, so creation crosses no edge.
 	ReadInputs(out, self, message{});
+	AdvancePrevious(out);
 	std::vector<cell> const& next = instance_access::Next(out);
 	RunList(out, trigger::Create, next, self, seed);
 	RunList(out, trigger::Entry, next, self, seed);
@@ -856,6 +911,8 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 		MarkNotRun(subject, trigger::Exit);
 		MarkNotRun(subject, trigger::Entry);
 	}
+	// Whatever the clauses did with them: the inputs were read.
+	AdvancePrevious(subject);
 	// Swapping two vectors moves their buffers, so nothing is allocated.
 	std::swap(current, next);
 	// After the swap, so a sink sees the step's state current; in the order the

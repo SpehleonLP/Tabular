@@ -456,6 +456,38 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 				"' is not bound; given gives every input of the table a source"));
 		}
 	}
+	// P13: the instance keeps the previous value of every machine input, read
+	// once per step through its getter, and an edge crosses from it. A literal
+	// never moves, so its edge never holds. A state column or an earlier
+	// clause is a value of this step's own making, with no previous value kept.
+	// A message argument is one message's value, 0 between messages, so its
+	// "previous" would be another message's, or nothing.
+	for (column_def const& col : t.columns)
+	{
+		if (!col.edge)
+		{
+			continue;
+		}
+		resolved_source const& from = out.inputs[col.input];
+		if (from.kind == source_kind::Input && def.carried[from.index] == detail::kFromGetter)
+		{
+			continue;
+		}
+		std::string here;
+		switch (from.kind)
+		{
+		case source_kind::State:   here = cc(std::string("state column '"), def.state[from.index].name, "'"); break;
+		case source_kind::Clause:
+			here = cc(std::string("column '"), tables.tables()[earlier[from.index].table].columns[from.column].name,
+				"' of clause ", from.index);
+			break;
+		case source_kind::Literal: here = "a literal"; break;
+		case source_kind::Input:   here = cc(std::string("message argument "), def.carried[from.index]); break;
+		}
+		return tl::make_unexpected(ErrorContext("input '", t.inputs[col.input].name, "' is read by edge '", col.name,
+			"', which compares it with its value on the previous step; it comes from a machine input's getter, and here from ",
+			here));
+	}
 
 	// set: each a value column into a state column of its type. Two clauses
 	// writing one column are ordered by position; one clause writing a column

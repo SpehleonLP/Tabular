@@ -46,7 +46,7 @@ the feature is wrong, not the rule.
    Built for best tables (owner, 2026-10-18): a published version is total over its key
    domain (see Key domains). A change that brings rows (a load of one row or more, or an insert
    into a mutable best table) checks every key tuple in the domain of the version it would
-   publish, not only the runs it adds rows to: the rows with no script condition (and, when the
+   publish, not only the runs it adds rows to: the rows with no script condition and no edge (and, when the
    table ranks, no flags) cover every value of the band inputs' declared ranges, a tuple with no
    run is refused, and a row the rows tried before it always cover is refused as dead. A run
    another owner's bare retract stranded therefore refuses the next change that brings rows,
@@ -118,9 +118,10 @@ the feature is wrong, not the rule.
   example a band, a flag and a script condition); **all of a row's conditions must hold**
   (owner, 2026-10-16). If a row does not count, evaluation falls through to the next one.
   Built: a band (`a..b`, half-open, compared in float as animation's phase bands are), a flags
-  ranking column (it ranks, and never fails a row) and the one script condition; edges stay
-  to be built. A row with no script condition carries a closure with no function; a blank
-  condition cell in CSV is one.
+  ranking column (it ranks, and never fails a row), an edge (a band marked `edge`, see Edges)
+  and the one script condition. A row with no script condition carries a closure with no
+  function; a blank condition cell in CSV is one. A row with no edge holds `NoEdge()` in the
+  edge column; a blank edge cell in CSV is one.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
   Built: a `pick: weighted` table names its one `double` weight column (`weight:` in YAML,
   `create_table::weight` in the builder).
@@ -163,7 +164,7 @@ Pivot headers are distinct flag sets (two spellings of one set, such as `A|B` an
 refused by value), so rows tie only when their flags are equal, and **ties go to row order**,
 whichever front end loaded them. A row with `R != 0` and
 `R & F == 0` never wins. The row with `R == 0` is tried last, after every ranked row, and in
-every key run of the domain a change checks the `R == 0` rows with no script condition must
+every key run of the domain a change checks the `R == 0` rows with no script condition and no edge must
 cover every input: they are the clear default (see promise 1). Every table
 needs a well-defined answer to "what happens if nothing matches".
 Several `R == 0` rows in one run are tried in row order; animation's `LookupBest` keeps the
@@ -253,9 +254,12 @@ insert into it is a version never published, as every refused change is.
 
 **The layout is the proof (2026-10-18).** The checks read one layout of each key run: its rows
 grouped by flag set, each group's band inputs cut at every band edge of the group and at the
-ranges' ends, and per cell the group's rows whose bands contain it, in try order (owner, then
-index), ending at the first row with no script. Totality is "every list of the default group
-(flags 0) ends in a row with no script"; a dead row is "a row in no list of its group". The
+ranges' ends, and per cell the group's rows whose bands can hold there, in try order (owner,
+then index), ending at the first row that is not **conditional**. A row is conditional when a
+pick may fall past it where its bands hold: it has a script condition, or an edge (see Edges).
+That is one predicate of the layout, so an edge and a script are one kind of row to the proof.
+Totality is "every list of the default group (flags 0) ends in a row that is not
+conditional"; a dead row is "a row in no list of its group". The
 lists are flat arrays and offsets, the form a machine's `Prepare` keeps as its compiled pick.
 One layout holds any number of runs laid one after another, each a span of groups, and names
 rows by their version row numbers; `Load` lays one run at a time into a layout it reuses, and
@@ -396,7 +400,7 @@ reaches a running binding. The host asks `binding.machine().Stale(store)` (an in
 its `binding()`), and a stale machine is prepared again and its instances rebound (slice 6).
 
 **An `instance`** (snake_case: composited into the host's object, never `new`ed; move-only)
-holds its binding, its id, the current state vector, the next one, and what each clause last
+holds its binding, its id, the current state vector, the next one, each input's previous value (see Edges), and what each clause last
 answered (`Answer(list, clause)`: `Answered` with the row picked, or for an or clause its OR;
 `NoRun`, `Failed` or `SourceHeld` when it held; `NotRun` when its list did not run). Every
 buffer is sized at creation, so **a step allocates nothing**, holds included: a step builds
@@ -405,7 +409,7 @@ first occurrence of a failure the instance reports (below), whose report carries
 error from the step's one asking. The interpreted picks, and the report, are the callers that
 name the table and row. Tests count the global `operator new` calls of steps that answer,
 raise in a script condition, see NaN, lose a getter, find no run, run an or → best → weighted
-chain, emit to a sink, take a message (absorbed or falling through), run exit, and repeat a
+chain, emit to a sink, take a message (absorbed or falling through), run exit, cross edges, and repeat a
 reported failure (a raise, a NaN, a key with no run and a lost getter, each with `report`
 set): zero, after a first round in which each report builds its error once.
 A host's own failure message longer than the small-string size allocates on the host's side,
@@ -418,7 +422,9 @@ with every state column at its initial value, after running the `create` list an
 
 1. Every input is read once, so every clause of the step sees one value of it. A getter that
    fills `error_out` leaves its input without a value this step. The message's type and
-   arguments are inputs too, read from the `message` passed (default: none).
+   arguments are inputs too, read from the `message` passed (default: none). An edge crosses
+   from its input's previous value (see Edges); the values read become the previous values at
+   the end of the step.
 2. Next is set to a copy of current. **A column no clause writes holds** because of this copy,
    and a clause that holds writes nothing; neither needs a path of its own.
 3. The `step` clauses run in order. Each reads its sources: a state column from **next**, as
@@ -429,9 +435,9 @@ with every state column at its initial value, after running the `create` list an
    shared clamp), ranks the run's flag groups against the input flags as `PickBest` ranks rows
    (full match, then `R & F`, then `R`; a group matching nothing skipped, the `R == 0` group
    last; an unranked table has only that group), finds the input's cell in each group tried by
-   binary search over its cuts, and walks the cell's list calling script conditions until one
-   holds; an **or** clause ORs the output of its run's holding rows (0 for an empty run); a
-   **weighted** clause draws `Draw(seed, site)` over its run. Script conditions, bands, the
+   binary search over its cuts, and walks the cell's list testing each row's edges and then
+   its script condition until one holds; an **or** clause ORs the output of its run's holding rows (0 for an empty run); a
+   **weighted** clause draws `Draw(seed, site)` over its run. Script conditions, bands, edges, the
    clamp, the input checks, the flag rank, the OR and the draw are the interpreted picks' own
    code, so the
    compiled step and its oracle cannot drift apart there. The clause's `set`s then write next;
@@ -555,7 +561,7 @@ tables); every step; when a relation's rows change.
 |---|---|---|
 | Definition | table section of a bundle | tables, machines, snippet text; immutable |
 | Binding | definition × host object type | compiled closures, resolved input slots, state layout |
-| Instance | object | state vector, edge history |
+| Instance | object | state vector, each input's previous value (the edges' history) |
 | Relation | global relation | live rows, each owned by a contributor; RAII handles retract them (`owner_handle`) |
 
 **Owner handles (built 2026-10-18).** An `owner_handle` (`tabular/owner_handle.h`) holds a store
@@ -587,6 +593,53 @@ clamp has no place for NaN (owner, 2026-10-18).
 **A band is well formed (2026-10-18).** A band cell has both ends finite and start before end,
 in every table whatever its input's range, checked where the cell enters a table. The range
 check then only tests containment.
+
+**Edges (P13, built 2026-10-18).** A band column marked `edge` (`edge: true` in YAML,
+`add_column::edge` in the builder) holds when its input **crossed into** the band between its
+previous value and this one, not when the input is in it. Both values are clamped as a band
+input is. With the band `[lo, hi)`, previous `p` and current `x`, the edge holds when `p < lo`
+and `x >= lo`, or when `p >= hi` and `x < hi`: `p` lay outside, and `x` is at or past the end
+`p` came from, inside the band or through it and out the other side, so **a short band is
+never skipped by a fast input**. So landing exactly on `lo` from below enters, reaching `hi`
+from below passed through, reaching `hi` from above never entered (hi is not in the band), a
+previous value on `hi` is outside, and leaving from inside, or staying inside, crosses nothing.
+NaN crosses nothing. Crossing is linear, so an input that wraps (0.95 to 0.05) passes through every
+band between the two values and fires the downward edges there; a cyclic input is not modelled. One function (`detail::Crossed`) is the test, and the interpreted picks
+and a machine's step both call it through one row test (`detail::EdgesHold`).
+
+- **Declaration.** `edge` on anything but a band is refused. A band reads an input only in a
+  picked table, so best, all and or tables carry edges and a weighted table (no inputs) or a
+  table with no pick cannot; no further rule is needed. The band's input range and the
+  well-formedness rules are a band's. A cell holding `NoEdge()` (both ends NaN; a blank CSV
+  cell) is no edge: the row counts whatever its input did. No other band takes it.
+- **Proof.** An edge row is conditional (see The layout is the proof): it closes no list, so
+  totality needs a row after it with no script and no edge, and it covers no later row. Load
+  and `Prepare` share the check, so both get this. A totality refusal on a table with edges says
+  "no row with no script condition and no edge". On its axis an edge's box is where a crossing
+  can end, not the band: a crossing up ends in `[lo, H)`, possible when some clamped value lies
+  below `lo`; one down ends in `[L, hi)`, possible when some lies at `hi` or above (the range
+  is `[L, H)`). The box is the union over the possible directions, so an edge band covering
+  the whole range holds for no input and is refused as never picked, and a plain row covering
+  only a short edge band does not shadow it. The overlap between owners reads the same boxes.
+- **Picks.** `pick_query::previous` is parallel to `inputs`. A pick of a table with an edge
+  refuses a query whose `previous` is not as long as the inputs (reading no previous values as
+  "the input sat still" would answer silently wrong) and checks the previous value of each input an edge
+  reads as it checks inputs (NaN for a ranged input, an over-wide flag set), naming "the previous value"; the
+  previous values of inputs no edge reads are not looked at.
+  For a table with no edge, `previous` is ignored.
+- **Machine state.** The instance keeps one previous value per machine input. At creation the
+  values read are their own previous values, so the create and entry lists cross nothing and
+  **the first step sees a crossing only if the input moved since creation**. Each step's read
+  becomes the next step's previous value **whatever the clauses did with it**, so a crossing on
+  a step whose clause held is spent (inputs are read once per step, R3's snapshot). A getter
+  that failed, or a NaN, is no value read: the previous value stays the last real one, so the
+  crossing is measured from it on the next step and is not skipped. Until one value has been
+  read the previous value is NaN, which crosses nothing. An edge reads **only a machine input
+  with a getter**: the definition build refuses a literal (it never moves), a state column or
+  an earlier clause's answer (values of the step's own making, with no previous value kept),
+  and a message argument (one message's value, 0 between messages, so its "previous" would be
+  another message's). The buffers are sized at creation, so a step with edges allocates
+  nothing (tested).
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.

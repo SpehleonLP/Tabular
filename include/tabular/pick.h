@@ -19,6 +19,10 @@ struct pick_query
 	std::span<cell const> keys;
 	std::span<cell const> inputs;
 	void const*           this_in = nullptr;
+	// The inputs' previous values, parallel to inputs, which an edge band
+	// compares against: required (and checked as inputs are) for a table with
+	// an edge, and otherwise empty or ignored.
+	std::span<cell const> previous = {};
 };
 
 // A row holds when every band holds for its input and its script condition,

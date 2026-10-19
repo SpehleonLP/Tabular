@@ -113,9 +113,9 @@ run_span LayOut(std::span<interval const> domain, std::span<interval const> boxe
 				}
 				out.lists.push_back(firstRow + r);
 				out.listed[r] = 1;
-				// A row with no script always holds once its bands do, so the pick
-				// stops here and nothing after it in the group is ever tried.
-				if (!rows[r].scripted)
+				// A row that is not conditional always holds once its bands do, so
+				// the pick stops here and nothing after it in the group is ever tried.
+				if (!rows[r].conditional)
 				{
 					closed = true;
 					break;

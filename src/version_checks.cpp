@@ -149,7 +149,7 @@ std::string TupleText(std::span<int64_t const> tuple)
 }
 
 // One best table's rows, read as the layout needs them: a box per row over
-// the ranged inputs its bands read, its flags and whether it is scripted.
+// the ranged inputs its bands read, its flags and whether it is conditional.
 class run_reader
 {
 public:
@@ -174,13 +174,65 @@ public:
 		return Ranked() ? static_cast<uint32_t>(Cells(r)[_rows.slot[_def.ranking]].i) : 0u;
 	}
 
-	// At most one condition column, so a row's condition is its first.
-	bool Scripted(size_t r) const
+	// Whether a pick may fall past the row where its bands hold: it has a
+	// script condition (at most one condition column, so its first), or an
+	// edge, which holds only on a step that crossed into it. One predicate,
+	// so the proof treats the two alike: neither closes a list, neither
+	// shadows a later row.
+	bool Conditional(size_t r) const
 	{
-		return _rows.conditionCount != 0 && _rows.conditions[r * _rows.conditionCount]->get().function != nullptr;
+		if (_rows.conditionCount != 0 && _rows.conditions[r * _rows.conditionCount]->get().function != nullptr)
+		{
+			return true;
+		}
+		return HasEdge(r);
 	}
 
-	// The row's box: each axis's range, cut down by every band on that input.
+	// Whether the row holds an edge: a column marked edge whose cell is not
+	// NoEdge.
+	bool HasEdge(size_t r) const
+	{
+		if (!_def.edges)
+		{
+			return false;
+		}
+		for (uint32_t c = 0; c < _def.columns.size(); ++c)
+		{
+			if (EdgeBandAt(_def.columns[c], Cells(r).data(), _rows.slot[c]))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Where on axis an edge band can hold, as the current value sees it: a
+	// crossing into [lo, hi) from below ends at lo or above, possible when some
+	// clamped value lies below lo; one from above ends below hi, possible when
+	// some lies at hi or above. Clamped values fill [L, H), so the box is the
+	// union of [lo, H) and [L, hi) over the directions possible, and empty when
+	// the band leaves no value outside it.
+	static interval EdgeBox(interval axis, cell band)
+	{
+		bool const up   = axis.lo < band.v[0] && band.v[0] < axis.hi;
+		bool const down = axis.lo < band.v[1] && band.v[1] < axis.hi;
+		if (up && down)
+		{
+			return axis;
+		}
+		if (up)
+		{
+			return {band.v[0], axis.hi};
+		}
+		if (down)
+		{
+			return {axis.lo, band.v[1]};
+		}
+		return {axis.lo, axis.lo};
+	}
+
+	// The row's box, where its bands can hold: each axis's range, cut down by
+	// every band on that input, an edge by where a crossing into it can end.
 	void BoxOf(size_t r, std::vector<interval>& out) const
 	{
 		std::span<cell const> cells = Cells(r);
@@ -189,11 +241,27 @@ public:
 			interval box = _domain[a];
 			for (uint32_t c = 0; c < _def.columns.size(); ++c)
 			{
-				if (_def.columns[c].type == column_type::Band && _def.columns[c].input == _axes[a])
+				if (_def.columns[c].type != column_type::Band || _def.columns[c].input != _axes[a])
 				{
-					box.lo = std::max(box.lo, cells[_rows.slot[c]].v[0]);
-					box.hi = std::min(box.hi, cells[_rows.slot[c]].v[1]);
+					continue;
 				}
+				interval holds;
+				if (_def.columns[c].edge)
+				{
+					std::optional<cell> const edge = EdgeBandAt(_def.columns[c], cells.data(), _rows.slot[c]);
+					if (!edge)
+					{
+						continue;
+					}
+					holds = EdgeBox(_domain[a], *edge);
+				}
+				else
+				{
+					cell const band = cells[_rows.slot[c]];
+					holds = interval{band.v[0], band.v[1]};
+				}
+				box.lo = std::max(box.lo, holds.lo);
+				box.hi = std::min(box.hi, holds.hi);
 			}
 			out.push_back(box);
 		}
@@ -207,7 +275,7 @@ public:
 		for (size_t r = first; r < last; ++r)
 		{
 			BoxOf(r, _boxes);
-			_laid.push_back(layout_row{FlagsOf(r), Scripted(r)});
+			_laid.push_back(layout_row{FlagsOf(r), Conditional(r)});
 		}
 		if (!_keep)
 		{
@@ -265,7 +333,12 @@ public:
 			if (_def.columns[c].type == column_type::Band)
 			{
 				cell const& band = Cells(r)[_rows.slot[c]];
-				parts.push_back(cc(_def.columns[c].name, " ", FloatText(band.v[0]), "..", FloatText(band.v[1])));
+				if (_def.columns[c].edge && IsNoEdge(band))
+				{
+					continue;
+				}
+				parts.push_back(cc(_def.columns[c].name, _def.columns[c].edge ? " edge " : " ", FloatText(band.v[0]), "..",
+					FloatText(band.v[1])));
 			}
 		}
 		std::string text = cc(std::string("owner "), _rows.owners[r], "'s row");
@@ -278,6 +351,11 @@ public:
 
 	char const* NoDefault() const
 	{
+		if (_def.edges)
+		{
+			return Ranked() ? "no row with no flags, no script condition and no edge"
+			                : "no row with no script condition and no edge";
+		}
 		return Ranked() ? "no row with no flags and no script condition" : "no row with no script condition";
 	}
 
@@ -567,7 +645,7 @@ tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_dom
 		// contributors claiming the same inputs, decided only by an order
 		// among owners. Checked before the dead rows, which would report the
 		// same pair as a shadowed row. One owner's rows overlapping is
-		// priority by row order. Every row counts, scripted or not, and every
+		// priority by row order. Every row counts, conditional or not, and every
 		// pair: a run that just entered the domain was never checked before.
 		for (size_t b = start + 1; b < end; ++b)
 		{
@@ -586,7 +664,8 @@ tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_dom
 				};
 				return tl::make_unexpected(ErrorContext("table '", def.name, "' key (", reader.KeyText(start), "): ",
 					claimant(a), " and ", claimant(b), reader.Ranked() ? " have equal flags and overlap" : " overlap",
-					"; two owners may not claim the same inputs"));
+					"; two owners may not claim the same inputs",
+					reader.HasEdge(a) || reader.HasEdge(b) ? "; an edge holds wherever a crossing into it can end" : ""));
 			}
 		}
 
@@ -650,7 +729,7 @@ tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_dom
 			std::vector<size_t> covering;
 			for (size_t a = start; a < b; ++a)
 			{
-				if (!reader.Scripted(a) && reader.FlagsOf(a) == reader.FlagsOf(b)
+				if (!reader.Conditional(a) && reader.FlagsOf(a) == reader.FlagsOf(b)
 					&& Meets(&boxes[(a - start) * dims], own, dims))
 				{
 					covering.push_back(a);

@@ -208,10 +208,15 @@ private:
 	std::vector<cell>          _next;
 	std::vector<cell>          _inputs;      // this step's input values, read once per step
 	std::vector<uint8_t>       _inputRead;   // per input: its getter answered
+	// Per input: what an edge reading it crosses from this step, the last
+	// value read (a getter that answered, not NaN) on an earlier step or at
+	// creation; NaN, which crosses nothing, until one is read (see Step).
+	std::vector<cell>          _previous;
 	std::vector<clause_answer> _answers;     // every list's clauses, end to end
 	std::vector<uint64_t>      _reported;    // one bit per failure that is reported once (see host_binding)
 	std::vector<cell>          _keys;        // scratch: one clause's key values
 	std::vector<cell>          _given;       // scratch: one clause's table inputs
+	std::vector<cell>          _givenBefore; // scratch: one clause's table inputs' previous values, for its edges
 	std::vector<float>         _axes;        // scratch: one best clause's clamped band inputs
 	bool                       _absorbed = false;
 };
@@ -223,7 +228,10 @@ private:
 // current, and hands the sink what the create, then the entry clauses
 // emitted. seed draws for weighted clauses; self is the host object, handed to
 // getters and script conditions. It cannot be refused: a clause that cannot
-// answer holds, as in a step.
+// answer holds, as in a step. The inputs read here are the previous values
+// the first step's edges cross from, and the create and entry clauses see
+// them as previous too, so creation crosses no edge: the first step sees a
+// crossing only if its input moved since creation.
 instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void const* self);
 
 // One step, with msg as its message (none by default: type 0).
@@ -244,6 +252,14 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // 5. Next becomes current, and the sink is handed what the clauses that
 //    answered emitted: the step list's, then exit's, then entry's, each list
 //    in clause order. So a sink sees the step's state already current.
+//
+// An edge (P13) crosses from its input's previous value: the last value read
+// for it on an earlier step or at creation, whatever the clauses did with it,
+// so a crossing on a step whose clause held is spent. A getter that failed or
+// a NaN is no value read, and leaves the previous value where it was, so the
+// crossing is measured on the next step from the last real value and is not
+// skipped. An edge reads only a machine input with a getter (the definition
+// build refuses any other source), so no other source keeps a previous value.
 //
 // A clause that does not answer writes and emits nothing (see clause_outcome)
 // and is reported once (see host_binding). Allocates nothing, holds included,

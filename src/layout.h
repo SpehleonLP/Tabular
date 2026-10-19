@@ -24,8 +24,11 @@ struct interval
 // One row of a run as the layout reads it. The row's box is given beside it.
 struct layout_row
 {
-	uint32_t flags    = 0;      // the ranking column's value; 0 in a table that does not rank
-	bool     scripted = false;  // it carries a script condition, so a pick may fall past it
+	uint32_t flags       = 0;      // the ranking column's value; 0 in a table that does not rank
+	// It may not hold where its bands do, so a pick may fall past it: it
+	// carries a script condition or an edge. Totality and dead rows read only
+	// this, so the two are one kind of row to the proof.
+	bool     conditional = false;
 };
 
 // A key run's rows grouped by flag set, ascending, since only equal flags
@@ -34,7 +37,8 @@ struct layout_row
 // input space is cut at every band edge of the group's rows and at the
 // domain's ends, so a cell lies wholly inside or outside every row's box and
 // one list answers for every input in it. A cell's list holds the group's rows
-// whose boxes contain it, in row order, ending at the first with no script.
+// whose boxes contain it, in row order, ending at the first that is not
+// conditional (no script, no edge).
 //
 // One layout holds any number of runs laid one after another, each a span of
 // groups (run_span), so a machine's clause keeps every run of its domain in
@@ -51,7 +55,7 @@ struct run_layout
 	std::vector<uint32_t> listStart;    // per cell, then one end: offsets into lists
 	std::vector<uint32_t> lists;        // row numbers, as LayOut was given them
 	// Proof only: a pick never reads these, so a kept layout may drop them.
-	std::vector<uint8_t>  closed;       // per cell: its list ends in a row with no script
+	std::vector<uint8_t>  closed;       // per cell: its list ends in a row that is not conditional
 	std::vector<uint8_t>  listed;       // per row of the run laid last: it appears in some list of its group
 };
 
@@ -105,7 +109,7 @@ run_span LayOut(std::span<interval const> domain, std::span<interval const> boxe
 size_t FindGroup(run_layout const& layout, run_span run, uint32_t flags);
 
 // The lowest input of domain that group's lists leave open (no list there ends
-// in a row with no script), or none. A missing group (SIZE_MAX) closes
+// in a row that is not conditional), or none. A missing group (SIZE_MAX) closes
 // nothing, so its answer is the domain's low corner. An empty domain has no
 // input to leave open; with no axes the domain is one point.
 std::optional<std::vector<float>> FirstOpen(run_layout const& layout, std::span<interval const> domain, size_t group);

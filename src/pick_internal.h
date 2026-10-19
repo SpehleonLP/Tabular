@@ -23,6 +23,33 @@ namespace tabular::detail
 // a value past float's range never narrows; an unranged one as it is.
 float ClampedInput(input_def const& in, double value);
 
+// P13's crossing, the one test of an edge: whether an input that moved from
+// previous to now (both as ClampedInput gives them) crossed into the band
+// [lo, hi). previous lay outside it, and now is at or past the end it came
+// from: inside the band, or through it and out the other side, so a short
+// band is never skipped by a fast input. Leaving from inside crosses nothing,
+// and neither does reaching hi from above, since hi is not in the band; a
+// previous value on hi is outside, so moving down from it enters. NaN fails
+// every comparison and crosses nothing.
+inline bool Crossed(cell band, float previous, float now)
+{
+	if (previous < band.v[0])
+	{
+		return now >= band.v[0];
+	}
+	if (previous >= band.v[1])
+	{
+		return now < band.v[1];
+	}
+	return false;
+}
+
+// Whether every edge of row holds for its input moving from previous to
+// inputs (parallel spans, the table's inputs); a NoEdge cell holds. Plain
+// bands are not tested: a pick tests them itself, and a step's cell already
+// lies inside them. The interpreted picks and a step both test edges here.
+bool EdgesHold(TableVersion const& version, size_t row, std::span<cell const> inputs, std::span<cell const> previous);
+
 // The first input a pick refuses, by index into def.inputs (UINT32_MAX for
 // none): a flag set wider than 32 bits, or NaN for a ranged input (a clamp has
 // no place for it). nan says which. Allocates nothing, so a step can ask every
@@ -33,6 +60,9 @@ struct bad_input
 	bool     nan   = false;
 };
 bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs);
+
+// FirstBadInput for the one input i, for a check that reads only some inputs.
+bad_input BadInputAt(table_def const& def, std::span<cell const> inputs, uint32_t i);
 
 // What a pick says of the input bad names (bad.index is an input), in the
 // interpreted picks' refusal and a machine step's report alike.

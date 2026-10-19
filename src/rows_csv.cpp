@@ -164,6 +164,11 @@ tl::expected<cell, ErrorContext> ReadCell(table_def const& def, uint32_t column,
 	{
 		return cell::Integer(0);
 	}
+	// A blank edge is no edge, as a blank condition is no condition.
+	if (text.empty() && def.columns[column].edge)
+	{
+		return NoEdge();
+	}
 	return ReadCell(def.columns[column], text, names, line);
 }
 

@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -54,6 +55,14 @@ union cell
 	static cell Vector(float x, float y) { cell c; c.v[0] = x; c.v[1] = y; return c; }
 };
 static_assert(sizeof(cell) == 8);
+
+// An edge column's cell that holds no edge: the row counts whatever its input
+// did, as a row with no script condition does. A blank CSV cell in an edge
+// column is one. No other band takes it.
+inline cell NoEdge()
+{
+	return cell::Vector(std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN());
+}
 
 // A condition the host compiled. function returns whether the row counts for
 // this_in; when it cannot answer it fills error_out. release frees data and is
@@ -120,6 +129,10 @@ struct add_column
 	bool             key  = false;   // a secondary equality index
 	uint32_t         input = UINT32_MAX;   // Band or ranking Flags: index into create_table::inputs
 	key_domain       domain;               // a best table's key: required; any other column: refused
+	// Band only: the row counts when its input crossed into the band between
+	// the previous value a pick is given and this one (see pick_query), not
+	// when the input is in it. A cell may hold NoEdge() instead of a band.
+	bool             edge = false;
 };
 
 // What a pick is given: a named, typed slot a band or a ranking flags column
@@ -200,6 +213,7 @@ struct column_def
 	column_type type = column_type::Int;
 	bool        key  = false;
 	uint32_t    input = UINT32_MAX;
+	bool        edge  = false;
 };
 
 struct input_def
@@ -242,6 +256,7 @@ struct table_def
 	bool                         suffix        = false;   // the last column is the suffix command
 	uint32_t                     weight        = UINT32_MAX;
 	immutable_array<domain_def>  domains;                 // a best table: one per key column, in column order
+	bool                         edges         = false;   // some band column is an edge
 };
 
 // Immutable once built. Hot reload builds a new one.

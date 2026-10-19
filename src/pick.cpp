@@ -54,6 +54,32 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 	{
 		return tl::make_unexpected(detail::BadInputError(def, bad, query.inputs));
 	}
+	// An edge cannot be told without where its input came from, and reading
+	// "no previous values" as "no crossing" would answer as if the input sat
+	// still: refused, as a missing input is.
+	if (def.edges)
+	{
+		if (query.previous.size() != def.inputs.size())
+		{
+			return tl::make_unexpected(ErrorContext("a pick of '", def.name, "' reads an edge and was given ",
+				query.previous.size(), " previous inputs; the table declares ", def.inputs.size()));
+		}
+		// Only an input an edge reads is crossed from its previous value; the
+		// others' previous values are never looked at, so they are not judged.
+		for (column_def const& col : def.columns)
+		{
+			if (!col.edge)
+			{
+				continue;
+			}
+			detail::bad_input const badPrevious = detail::BadInputAt(def, query.previous, col.input);
+			if (badPrevious.index != UINT32_MAX)
+			{
+				return tl::make_unexpected(detail::BadInputError(def, badPrevious, query.previous)
+					.with("the previous value of input '", def.inputs[badPrevious.index].name, "'"));
+			}
+		}
+	}
 	if (def.key_count == 0)
 	{
 		return row_range{0, version.RowCount()};
@@ -83,7 +109,7 @@ detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query co
 	table_rows const& rows = version_access::Rows(version);
 	for (uint32_t c = 0; c < def.columns.size(); ++c)
 	{
-		if (def.columns[c].type != column_type::Band)
+		if (def.columns[c].type != column_type::Band || def.columns[c].edge)
 		{
 			continue;
 		}
@@ -93,6 +119,10 @@ detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query co
 		{
 			return detail::row_test::Misses;
 		}
+	}
+	if (def.edges && !detail::EdgesHold(version, row, query.inputs, query.previous))
+	{
+		return detail::row_test::Misses;
 	}
 	return detail::ScriptHolds(version, row, query.this_in, error);
 }
@@ -132,19 +162,29 @@ float ClampedInput(input_def const& in, double value)
 	return static_cast<float>(std::clamp(value, double(in.lo), top));
 }
 
+bad_input BadInputAt(table_def const& def, std::span<cell const> inputs, uint32_t i)
+{
+	if (def.inputs[i].type == column_type::Flags && !Fits32(inputs[i].i))
+	{
+		return bad_input{i, false};
+	}
+	// A clamp has no place for NaN, in any policy: the range declaration
+	// is what refuses it, not the pick.
+	if (def.inputs[i].ranged && std::isnan(inputs[i].d))
+	{
+		return bad_input{i, true};
+	}
+	return {};
+}
+
 bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs)
 {
 	for (uint32_t i = 0; i < def.inputs.size(); ++i)
 	{
-		if (def.inputs[i].type == column_type::Flags && !Fits32(inputs[i].i))
+		bad_input const bad = BadInputAt(def, inputs, i);
+		if (bad.index != UINT32_MAX)
 		{
-			return bad_input{i, false};
-		}
-		// A clamp has no place for NaN, in any policy: the range declaration
-		// is what refuses it, not the pick.
-		if (def.inputs[i].ranged && std::isnan(inputs[i].d))
-		{
-			return bad_input{i, true};
+			return bad;
 		}
 	}
 	return {};
@@ -159,6 +199,28 @@ ErrorContext BadInputError(table_def const& def, bad_input bad, std::span<cell c
 	}
 	return ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
 		"' is a flag set, a 32-bit value widened without sign; got ", inputs[bad.index].i);
+}
+
+bool EdgesHold(TableVersion const& version, size_t row, std::span<cell const> inputs, std::span<cell const> previous)
+{
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	for (uint32_t c = 0; c < def.columns.size(); ++c)
+	{
+		std::optional<cell> const edge = EdgeBandAt(def.columns[c], rows.cells.data() + row * rows.valueCount, rows.slot[c]);
+		if (!edge)
+		{
+			continue;
+		}
+		cell const band = *edge;
+		input_def const& in = def.inputs[def.columns[c].input];
+		uint32_t const   i  = def.columns[c].input;
+		if (!Crossed(band, ClampedInput(in, previous[i].d), ClampedInput(in, inputs[i].d)))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext& error)

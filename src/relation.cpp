@@ -136,7 +136,15 @@ tl::expected<immutable_array<column_def>, ErrorContext> BuildColumns(create_tabl
 		{
 			return tl::make_unexpected(std::move(reads.error()));
 		}
-		columns[i] = column_def{std::string(in.name), in.type, in.key, in.input};
+		// An edge is a way a band holds. A band reads an input only in a
+		// picked table, so this one rule refuses an edge wherever no pick reads
+		// it (a weighted table has no inputs, so no band and no edge).
+		if (in.edge && in.type != column_type::Band)
+		{
+			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name, "' is ",
+				in.type == column_type::Int ? "an " : "a ", TypeName(in.type), " marked edge; only a band is an edge"));
+		}
+		columns[i] = column_def{std::string(in.name), in.type, in.key, in.input, in.edge};
 	}
 	return immutable_array<column_def>(std::move(columns));
 }
@@ -187,6 +195,7 @@ tl::expected<void, ErrorContext> BuildPick(create_table const& c, table_def& out
 		{
 			++out.key_count;
 		}
+		out.edges = out.edges || col.edge;
 		if (col.type == column_type::Condition && ++conditions > 1)
 		{
 			return tl::make_unexpected(ErrorContext("table '", c.name,
@@ -963,6 +972,10 @@ tl::expected<void, ErrorContext> CheckRow(table_def const& def, slot_layout cons
 		if (column.type == column_type::Band)
 		{
 			cell const band = values[slots.slot[c]];
+			if (column.edge && IsNoEdge(band))
+			{
+				continue;
+			}
 			if (!IsWellFormedBand(band))
 			{
 				return tl::make_unexpected(MalformedBand(column, def, band));

@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace tabular
@@ -80,6 +81,26 @@ inline tl::expected<void, ErrorContext> Check32(column_def const& column, table_
 inline bool IsWellFormedBand(cell band)
 {
 	return std::isfinite(band.v[0]) && std::isfinite(band.v[1]) && band.v[0] < band.v[1];
+}
+
+// An edge column's cell that holds no edge (NoEdge(): both ends NaN). A
+// well-formed band has neither end NaN, so the two never meet.
+inline bool IsNoEdge(cell band)
+{
+	return std::isnan(band.v[0]) && std::isnan(band.v[1]);
+}
+
+// The edge band of a row at a column, or none when the column is no edge or the
+// row's cell there holds no edge. rowCells is the row's value cells and slot
+// the column's position among them. One reading, so the proof, the pick and
+// the display cannot disagree on which cells are edges.
+inline std::optional<cell> EdgeBandAt(column_def const& column, cell const* rowCells, uint32_t slot)
+{
+	if (!column.edge || IsNoEdge(rowCells[slot]))
+	{
+		return std::nullopt;
+	}
+	return rowCells[slot];
 }
 
 // Each column's position among the columns of its kind, as the store numbers
