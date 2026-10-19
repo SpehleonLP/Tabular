@@ -68,7 +68,7 @@ TEST(RowsCsv, ReadsEveryTypeInHeaderOrder)
 	EXPECT_EQ(store.Value(0, 0, 1)->i, -1);
 	EXPECT_EQ(store.Value(0, 0, 2)->i, 3);
 	EXPECT_EQ(store.Value(0, 0, 3)->d, -0.25);
-	EXPECT_EQ(*store.CommandAt(0, 0, 4), "(spawn moth)");
+	EXPECT_EQ(*store.CommandAt(0, 0, 4), "((spawn moth))") << "a command column holds a list of commands";
 	EXPECT_EQ(store.Value(0, 1, 2)->i, 16);
 	EXPECT_EQ(store.Value(0, 1, 3)->d, 1.5);
 }

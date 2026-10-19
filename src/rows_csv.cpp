@@ -44,7 +44,7 @@ struct pending_conditions
 
 // A suffix row's command: its cells from the first undeclared one on, as one
 // list (see CommandList).
-std::string SuffixList(detail::csv_text const& file, size_t row, size_t first)
+tl::expected<std::string, ErrorContext> SuffixList(detail::csv_text const& file, size_t row, size_t first)
 {
 	std::vector<std::string_view> cells;
 	for (size_t c = first; c < file.width(row); ++c)
@@ -271,7 +271,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	std::vector<std::string_view> commands(count * commandCount);
 	std::vector<string_in>        strings(count * stringCount);
 	pending_conditions            conditions(count * conditionCount);
-	std::vector<std::string>      suffixes(def.suffix ? count : 0);   // commands views them until Load
+	std::vector<std::string>      lists(count * commandCount);   // commands views them until Load
 	detail::hash_names            names;
 	for (size_t r = 0; r < count; ++r)
 	{
@@ -283,14 +283,24 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 			return tl::make_unexpected(ErrorContext("row has ", file.used_width(r + 1), " cells, but the header has ", width)
 				.with(label(line)));
 		}
-		if (def.suffix)
-		{
-			suffixes[r] = SuffixList(file, r + 1, declared);
-		}
 		for (size_t h = 0; h < width; ++h)
 		{
 			column_def const& column = def.columns[columnOf[h]];
-			std::string_view  text   = def.suffix && h == declared ? std::string_view(suffixes[r]) : file.cell(h, r + 1);
+			bool const        suffix = def.suffix && h == declared;
+			std::string_view  text   = file.cell(h, r + 1);
+			if (suffix)
+			{
+				// An empty suffix is (), so it is never refused as blank.
+				auto list = SuffixList(file, r + 1, declared);
+				if (!list)
+				{
+					return tl::make_unexpected(std::move(list.error()).with("column '", column.name, "'").with(label(line)));
+				}
+				std::string& kept = lists[r * commandCount + slot[columnOf[h]]];
+				kept = std::move(*list);
+				commands[r * commandCount + slot[columnOf[h]]] = kept;
+				continue;
+			}
 			// The one blank cell CSV accepts is a condition's: "no condition",
 			// which the loader must see to prove a table total.
 			if (column.type == column_type::Condition && text.empty())
@@ -324,7 +334,18 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				}
 				if (column.type == column_type::Command)
 				{
-					commands[r * commandCount + slot[columnOf[h]]] = text;
+					// Every command column is a list of commands, a declared one
+					// read as a suffix of one cell.
+					std::string_view const cells[] = {text};
+					auto list = detail::CommandList(cells);
+					if (!list)
+					{
+						return tl::make_unexpected(std::move(list.error()).with("column '", column.name, "'")
+							.with(label(line)));
+					}
+					std::string& kept = lists[r * commandCount + slot[columnOf[h]]];
+					kept = std::move(*list);
+					commands[r * commandCount + slot[columnOf[h]]] = kept;
 				}
 				else
 				{

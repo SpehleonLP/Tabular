@@ -140,14 +140,18 @@ store checks the shape of every command column, whichever surface wrote it, and 
 is given, so a builder caller writes the list itself. Decided in building:
 
 - The wrap rule counts items, not whitespace: a cell holding only a string (`"a b"`, written
-  `"""a b"""` in CSV) is one item and is not wrapped. A cell that is not whole by itself (an
-  unclosed paren or string) is left as written, so the shape check refuses it rather than the
-  wrap balancing it.
+  `"""a b"""` in CSV) is one item and is not wrapped. A cell of several items that does not
+  start with `(` and is not whole by itself (`message food (say`, `a) (b`) is refused rather
+  than wrapped, and the store requires exactly one list, not just balanced text (review,
+  2026-10-19: cells `a)` and `(b` balanced to `(a) (b)`). A cell that is exactly `()` adds
+  nothing.
 - A backslash inside a string escapes whatever follows it; only an unterminated string is
   refused.
-- A declared (non-suffix) command column keeps its cell verbatim, shape-checked; an empty one
-  is still refused, as every empty CSV cell is. An empty command reaching the store is refused
-  too: "do nothing" is `()`.
+- Every command column is a list of commands (2026-10-19, after review): a declared
+  (non-suffix) command column's cell is read by the suffix's rule, so `anim chew` and
+  `(anim chew)` both read as `((anim chew))` and `()` stays `()`. An empty one is still
+  refused, as every empty CSV cell is. An empty command reaching the store is refused too: "do
+  nothing" is `()`. A grid's command cells are not emitted by any clause and stay as written.
 - Each result is `emitted{list, table, command}`; the list lets a host tell an exit's abort
   from an entry's start, and lets a rebind's results be attributed to the old or new binding.
 - `CreateInstance` returns the instance, so creation's results are read from

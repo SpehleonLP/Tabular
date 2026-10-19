@@ -143,7 +143,7 @@ struct instance_access
 	static std::vector<float>&         Axes(instance& i) { return i._axes; }
 	static bool&                       Absorbed(instance& i) { return i._absorbed; }
 	static std::vector<emitted>&       Emitted(instance& i) { return i._emitted; }
-	static size_t&                     EmittedCount(instance& i) { return i._emittedCount; }
+	static size_t&                     EmittedCount(instance& i) { return i._emittedCount.n; }
 	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
 #if TABULAR_PROVENANCE
 	static std::vector<provenance_entry>& Ring(instance& i) { return i._provenance; }
@@ -998,6 +998,12 @@ Binding const& instance::binding() const
 {
 	assert(_binding && "a moved-from instance is used: caller misuse");
 	return *_binding;
+}
+
+std::span<emitted const> instance::Emitted() const
+{
+	assert(_binding && "a moved-from instance is used: caller misuse");
+	return std::span<emitted const>(_emitted.data(), _emittedCount.n);
 }
 
 #if TABULAR_PROVENANCE

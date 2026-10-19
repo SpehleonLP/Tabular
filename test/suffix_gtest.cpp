@@ -137,6 +137,43 @@ TEST(SuffixCsv, UnbalancedParenthesesAreRefusedNamingTheLine)
 	EXPECT_TRUE(Mentions(closed, "')' that closes nothing")) << closed;
 }
 
+// Wrapping a cell that is not whole by itself would guess where its
+// parenthesis was meant to go; balancing alone is not enough, since a later
+// cell can close what an earlier one opened into the wrong shape.
+TEST(SuffixCsv, ACellOfSeveralItemsThatIsNotWholeIsRefused)
+{
+	relation_store store = Store();
+	std::string const split = Load(store, "mode,command\neat,message food (say, \"\"\"hi\"\")\"\n");
+	EXPECT_TRUE(Mentions(split, "enter.csv:2")) << split;
+	EXPECT_TRUE(Mentions(split, "'message food (say' holds several items and is not whole")) << split;
+	std::string const inside = Load(store, "mode,command\neat,a) (b\n");
+	EXPECT_TRUE(Mentions(inside, "enter.csv:2")) << inside;
+	EXPECT_TRUE(Mentions(inside, "'a) (b' holds several items and is not whole")) << inside;
+	EXPECT_EQ(store.RowCount(0), 0u);
+	ASSERT_EQ(Load(store, "mode,command\neat,(message food (say, \"\"\"hi\"\"))\"\n"), "")
+		<< "a command that starts with '(' may run across cells";
+	EXPECT_EQ(CommandOf(store, 0), "((message food (say \"hi\")))");
+}
+
+// The joined list must be one list, not just balanced text: cells `a)` and
+// `(b` balance to `(a) (b)`, two lists.
+TEST(SuffixCsv, CellsThatJoinIntoTwoListsAreRefused)
+{
+	relation_store store = Store();
+	std::string const refused = Load(store, "mode,command\neat,a), (b\n");
+	EXPECT_TRUE(Mentions(refused, "enter.csv:2")) << refused;
+	EXPECT_TRUE(Mentions(refused, "is not one list")) << refused;
+}
+
+// () is the explicit "do nothing", in a suffix as in a declared column.
+TEST(SuffixCsv, AnEmptyListCellAddsNothing)
+{
+	relation_store store = Store();
+	ASSERT_EQ(Load(store, "mode,command\nidle,()\neat,(),idle\n"), "");
+	EXPECT_EQ(CommandOf(store, 0), "()");
+	EXPECT_EQ(CommandOf(store, 1), "(idle)");
+}
+
 TEST(SuffixCsv, AnUnterminatedStringIsRefusedNamingTheLine)
 {
 	relation_store store = Store();
@@ -203,6 +240,13 @@ TEST(SuffixStore, TheBuilderSurfaceIsShapeCheckedToo)
 		return loaded ? std::string() : loaded.error().format();
 	}();
 	EXPECT_TRUE(Mentions(refused, "never closed")) << refused;
+	for (std::string_view const notOne : {"(a) (b)", "nop", "\"say\""})
+	{
+		std::string_view const texts[] = {notOne};
+		auto loaded = store.Load(load_rows{0, 1, 1, values, texts});
+		ASSERT_FALSE(loaded.has_value()) << notOne;
+		EXPECT_TRUE(Mentions(loaded.error().format(), "is not one list")) << loaded.error().format();
+	}
 	std::string_view const good[] = {"((anim stand))"};
 	auto loaded = store.Load(load_rows{0, 1, 1, values, good});
 	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
@@ -347,6 +391,39 @@ TEST(SuffixCsv, APivotedLoadIntoASuffixTableIsRefused)
 	auto loaded = LoadCsv(store, command);
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_EQ(store.RowCount(0), 0u);
+}
+
+// Every command column holds a list of commands, so a declared one reads its
+// one cell by the suffix's rule: a host never has to ask which kind of column
+// a result came from.
+TEST(SuffixCsv, ADeclaredCommandColumnIsAListOfCommandsToo)
+{
+	constexpr std::string_view schema = R"(
+tables:
+  - name: plain
+    read_only: true
+    columns:
+      - {name: id, type: int}
+      - {name: on_spawn, type: command}
+)";
+	auto s = SchemaFromYaml(schema, "plain.yaml");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	relation_store store(std::move(*s));
+	auto loaded = LoadCsv(store, csv_rows{0, 1, "id, on_spawn\n1, anim chew\n2, (anim chew)\n3, ()\n4, idle\n",
+		"plain.csv"});
+	ASSERT_TRUE(loaded.has_value()) << loaded.error().format();
+	std::vector<std::string> got;
+	for (size_t r = 0; r < 4; ++r)
+	{
+		auto command = store.CommandAt(0, r, 1);
+		got.push_back(command ? std::string(*command) : command.error().format());
+	}
+	EXPECT_EQ(got, (std::vector<std::string>{"((anim chew))", "((anim chew))", "()", "(idle)"}));
+	auto blank = LoadCsv(store, csv_rows{0, 1, "id, on_spawn\n1,\n", "plain.csv"});
+	ASSERT_FALSE(blank.has_value()) << "a declared command cell left blank is still a slip; () does nothing";
+	auto split = LoadCsv(store, csv_rows{0, 1, "id, on_spawn\n1, a) (b\n", "plain.csv"});
+	ASSERT_FALSE(split.has_value());
+	EXPECT_TRUE(Mentions(split.error().format(), "plain.csv:2")) << split.error().format();
 }
 
 TEST(SuffixCsv, ATableWithoutASuffixStillTakesACommaAsACellBoundary)

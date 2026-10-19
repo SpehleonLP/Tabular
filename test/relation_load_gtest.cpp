@@ -83,11 +83,11 @@ TEST(RelationLoad, LoadSortsByTheOrderAndKeepsTiesInFileOrder)
 	relation_store store = Store(false, true);
 	std::vector<cell> v;
 	std::vector<std::string_view> c;
-	auto loaded = store.Load(Rows(1, v, c, {{5, 3, 0.0, "a"}, {5, 1, 0.0, "b"}, {2, 9, 0.0, "c"}, {5, 1, 0.0, "d"}}));
+	auto loaded = store.Load(Rows(1, v, c, {{5, 3, 0.0, "(a)"}, {5, 1, 0.0, "(b)"}, {2, 9, 0.0, "(c)"}, {5, 1, 0.0, "(d)"}}));
 	ASSERT_TRUE(loaded.has_value()) << loaded.error().message;
 	EXPECT_EQ(Sections(store), (std::vector<int64_t>{9, 1, 1, 3}));
-	EXPECT_EQ(*store.CommandAt(0, 1, 3), "b");
-	EXPECT_EQ(*store.CommandAt(0, 2, 3), "d");
+	EXPECT_EQ(*store.CommandAt(0, 1, 3), "(b)");
+	EXPECT_EQ(*store.CommandAt(0, 2, 3), "(d)");
 }
 
 TEST(RelationLoad, ReloadReplacesOnlyThatOwnersRows)
@@ -95,9 +95,9 @@ TEST(RelationLoad, ReloadReplacesOnlyThatOwnersRows)
 	relation_store store = Store(false, true);
 	std::vector<cell> v1, v2, v3;
 	std::vector<std::string_view> c1, c2, c3;
-	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "one"}, {1, 2, 0.0, "one"}})).has_value());
-	ASSERT_TRUE(store.Load(Rows(2, v2, c2, {{1, 3, 0.0, "two"}})).has_value());
-	ASSERT_TRUE(store.Load(Rows(1, v3, c3, {{1, 4, 0.0, "one again"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "(one)"}, {1, 2, 0.0, "(one)"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(2, v2, c2, {{1, 3, 0.0, "(two)"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v3, c3, {{1, 4, 0.0, "(one again)"}})).has_value());
 	EXPECT_EQ(Sections(store), (std::vector<int64_t>{3, 4}));
 	EXPECT_EQ(store.OwnerOf(0, 0), 2u);
 	EXPECT_EQ(store.OwnerOf(0, 1), 1u);
@@ -133,7 +133,7 @@ TEST(RelationLoad, LoadIsAllOrNothing)
 	relation_store store = Store(true, true);
 	std::vector<cell> v1, v2;
 	std::vector<std::string_view> c1, c2;
-	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "kept"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "(kept)"}})).has_value());
 	uint64_t before = store.Generation(0);
 	// Owner 2's second row clashes with owner 1's row: nothing of owner 2's lands.
 	auto loaded = store.Load(Rows(2, v2, c2, {{1, 5, 0.0, "(n)"}, {1, 1, 0.0, "(n)"}}));
@@ -160,9 +160,9 @@ TEST(RelationLoad, ReloadingTheSameKeyUnderTheSameOwnerIsNotAClash)
 	relation_store store = Store(true, true);
 	std::vector<cell> v1, v2;
 	std::vector<std::string_view> c1, c2;
-	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{4, 4, 0.0, "old"}})).has_value());
-	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{4, 4, 0.0, "new"}})).has_value());
-	EXPECT_EQ(*store.CommandAt(0, 0, 3), "new");
+	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{4, 4, 0.0, "(old)"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{4, 4, 0.0, "(new)"}})).has_value());
+	EXPECT_EQ(*store.CommandAt(0, 0, 3), "(new)");
 }
 
 TEST(RelationLoad, BadLoadsAreRefused)
@@ -193,17 +193,17 @@ TEST(RelationLoad, AHeldVersionIsNeverModified)
 	relation_store store = Store(false, true);
 	std::vector<cell> v1, v2;
 	std::vector<std::string_view> c1, c2;
-	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "old"}, {1, 2, 0.0, "old"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v1, c1, {{1, 1, 0.0, "(old)"}, {1, 2, 0.0, "(old)"}})).has_value());
 	auto held = store.Version(0);
 	ASSERT_TRUE(held.has_value()) << held.error().message;
 
-	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{1, 9, 0.0, "new"}})).has_value());
+	ASSERT_TRUE(store.Load(Rows(1, v2, c2, {{1, 9, 0.0, "(new)"}})).has_value());
 	store.Retract(retract_owner{1});
 
 	// The reload and the retract made new versions; the held one still reads as loaded.
 	ASSERT_EQ((*held)->RowCount(), 2u);
 	EXPECT_EQ((*held)->Value(1, 1)->i, 2);
-	EXPECT_EQ(*(*held)->CommandAt(0, 3), "old");
+	EXPECT_EQ(*(*held)->CommandAt(0, 3), "(old)");
 	EXPECT_EQ((*held)->Find(0, cell::Integer(1))->size(), 2u);
 	EXPECT_EQ(store.RowCount(0), 0u);
 }

@@ -409,7 +409,11 @@ std::unique_ptr<reload_world> Mover()
 
 // A rebind returns the old exit's commands, views into the old binding's
 // versions, and a host commonly drops the old binding straight after: the
-// instance keeps it until its next run.
+// instance keeps it until its next run. The exit table is reloaded first, so
+// once v1 is dropped the instance is the only holder of the version those
+// views point into. A dangling view may still read the freed bytes, so only an
+// ASan build is sure to catch the instance letting go too early; elsewhere
+// this checks the views name the old version's text, not the new one's.
 TEST(MachineRebind, TheOldExitsCommandsOutliveTheOldBindingUntilTheNextRun)
 {
 	auto w = Mover();
@@ -418,13 +422,14 @@ TEST(MachineRebind, TheOldExitsCommandsOutliveTheOldBindingUntilTheNextRun)
 	host_object host;
 	instance mover = CreateInstance(*v1, 3, 0, &host);
 	Step(mover, &host, 1, Message("to_b"));
+	w->Load(MoverExit, Replace(kMoverExitRows, "(exit b)", "(exit b reloaded)"));
 	counted_ptr<Binding const> v2 = w->Bound("v2", Quiet(kMover));
 	ASSERT_TRUE(v2);
 	std::span<emitted const> const results = Rebind(mover, *v2, &host, 2);
 	v1 = counted_ptr<Binding const>{};
 	ASSERT_EQ(results.size(), 2u);
 	EXPECT_EQ(results[0].list, trigger::Exit);
-	EXPECT_EQ(results[0].command, "((exit b))");
+	EXPECT_EQ(results[0].command, "((exit b))") << "the old version's exit, which only the instance still holds";
 	EXPECT_EQ(results[1].list, trigger::Entry);
 	EXPECT_EQ(results[1].command, "((enter b))");
 }

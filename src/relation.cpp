@@ -959,7 +959,7 @@ tl::expected<void, ErrorContext> CheckRow(table_def const& def, slot_layout cons
 				return tl::make_unexpected(ErrorContext("column '", column.name, "' of '", def.name,
 					"' got an empty command; a row that does nothing holds ()"));
 			}
-			auto shaped = detail::CheckCommandShape(command);
+			auto shaped = detail::CheckCommandList(command);
 			if (!shaped)
 			{
 				return tl::make_unexpected(std::move(shaped.error()).with("column '", column.name, "' of '", def.name, "'"));

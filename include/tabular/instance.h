@@ -92,9 +92,9 @@ struct message
 
 // One command a run emitted (P12): a clause with an emit answered, and this
 // is the list it is in (so a host tells an exit's abort from an entry's
-// start), its table and the picked row's command, the row's list of commands
-// as the store keeps it (`((anim chew) (message food "eat"))`, `()` for
-// none). A view into the version the binding that ran the clause holds;
+// start), its table and the picked row's command: a list of commands, as
+// every command column holds, declared or suffix (`((anim chew) (message food
+// "eat"))`, `()` for none). A view into the version the binding that ran the clause holds;
 // Tabular does not interpret it.
 struct emitted
 {
@@ -331,8 +331,12 @@ public:
 	// its lists ran: the span Step and Rebind return, and creation's, which
 	// CreateInstance cannot. Valid until the instance next runs, is moved or
 	// destroyed: a rebind's exit commands view the old binding's versions, so
-	// the instance keeps that binding until then.
-	std::span<emitted const> Emitted() const { return std::span<emitted const>(_emitted.data(), _emittedCount); }
+	// the instance keeps that binding until then. That run may so drop the
+	// last reference to the old binding: its getters' release functions (and
+	// whatever the Binding's Machine and versions free) then run inside that
+	// Step, on the thread stepping the instance. A host that wants them freed
+	// elsewhere keeps its own reference to the old binding and drops it there.
+	std::span<emitted const> Emitted() const;
 
 #if TABULAR_PROVENANCE
 	// The last kProvenanceDepth clauses that ran, oldest first, across
@@ -366,7 +370,21 @@ private:
 	// The last run's commands: room for every clause that can emit, so a step
 	// that emits allocates nothing.
 	std::vector<emitted>       _emitted;
-	size_t                     _emittedCount = 0;
+	// How many of _emitted the last run filled. Zeroed when moved from, as the
+	// vector is, so a moved-from instance never claims slots it no longer has.
+	struct emitted_count
+	{
+		size_t n = 0;
+		emitted_count() = default;
+		emitted_count(emitted_count&& other) noexcept : n(other.n) { other.n = 0; }
+		emitted_count& operator=(emitted_count&& other) noexcept
+		{
+			n       = other.n;
+			other.n = 0;
+			return *this;
+		}
+	};
+	emitted_count              _emittedCount;
 	counted_ptr<Binding const> _left;        // the binding a rebind left, while its exit's commands are returned
 	bool                       _absorbed = false;
 #if TABULAR_PROVENANCE
@@ -460,7 +478,10 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 // valid state, and a clause that cannot answer holds as in a step. binding may
 // be the one subject already has, which restarts its state. self and seed are
 // as for Step: getters, script conditions and weighted draws need them.
-// Allocates (it sizes the new buffers); it is not a step.
+// Allocates (it sizes the new buffers); it is not a step. The returned exit
+// commands view the old binding's versions, so subject holds the old binding
+// until its next run, and that run may drop the last reference to it (see
+// Emitted()).
 std::span<emitted const> Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed);
 
 }

@@ -158,12 +158,19 @@ the feature is wrong, not the rule.
   itself). Outside an open parenthesis, a cell of more than one item that does not start with
   `(` is one command written without its parentheses and is wrapped: `message this hard-land`
   reads as `(message this hard-land)`. A string is one item, so a cell holding just a string is
-  not wrapped; a cell that is not whole by itself (an unclosed paren or string) is left as
-  written, for the shape check to refuse. The store checks every command's shape, whichever
-  surface wrote it, and nothing more: lexically, parentheses, double-quoted strings (`\"` and
-  `\\` escape inside one; a backslash escapes whatever follows it) and atoms. A `)` that closes
-  nothing, a `(` or a string never closed, or an empty command is refused, naming the line in
-  CSV. The list is built once, at load, so a step never parses or builds text. A builder caller
+  not wrapped. A cell of several items that does not start with `(` and is not whole by itself
+  (`message food (say`, `a) (b`) is refused, naming the line, since wrapping it would guess
+  where its parenthesis was meant to go; a command that runs across cells starts with `(`. A
+  cell that is exactly `()` is the explicit "do nothing" and adds nothing. **Every command
+  column is a list of commands** (2026-10-19): a declared command column's one cell is read by
+  the same rule, so `anim chew` and `(anim chew)` both read as `((anim chew))`, `()` stays
+  `()`, and a host reads every result the same way whichever kind of column it came from (a
+  blank declared cell is still refused, as every blank CSV cell is). The store checks every
+  command, whichever surface wrote it, and nothing more: it is exactly one list, lexically
+  parentheses, double-quoted strings (`\"` and `\\` escape inside one; a backslash escapes
+  whatever follows it) and atoms. A `)` that closes nothing, a `(` or a string never closed,
+  text that is not one list (`(a) (b)`, a bare word), or an empty command is refused, naming the
+  line in CSV. The list is built once, at load, so a step never parses or builds text. A builder caller
   writes the list itself, as the store keeps it. The header names
   the declared columns and ends with the suffix column's name (the reader needs that last
   header cell to know where the suffix cells start); a header that names anything else
@@ -992,7 +999,7 @@ changed through the table's generation counter (see Generation).
 3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
    table. The header names the columns in any order, every non-condition column exactly once.
    A hash cell is `CityHash32` of its text; flags are unsigned decimal or `0x` hex below 2^32;
-   an int is signed decimal; a double is read whole; a declared command column's cell is its text verbatim (shape-checked), a suffix's cells one list (see Suffix). A cell
+   an int is signed decimal; a double is read whole; a command column's cell, declared or suffix, is read as one list of commands (see Suffix). A cell
    must parse whole, and an empty cell is refused in every column type, except a blank
    condition cell, which is no condition. A condition cell is handed, as text, to a
    function the caller passes to the loader (`csv_rows::condition`, returning

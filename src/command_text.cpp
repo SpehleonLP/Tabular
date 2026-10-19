@@ -104,7 +104,7 @@ struct command_lexer
 
 }
 
-tl::expected<void, ErrorContext> CheckCommandShape(std::string_view command)
+tl::expected<void, ErrorContext> CheckCommandList(std::string_view command)
 {
 	command_lexer lex;
 	lex.Feed(command);
@@ -120,17 +120,25 @@ tl::expected<void, ErrorContext> CheckCommandShape(std::string_view command)
 	{
 		return tl::make_unexpected(ErrorContext("the command '", command, "' has a '(' that is never closed"));
 	}
+	// Balanced and one item: that item is a list only when it opens with '('.
+	std::string_view const text = Trim(command);
+	if (lex.items != 1 || text.front() != '(')
+	{
+		return tl::make_unexpected(ErrorContext("the command '", command,
+			"' is not one list; a row's commands are one list, like ((anim chew) idle), and () for none"));
+	}
 	return {};
 }
 
-std::string CommandList(std::span<std::string_view const> cells)
+tl::expected<std::string, ErrorContext> CommandList(std::span<std::string_view const> cells)
 {
 	std::string   out = "(";
 	command_lexer across;
 	for (std::string_view raw : cells)
 	{
 		std::string_view const text = Trim(raw);
-		if (text.empty())
+		bool const topLevel = across.depth == 0 && !across.inString;
+		if (text.empty() || (topLevel && text == "()"))
 		{
 			continue;
 		}
@@ -138,13 +146,16 @@ std::string CommandList(std::span<std::string_view const> cells)
 		{
 			out += ' ';
 		}
-		// Only a cell that is whole by itself is wrapped, so a malformed one
-		// reaches the store's check as written instead of being balanced here.
-		if (across.depth == 0 && !across.inString && text.front() != '(')
+		if (topLevel && text.front() != '(')
 		{
 			command_lexer own;
 			own.Feed(text);
-			if (own.items > 1 && own.Balanced())
+			if (own.items > 1 && !own.Balanced())
+			{
+				return tl::make_unexpected(ErrorContext("the cell '", text, "' holds several items and is not whole by "
+					"itself; a command that runs across cells starts with '('"));
+			}
+			if (own.items > 1)
 			{
 				out += '(';
 				out += text;
@@ -157,6 +168,11 @@ std::string CommandList(std::span<std::string_view const> cells)
 		across.EndCell();
 	}
 	out += ')';
+	auto checked = CheckCommandList(out);
+	if (!checked)
+	{
+		return tl::make_unexpected(std::move(checked.error()));
+	}
 	return out;
 }
 

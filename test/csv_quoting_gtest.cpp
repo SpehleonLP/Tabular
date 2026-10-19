@@ -136,6 +136,30 @@ TEST(CsvQuoting, AQuotedCellMaySpanLinesAndLaterRowsKeepTheirLines)
 	EXPECT_TRUE(Mentions(refused, "spawn.csv:4")) << refused;
 }
 
+// A Windows export ends rows with CRLF, and a line break typed inside a cell
+// is quoted text: it is kept as written, its CR too, while the CR ending a
+// row is not part of the last cell.
+TEST(CsvQuoting, ACrlfInsideQuotesIsTextAndOneEndingARowIsNot)
+{
+	relation_store store = Store();
+	ASSERT_EQ(Load(store, "package,section,note\r\nmeadow,1,\"first\r\nsecond\"\r\nmeadow,2,x\r\n"), "");
+	ASSERT_EQ(store.RowCount(0), 2u);
+	EXPECT_EQ(Note(store, 0), "first\r\nsecond");
+	EXPECT_EQ(Note(store, 1), "x");
+}
+
+// A row of nothing but empty quoted cells says nothing, as a row of nothing
+// but commas does: a spreadsheet writes one for a blank line it quotes, and
+// it is skipped, keeping the line numbers of the rows after it.
+TEST(CsvQuoting, ARowOfOnlyEmptyQuotedCellsIsABlankLine)
+{
+	relation_store store = Store();
+	ASSERT_EQ(Load(store, "package,section,note\n\"\",\"\",\"\"\nmeadow,1,x\n"), "");
+	EXPECT_EQ(store.RowCount(0), 1u);
+	std::string const refused = Load(store, "package,section,note\n\"\",\"\",\"\"\nmeadow,zero,x\n");
+	EXPECT_TRUE(Mentions(refused, "spawn.csv:3")) << refused;
+}
+
 // Only a row whose first unquoted character is '#' is a comment: a quoted
 // "#1" is a cell, and a spreadsheet's comment row comes with its padding.
 TEST(CsvQuoting, OnlyAnUnquotedHashStartsAComment)
