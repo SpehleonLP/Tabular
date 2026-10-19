@@ -903,14 +903,19 @@ void ExpectSameAnswer(tl::expected<std::optional<size_t>, ErrorContext> const& o
 
 }
 
-TEST(EdgeParity, RandomWalksMatchPickBestAndPickOrStepByStep)
+namespace
 {
-	edge_fixture f(kWalker, {kWalkRows, kPulseRows});
+
+// Walks the walker's threat at random and checks each step against PickBest
+// (walk) and PickOr (pulse) given the same value and previous value.
+void WalkParity(std::string_view yaml, uint64_t seed)
+{
+	edge_fixture f(yaml, {kWalkRows, kPulseRows});
 	ASSERT_TRUE(f.binding);
 	auto walk  = f.store.Version(0);
 	auto pulse = f.store.Version(1);
 	ASSERT_TRUE(walk && pulse);
-	std::mt19937_64 rng(0xed6e);
+	std::mt19937_64 rng(seed);
 	edge_host       host;
 	host.threat     = 0.1;
 	instance walker = CreateInstance(*f.binding, 1, 0, &host);
@@ -959,6 +964,13 @@ TEST(EdgeParity, RandomWalksMatchPickBestAndPickOrStepByStep)
 	EXPECT_GT(crossings, 600);
 	EXPECT_GT(failed, 200) << "NaN";
 	EXPECT_GT(pulses, 1000);
+}
+
+}
+
+TEST(EdgeParity, RandomWalksMatchPickBestAndPickOrStepByStep)
+{
+	WalkParity(kWalker, 0xed6e);
 }
 
 // A two-input table (an edge on threat, a plain band on energy) walked on both
@@ -1178,6 +1190,209 @@ TEST(MachineEdge, StepsThatCrossEdgesAllocateNothing)
 	{
 		host.threat  = walk[i % std::size(walk)];
 		host.unwired = i % 17 == 0;
+		Step(walker, &host, uint64_t(i));
+		answered += walker.Answer(trigger::Step, 0).outcome == clause_outcome::Answered ? 1 : 0;
+	}
+	EXPECT_EQ(count.Count(), 0u);
+	EXPECT_GT(answered, 100);
+}
+
+// ---- Cyclic inputs -----------------------------------------------------------------
+
+// A cyclic input's range is a period, as an animation phase's is: a pick wraps
+// it into the range, and a crossing goes the shorter way around, exactly half
+// a period upward. A footstep at the walk cycle's middle fires as the phase
+// passes 0.5, not when it wraps from 0.95 to 0.05.
+
+namespace
+{
+
+std::string Cyclic(std::string_view yaml)
+{
+	std::string text(yaml);
+	std::string const from = "{name: x, type: double, range: 0..1}";
+	std::string const to   = "{name: x, type: double, range: 0..1, cyclic: true}";
+	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+	{
+		text.replace(at, from.size(), to);
+	}
+	return text;
+}
+
+constexpr std::string_view kStep = R"(
+tables:
+  - name: zone
+    read_only: true
+    pick: best
+    inputs:
+      - {name: x, type: double, range: 0..1}
+    columns:
+      - {name: label, type: int, key: true, domain: rows}
+      - {name: zone,  type: band, input: x, edge: true}
+      - {name: clip,  type: int}
+    order_by: {columns: [label]}
+)";
+
+}
+
+TEST(CyclicSchema, ARangedDoubleInputMayWrapAndNoOtherInput)
+{
+	auto accepted = SchemaFromYaml(Cyclic(kStep), "edge.yaml");
+	ASSERT_TRUE(accepted.has_value()) << RefusalOf(accepted);
+	EXPECT_TRUE(accepted->tables()[0].inputs[0].cyclic);
+	auto linear = SchemaFromYaml(kStep, "edge.yaml");
+	ASSERT_TRUE(linear.has_value()) << RefusalOf(linear);
+	EXPECT_FALSE(linear->tables()[0].inputs[0].cyclic);
+
+	std::string unranged(kStep);
+	std::string const from = "{name: x, type: double, range: 0..1}";
+	unranged.replace(unranged.find(from), from.size(), "{name: x, type: double, cyclic: true}");
+	std::string const noRange = RefusalOf(SchemaFromYaml(unranged, "edge.yaml"));
+	EXPECT_TRUE(Mentions(noRange, "input 'x' of table 'zone' is cyclic and has no range; a cyclic input's range is its period"))
+		<< noRange;
+
+	// The table input whose bands read a machine input wraps; the machine's
+	// own declaration would be accepted and ignored.
+	std::string machine(kStartle);
+	std::string const machineInputs = "    inputs:\n      - {name: threat, type: double, range: 0..1}\n      - {name: energy, type: double, range: 0..1}\n    step:";
+	machine.replace(machine.find(machineInputs), machineInputs.size(),
+		"    inputs:\n      - {name: threat, type: double, range: 0..1, cyclic: true}\n      - {name: energy, type: double, range: 0..1}\n    step:");
+	std::string const onMachine = RefusalOf(DocumentFromYaml(machine, "edge.yaml"));
+	EXPECT_TRUE(Mentions(onMachine, "input 'threat' of the machine is cyclic; a table input whose bands read it declares that"))
+		<< onMachine;
+}
+
+TEST(CyclicPick, AFootstepFiresAsThePhasePassesItNotWhenThePhaseWraps)
+{
+	relation_store store = StoreFrom(Cyclic(kStep));
+	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,zone,clip\n1,0.5..0.55,10\n1,,11\n")), "(accepted)");
+	EXPECT_EQ(ZoneClip(store, 0.95, 0.05), 11) << "the wrap goes up through 1, not down through the band";
+	EXPECT_EQ(ZoneClip(store, 0.45, 0.6), 10) << "up through the band";
+	EXPECT_EQ(ZoneClip(store, 0.6, 0.45), 10) << "down through the band";
+	EXPECT_EQ(ZoneClip(store, 0.05, 0.95), 11) << "down through 0, nowhere near the band";
+	EXPECT_EQ(ZoneClip(store, 0.52, 0.53), 11) << "staying inside is no crossing";
+	// Exactly half a period is taken upward, so one pair of values crosses one way only.
+	EXPECT_EQ(ZoneClip(store, 0.25, 0.75), 10);
+	EXPECT_EQ(ZoneClip(store, 0.75, 0.25), 11);
+	// Values wrap into the period instead of clamping, previous values too.
+	EXPECT_EQ(ZoneClip(store, 0.45, 1.52), 10) << "1.52 is 0.52";
+	EXPECT_EQ(ZoneClip(store, -0.55, 0.52), 10) << "-0.55 is 0.45";
+	EXPECT_EQ(ZoneClip(store, 0.45, 7.0), 11) << "7 is 0, not the top of the range";
+
+	// The same rows on the linear input: the wrap sweeps down through every band.
+	relation_store linear = StoreFrom(kStep);
+	ASSERT_EQ(RefusalOf(LoadText(linear, 0, "label,zone,clip\n1,0.5..0.55,10\n1,,11\n")), "(accepted)");
+	EXPECT_EQ(ZoneClip(linear, 0.95, 0.05), 10);
+}
+
+TEST(CyclicPick, ABandAtEitherEndIsEnteredAcrossTheWrap)
+{
+	relation_store top = StoreFrom(Cyclic(kStep));
+	ASSERT_EQ(RefusalOf(LoadText(top, 0, "label,zone,clip\n1,0.9..1,10\n1,,11\n")), "(accepted)");
+	EXPECT_EQ(ZoneClip(top, 0.05, 0.95), 10) << "down across the wrap into the top band";
+	EXPECT_EQ(ZoneClip(top, 0.95, 0.05), 11) << "up out of it";
+	EXPECT_EQ(ZoneClip(top, 0.05, 0.85), 10) << "down across the wrap and through it";
+
+	relation_store bottom = StoreFrom(Cyclic(kStep));
+	ASSERT_EQ(RefusalOf(LoadText(bottom, 0, "label,zone,clip\n1,0..0.1,10\n1,,11\n")), "(accepted)");
+	EXPECT_EQ(ZoneClip(bottom, 0.95, 0.05), 10) << "up across the wrap into the bottom band";
+	EXPECT_EQ(ZoneClip(bottom, 0.05, 0.95), 11) << "down out of it";
+}
+
+TEST(CyclicPick, ACyclicInputRefusesAnInfinityAsWellAsNaN)
+{
+	relation_store store = StoreFrom(Cyclic(kStep));
+	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,zone,clip\n1,0.5..0.55,10\n1,,11\n")), "(accepted)");
+	cell const keys[]     = {cell::Integer(1)};
+	cell const inputs[]   = {cell::Real(std::numeric_limits<double>::infinity())};
+	cell const previous[] = {cell::Real(0.1)};
+	std::string const refused = RefusalOf(PickBest(store, 0, pick_query{keys, inputs, nullptr, previous}));
+	EXPECT_TRUE(Mentions(refused, "a cyclic input is wrapped into its period, which has no place for it")) << refused;
+	cell const nan[] = {cell::Real(kNaN)};
+	EXPECT_FALSE(PickBest(store, 0, pick_query{keys, nan, nullptr, previous}).has_value());
+
+	// A linear range clamps an infinity to its top.
+	relation_store linear = StoreFrom(kStep);
+	ASSERT_EQ(RefusalOf(LoadText(linear, 0, "label,zone,clip\n1,0.5..0.55,10\n1,,11\n")), "(accepted)");
+	EXPECT_TRUE(PickBest(linear, 0, pick_query{keys, inputs, nullptr, previous}).has_value());
+}
+
+TEST(CyclicLayout, ACrossingCanEndAnywhereOnThePeriod)
+{
+	// Up through 0.6..1 the short way ends past 1, below 0.6 once wrapped, so a
+	// plain row over 0.6..1 before the edge no longer leaves it no cell.
+	constexpr std::string_view kWindowed = R"(
+tables:
+  - name: zone
+    read_only: true
+    pick: best
+    inputs:
+      - {name: x, type: double, range: 0..1}
+    columns:
+      - {name: label,  type: int, key: true, domain: rows}
+      - {name: zone,   type: band, input: x, edge: true}
+      - {name: window, type: band, input: x}
+      - {name: clip,   type: int}
+    order_by: {columns: [label]}
+)";
+	constexpr std::string_view kRows = "label,zone,window,clip\n1,,0.6..1,9\n1,0.6..1,0..1,10\n1,,0..1,11\n";
+	relation_store linear = StoreFrom(kWindowed);
+	EXPECT_TRUE(Mentions(RefusalOf(LoadText(linear, 0, kRows)), "is never picked"));
+	relation_store cyclic = StoreFrom(Cyclic(kWindowed));
+	EXPECT_EQ(RefusalOf(LoadText(cyclic, 0, kRows)), "(accepted)");
+
+	// A band that is the whole period still holds for no input.
+	relation_store whole = StoreFrom(Cyclic(kStep));
+	std::string const refused = RefusalOf(LoadText(whole, 0, "label,zone,clip\n1,0..1,10\n1,,11\n"));
+	EXPECT_TRUE(Mentions(refused, "is never picked; its bands hold for no input")) << refused;
+}
+
+TEST(CyclicMachine, AFootstepStepsOncePerPassOfThePhase)
+{
+	// kStartle with its edge on a cyclic phase: startled is the footstep.
+	std::string yaml(kStartle);
+	std::string const table = "      - {name: threat, type: double, range: 0..1}\n      - {name: energy, type: double, range: 0..1}\n    columns:";
+	yaml.replace(yaml.find(table), table.size(),
+		"      - {name: threat, type: double, range: 0..1, cyclic: true}\n      - {name: energy, type: double, range: 0..1}\n    columns:");
+	edge_fixture f(yaml, {"mode, rise, tired, next\ngraze, 0.5..0.55, 0..1, startled\ngraze, , 0..1, graze\nstartled, , 0..1, graze\n",
+		kStartleEnterRows});
+	ASSERT_TRUE(f.binding);
+	edge_host host;
+	host.threat     = 0.1;
+	instance walker = CreateInstance(*f.binding, 1, 0, &host);
+	f.log.commands.clear();
+	double const phase[] = {0.3, 0.52, 0.7, 0.95, 0.05, 0.2, 0.45, 0.6, 0.9, 0.15, 0.4, 0.8};
+	int const    steps[] = {0,   1,    1,   1,    1,    1,   1,    2,   2,   2,    2,   3};
+	for (size_t i = 0; i < std::size(phase); ++i)
+	{
+		host.threat = phase[i];
+		Step(walker, &host, i);
+		EXPECT_EQ(Startles(f.log), steps[i]) << "step " << i << " phase " << phase[i];
+	}
+}
+
+TEST(CyclicParity, RandomWalksOnAPeriodMatchPickBestAndPickOrStepByStep)
+{
+	// The walk's values beyond 0..1 wrap, and its jumps go the short way round.
+	WalkParity(Cyclic(kWalker), 0xc1c1);
+}
+
+TEST(CyclicMachine, StepsThatWrapAllocateNothing)
+{
+	if (!kCountsAllocations)
+	{
+		GTEST_SKIP() << "a sanitizer owns operator new in this build, so nothing counts allocations";
+	}
+	edge_fixture f(Cyclic(kWalker), {kWalkRows, kPulseRows});
+	ASSERT_TRUE(f.binding);
+	edge_host host;
+	instance  walker = CreateInstance(*f.binding, 1, 0, &host);
+	double const walk[] = {0.95, 0.05, 0.41, 1.41, -0.6, kNaN, 0.3, 0.8, 0.3, 7.5};
+	int answered = 0;
+	AllocationCount count;
+	for (int i = 0; i < 200; ++i)
+	{
+		host.threat = walk[i % std::size(walk)];
 		Step(walker, &host, uint64_t(i));
 		answered += walker.Answer(trigger::Step, 0).outcome == clause_outcome::Answered ? 1 : 0;
 	}

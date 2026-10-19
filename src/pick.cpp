@@ -1,5 +1,6 @@
 #include "tabular/pick.h"
 
+#include "float_text.h"
 #include "pick_internal.h"
 #include "relation_internal.h"
 #include "tabular/draw.h"
@@ -158,8 +159,59 @@ float ClampedInput(input_def const& in, double value)
 	{
 		return static_cast<float>(value);
 	}
+	if (in.cyclic)
+	{
+		if (!std::isfinite(value))
+		{
+			return NAN;
+		}
+		double const period = double(in.hi) - in.lo;
+		double       offset = std::fmod(value - in.lo, period);
+		if (offset < 0)
+		{
+			offset += period;
+		}
+		// Rounding to float can land on hi, which is lo again on the period.
+		float const wrapped = static_cast<float>(in.lo + offset);
+		return wrapped < in.hi ? wrapped : in.lo;
+	}
 	double const top = std::nextafter(in.hi, -INFINITY);
 	return static_cast<float>(std::clamp(value, double(in.lo), top));
+}
+
+bool CrossedOnPeriod(input_def const& in, cell band, float previous, float now)
+{
+	double const period = double(in.hi) - in.lo;
+	double       moved  = double(now) - previous;
+	if (moved > period / 2)
+	{
+		moved -= period;
+	}
+	else if (moved <= -period / 2)
+	{
+		moved += period;
+	}
+	if (moved > 0)
+	{
+		// How far up previous must go to reach lo, in (0, period].
+		double toLo = double(band.v[0]) - previous;
+		if (toLo <= 0)
+		{
+			toLo += period;
+		}
+		return toLo <= moved;
+	}
+	if (moved < 0)
+	{
+		// How far down previous must go to pass below hi, in [0, period).
+		double toHi = double(previous) - band.v[1];
+		if (toHi < 0)
+		{
+			toHi += period;
+		}
+		return toHi < -moved;
+	}
+	return false;
 }
 
 bad_input BadInputAt(table_def const& def, std::span<cell const> inputs, uint32_t i)
@@ -171,6 +223,11 @@ bad_input BadInputAt(table_def const& def, std::span<cell const> inputs, uint32_
 	// A clamp has no place for NaN, in any policy: the range declaration
 	// is what refuses it, not the pick.
 	if (def.inputs[i].ranged && std::isnan(inputs[i].d))
+	{
+		return bad_input{i, true};
+	}
+	// Nor has a period a place for an infinity: wrapping it has no answer.
+	if (def.inputs[i].cyclic && !std::isfinite(inputs[i].d))
 	{
 		return bad_input{i, true};
 	}
@@ -192,6 +249,11 @@ bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs)
 
 ErrorContext BadInputError(table_def const& def, bad_input bad, std::span<cell const> inputs)
 {
+	if (bad.nan && def.inputs[bad.index].cyclic)
+	{
+		return ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name, "' is ",
+			FloatText(inputs[bad.index].d), "; a cyclic input is wrapped into its period, which has no place for it");
+	}
 	if (bad.nan)
 	{
 		return ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
@@ -215,7 +277,7 @@ bool EdgesHold(TableVersion const& version, size_t row, std::span<cell const> in
 		cell const band = *edge;
 		input_def const& in = def.inputs[def.columns[c].input];
 		uint32_t const   i  = def.columns[c].input;
-		if (!Crossed(band, ClampedInput(in, previous[i].d), ClampedInput(in, inputs[i].d)))
+		if (!Crossed(in, band, ClampedInput(in, previous[i].d), ClampedInput(in, inputs[i].d)))
 		{
 			return false;
 		}

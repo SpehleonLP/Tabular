@@ -48,6 +48,7 @@ struct input_yaml
 	std::string name;
 	int32_t     type = -1;
 	std::string range;
+	bool        cyclic = false;
 };
 
 struct pivot_yaml
@@ -171,6 +172,7 @@ YamlField const kInputFields[] = {
 	{"name", FieldType::String, offsetof(input_yaml, name), true},
 	{"type", FieldType::Enum,   offsetof(input_yaml, type), true, 0, nullptr, nullptr, &kTypes},
 	{"range", FieldType::String, offsetof(input_yaml, range)},
+	{"cyclic", FieldType::Bool, offsetof(input_yaml, cyclic)},
 };
 YamlSet const kInputSet{kInputFields, nullptr, "input"};
 
@@ -350,6 +352,7 @@ tl::expected<key_domain, ErrorContext> ReadDomain(LF::Yaml::Node const& node, co
 tl::expected<add_input, ErrorContext> ReadInput(input_yaml const& i, LF::Yaml::Node const& node, std::string const& whose)
 {
 	add_input a{i.name, static_cast<column_type>(i.type)};
+	a.cyclic = i.cyclic;
 	if (node.get("range") != nullptr)
 	{
 		a.ranged = detail::ParseRange(i.range, a.lo, a.hi);

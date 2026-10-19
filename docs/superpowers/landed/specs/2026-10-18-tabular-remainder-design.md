@@ -163,8 +163,8 @@ owner with my recommendation. Merges still need the owner's approval.
   - **One previous value per input,** set at creation (so create and entry cross nothing). A
     held step still spends the crossing; a NaN or failed read does not advance it. Edges read
     host inputs only: message arguments, state, clauses and literals are refused.
-  - **Crossing is linear.** An input that wraps (an animation phase 0.95 → 0.05) passes
-    through every band between. A cyclic input is not modelled; the owner may want it.
+  - **Crossing is linear** on an ordinary input. One that wraps (an animation phase) declares
+    `cyclic` (owner, 2026-10-19), and its crossing goes the shorter way around.
 
   Applied in slice 6 (coordinator, from the slice 6 review; the owner may overrule at code
   review):
@@ -179,7 +179,7 @@ owner with my recommendation. Merges still need the owner's approval.
   - **A definition-only change moves no generation;** the host that rebuilt the definition
     knows. An exit that holds sends no abort; the host learns of it through the report.
   - **Bridges, state functions and function chains are consequences** with tests and no code.
-    Bounded repeat stays undecided.
+    A bounded repeat is a command the host runs (owner, 2026-10-19).
 
   Applied in slice 7 (coordinator, from the slice 7 review; the owner may overrule at code
   review):
@@ -606,7 +606,7 @@ per item in `docs/feature-checklist.md`.
 | P10 | `Prepare` reads each clause's key domain from its sources and runs the load's own check over it; one layout (groups, cuts, lists) is both the proof and the compiled pick | `src/machine.cpp`, `src/layout.cpp`, `src/version_checks.cpp` |
 | P11 | A clause names only earlier clauses; position orders two writers, the later wins; one clause setting a column twice is refused | `src/machine.cpp` (`CheckMachine`) |
 | P12 | `host_binding::sink(instance, table, command)`, after the swap, step then exit then entry | `src/instance.cpp` |
-| P13 | A band column marked `edge`; `detail::Crossed` is the one crossing test for picks and `Step`; `pick_query::previous`; one previous value per machine input | `src/pick_internal.h`, `src/instance.cpp` |
+| P13 | A band column marked `edge`; `detail::Crossed` is the one crossing test for picks and `Step`; `pick_query::previous`; one previous value per machine input; a `cyclic` table input wraps and is crossed the shorter way around (owner, 2026-10-19) | `src/pick_internal.h`, `src/instance.cpp` |
 | P14 | `Rebind`: old exit to the old sink, migration by name, new entry to the new sink; cannot be refused | `src/instance.cpp` |
 | P15 | A clause that cannot answer holds; `host_binding::report` once per (clause, row), (clause, input), clause, input or extra arguments, from a bit set sized at creation | `src/instance.cpp` |
 | P16 | `instance::Provenance()`: a ring of 16 clause runs, debug only, switched by a generated header | `include/tabular/instance.h`, superproject `CMakeLists.txt` |
@@ -645,41 +645,40 @@ compiles to machine code (R8, see Open owner decisions).
 
 ## Open owner decisions
 
-Each was ruled provisionally by the coordinator, or left open, during slices 2–7; the built
-code follows the ruling shown. Each is one edit to `definition.md` if the owner decides
-otherwise.
+The owner ruled on these on 2026-10-19; `definition.md` carries each ruling.
 
-- **Per-type message arity** (slice 4): arguments are positional slots every type shares; a
-  type's own arity is not declared.
-- **Cyclic inputs for edges** (slice 5): crossing is linear, so a wrapping input (a phase
-  0.95 → 0.05) fires every band between; a cyclic input is not modelled.
-- **R8 load target** (slice 7): compiling the step to machine code needs a load target
-  (machines × rows per tick) the contract does not state; a cheaper search to the tuple is the
-  lever the profile points at.
-- **The stranded-dependent rule** (slice 2): a dependent left not total by a bare retract
-  refuses every change to its source that brings rows until it is made total again.
-- **`rows` columns as sub-tuples** (slice 2): `rows` key columns together contribute the joint
-  sub-tuples the rows name, not a product of per-column values.
-- **Clause outputs supplied by the machine** (slice 3a): "a machine clause's output" as a
-  domain is closed by the machine at `Prepare`, not declared on the table, which keeps one of
-  the four declared kinds for its own loads.
-- **Entry and exit may not set a hash state** (slices 3b, 4): a transition belongs in the step
-  list; entry and exit may write int and double columns.
-- **Clause-to-message-key passing is refused** (slice 4): a key that is not a message key may
-  not read an earlier clause's message-key column, since its blank run answers 0.
-- **Function-chain evidence** (slice 6): the checklist's function-chain item rests on the
-  bridge test with function commands, since Tabular cannot tell those from clips.
-- **Bounded repeat** (slice 6): a head nod 1–4 times as rows keyed on an int count, or as a
-  state function. Undecided.
-- **Plain mutable table change cost ∝ table size** (slice 7): an insert into an ordered plain
-  table moves the rows after it and a retract rebuilds the key indexes (a 10,000-row table:
-  insert 12 µs, retract 200 µs); fine for reloads, not for per-tick churn such as a
-  display-owner relation changing every frame.
-- **The grazer build budget kept at 1200 µs** (slice 7): about 2.2× its slowest measured run
-  rather than the 2× margin every other time budget has, because that build varies most.
-- **An exit that holds sends no abort** (slice 6): the host learns of it only through the
-  report, and the new entry still runs.
-- **The budget gate is single-machine** (slice 7): absolute times on one stated machine; a
-  portable gate would need relative budgets.
-- **Arithmetic on data values** (`energy + 50`) in a value: tentative in the contract, not
-  built; a next state still always names a member.
+**Decided.**
+
+- **Entry and exit may not set a hash state** (slices 3b, 4): kept. A change of state is a step
+  row, written where it can be read.
+- **An exit that holds sends no abort** (slice 6): kept. The host aborts a state's function on
+  every change of the state, whatever exit emits, so nothing keeps running; this is on the host
+  adapter list.
+- **Cyclic inputs for edges** (slice 5): built. A ranged input may declare `cyclic: true`; a pick
+  wraps it into the range, and a crossing takes the shorter way around, half a period upward.
+- **Plain mutable table change cost ∝ table size** (slice 7): kept. Nothing changes a relation
+  every frame.
+- **Bounded repeat** (slice 6): not Tabular's. It is a command the host runs.
+
+**Still open.**
+
+- **Messages** (slice 4, R3): the owner is unhappy with the built form (type as a key,
+  positional arguments every type shares, a missing one reading 0). A message is a kind of
+  command, and commands turned out far more heterogeneous than expected, so the direction is
+  that messages are opaque to Tabular. Open: whether and how a table reads a message's
+  arguments (a collision's normal vector). Per-type arity and clause-to-message-key passing
+  fold into this. The code stays as built.
+- **The stranded-dependent rule** (slice 2): kept for now; the owner finds it bad with no better
+  rule yet. Candidate: no load may add a gap, and gaps a bare retract left are reported but do
+  not block.
+- **R8, compiling the step**: the question is whether the searches to the tuple and the cell
+  become a direct index built at `Prepare` (versions are immutable, the queries repeat). Load:
+  about 2,000 machines in the full game at 1 ms frames, most asleep in state functions; no firm
+  target. The 400 MHz budget is the slice's (2 of the game's 20 metarooms), a scaling test, not
+  a target machine.
+- **Arithmetic on data values**: a more general problem than `energy + 50`; the owner is not
+  ready to decide it.
+
+**Left as built, not raised:** `rows` key columns as sub-tuples (slice 2); clause outputs
+supplied by the machine at `Prepare` (slice 3a); function-chain evidence resting on the bridge
+test (slice 6); the grazer build budget at 1200 µs and the single-machine budget gate (slice 7).

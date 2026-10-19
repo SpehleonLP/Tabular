@@ -65,7 +65,12 @@ tl::expected<immutable_array<input_def>, ErrorContext> BuildInputs(create_table 
 			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name, "' has range ",
 				FloatText(in.lo), "..", FloatText(in.hi), "; a range is lo < hi, both finite"));
 		}
-		inputs[i] = input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi};
+		if (in.cyclic && !in.ranged)
+		{
+			return tl::make_unexpected(ErrorContext("input '", in.name, "' of table '", c.name,
+				"' is cyclic and has no range; a cyclic input's range is its period"));
+		}
+		inputs[i] = input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi, in.cyclic};
 	}
 	return immutable_array<input_def>(std::move(inputs));
 }

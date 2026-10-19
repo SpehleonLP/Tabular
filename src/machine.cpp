@@ -77,6 +77,13 @@ tl::expected<std::vector<input_def>, ErrorContext> ResolveInputs(create_machine 
 			return tl::make_unexpected(ErrorContext("input '", in.name, "' has range ", FloatText(in.lo), "..",
 				FloatText(in.hi), "; a range is lo < hi, both finite"));
 		}
+		// The crossing and the wrap are a band's, so the table input whose bands
+		// read this one declares them; here it would be accepted and ignored.
+		if (in.cyclic)
+		{
+			return tl::make_unexpected(ErrorContext("input '", in.name,
+				"' of the machine is cyclic; a table input whose bands read it declares that"));
+		}
 		out.push_back(input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi});
 	}
 	return out;

@@ -144,6 +144,10 @@ struct add_input
 	bool             ranged = false;                 // Double only: lo <= x < hi; picks clamp to it
 	float            lo     = 0;
 	float            hi     = 0;
+	// Ranged only: the range is a period, as an animation phase's 0..1 is. A
+	// pick wraps the input into it instead of clamping, and an edge's crossing
+	// takes the shorter way around (see detail::Crossed).
+	bool             cyclic = false;
 };
 
 // Weighted draws one row of the key run in proportion to a Double weight
@@ -223,6 +227,7 @@ struct input_def
 	bool        ranged = false;
 	float       lo     = 0;
 	float       hi     = 0;
+	bool        cyclic = false;
 };
 
 // A key column's domain, resolved: members sorted and distinct, a foreign

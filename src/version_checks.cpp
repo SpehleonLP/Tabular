@@ -211,9 +211,17 @@ public:
 	// clamped value lies below lo; one from above ends below hi, possible when
 	// some lies at hi or above. Clamped values fill [L, H), so the box is the
 	// union of [lo, H) and [L, hi) over the directions possible, and empty when
-	// the band leaves no value outside it.
-	static interval EdgeBox(interval axis, cell band)
+	// the band leaves no value outside it. On a cyclic input both directions
+	// are possible from any value outside the band: a crossing up ends within
+	// half a period above lo, one down within half a period below hi, and
+	// together those cover the whole period, so the box is the whole range.
+	static interval EdgeBox(interval axis, cell band, bool cyclic)
 	{
+		if (cyclic)
+		{
+			bool const outside = axis.lo < band.v[0] || band.v[1] < axis.hi;
+			return outside ? axis : interval{axis.lo, axis.lo};
+		}
 		bool const up   = axis.lo < band.v[0] && band.v[0] < axis.hi;
 		bool const down = axis.lo < band.v[1] && band.v[1] < axis.hi;
 		if (up && down)
@@ -253,7 +261,7 @@ public:
 					{
 						continue;
 					}
-					holds = EdgeBox(_domain[a], *edge);
+					holds = EdgeBox(_domain[a], *edge, _def.inputs[_axes[a]].cyclic);
 				}
 				else
 				{

@@ -459,7 +459,8 @@ with every state column at its initial value, after running the `create` list an
    the step list, so A → B → A within one step enters nothing. Then the `entry` list runs once
    against next, its writes landing on top of the step list's (so across lists, step writes,
    then entry writes). An entry clause may not set a hash state column (the definition build
-   refuses it), so entry never enters again. Int and double state columns are data the machine
+   refuses it), so entry never enters again, and a change of state is always a step row, written
+   where it can be read (owner, 2026-10-19). Int and double state columns are data the machine
    keeps, not states: a change to one enters nothing, and entry may write them.
    **Exit** (R6) runs on the same test, before entry: its clauses read state from **current**,
    the state being left, and write next, so where exit and entry write one column entry's
@@ -489,7 +490,7 @@ per clause; only they can fail, so a large table of unscripted rows costs nothin
 weighted table, which has no conditions, no row bits). Only a first occurrence builds an
 error, so a repeat allocates nothing.
 
-**Messages (R3).** A machine takes one message per step: `message: {type: <hash input>,
+**Messages (R3; under review, see Undecided).** A machine takes one message per step: `message: {type: <hash input>,
 arguments: [<input>, ...]}` in YAML, `create_machine::message` in the builder. The type and
 the arguments are machine inputs filled from `Step`'s `message{type, arguments}`, not from
 getters. Arguments are positional slots every message type shares; a type's own arity is not
@@ -537,8 +538,10 @@ Previous values are raw, so a changed range is applied by the clamp where they a
 `Machine` and the versions that machine was proved against). Migration always lands on a valid
 state, and a clause that cannot answer holds as in a step. The binding may be the one the
 instance already has, which restarts its state, or one of a machine with a different name.
-An exit clause that holds (a condition raising, a getter failing) sends no abort: the host
-learns of it through the report, in a step or a reload alike, and the new entry still runs. It allocates (it sizes the new buffers); it is not
+An exit clause that holds (a condition raising, a getter failing) sends nothing: the host
+learns of it through the report, in a step or a reload alike, and the new entry still runs.
+Nothing keeps running because of it, since the host aborts a state's function whenever the state
+changes, whatever exit emits (see State functions). It allocates (it sizes the new buffers); it is not
 a step.
 
 **The reload cycle is the host's composition**, and Tabular has no reload manager. Rows change (a
@@ -692,6 +695,14 @@ largest float below `hi`, so the top value is in the top band), and a band reach
 input's range is refused. A pick given NaN for a ranged input is refused, in every policy: a
 clamp has no place for NaN (owner, 2026-10-18).
 
+**Cyclic inputs (owner, 2026-10-19).** A ranged double input may declare `cyclic: true`
+(`add_input::cyclic`): its range is a period, as an animation phase's `0..1` is. A pick wraps
+the input into `[lo, hi)` instead of clamping it, so 1.52 on `0..1` is 0.52 and 7 is 0, and a
+value that is not finite is refused, since a period has no place for an infinity either. A band
+on a cyclic input does not wrap: one that should run across the period's end is two rows.
+`cyclic` on an input with no range is refused, and so is `cyclic` on a machine input: the table
+input whose bands read it declares it, and the machine's would be accepted and ignored.
+
 **A band is well formed (2026-10-18).** A band cell has both ends finite and start before end,
 in every table whatever its input's range, checked where the cell enters a table. The range
 check then only tests containment.
@@ -705,9 +716,16 @@ and `x >= lo`, or when `p >= hi` and `x < hi`: `p` lay outside, and `x` is at or
 never skipped by a fast input**. So landing exactly on `lo` from below enters, reaching `hi`
 from below passed through, reaching `hi` from above never entered (hi is not in the band), a
 previous value on `hi` is outside, and leaving from inside, or staying inside, crosses nothing.
-NaN crosses nothing. Crossing is linear, so an input that wraps (0.95 to 0.05) passes through every
-band between the two values and fires the downward edges there; a cyclic input is not modelled. One function (`detail::Crossed`) is the test, and the interpreted picks
-and a machine's step both call it through one row test (`detail::EdgesHold`).
+NaN crosses nothing. On a linear input crossing is along the line, so an input that wraps (0.95 to
+0.05) passes through every band between the two values and fires the downward edges there. On a
+**cyclic input** the move goes the shorter way around the period, and exactly half a period is
+taken upward. It crossed when, on the way, it reached the end of the band it travelled toward (`lo`
+going up, `hi` going down): a walk cycle's footstep band `0.5..0.55` fires as the phase passes 0.5
+either way, not when the phase wraps from 0.95 to 0.05, and a band at the top of the period is
+entered downward across the wrap (0.05 to 0.95 enters `0.9..1`). A move that leaves a band and
+comes back into it the short way round has entered it. One function (`detail::Crossed`) is the
+test, and the interpreted picks and a machine's step both call it through one row test
+(`detail::EdgesHold`).
 
 - **Declaration.** `edge` on anything but a band is refused. A band reads an input only in a
   picked table, so best, all and or tables carry edges and a weighted table (no inputs) or a
@@ -722,7 +740,9 @@ and a machine's step both call it through one row test (`detail::EdgesHold`).
   below `lo`; one down ends in `[L, hi)`, possible when some lies at `hi` or above (the range
   is `[L, H)`). The box is the union over the possible directions, so an edge band covering
   the whole range holds for no input and is refused as never picked, and a plain row covering
-  only a short edge band does not shadow it. The overlap between owners reads the same boxes.
+  only a short edge band does not shadow it. On a cyclic input both directions are possible from
+  any value outside the band, and a crossing ends within half a period of the end it reached, so
+  the box is the whole range unless the band is. The overlap between owners reads the same boxes.
 - **Picks.** `pick_query::previous` is parallel to `inputs`. A pick of a table with an edge
   refuses a query whose `previous` is not as long as the inputs (reading no previous values as
   "the input sat still" would answer silently wrong) and checks the previous value of each input an edge
@@ -769,8 +789,9 @@ The host supplies:
 - **The message** a step is given, if any (`Step`'s `message`).
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
 - **Running state functions:** start a named function for an instance on the command an entry
-  clause emits, abort it on an exit clause's command, and send the message that says it
-  returned (see State functions).
+  clause emits, abort it on **every change of the state** (owner, 2026-10-19: it reads the
+  instance's state after `Step` and `Rebind`, and does not depend on an exit clause answering),
+  and send the message that says it returned (see State functions).
 
 Closures are `{function, data, release}`. A condition's `release` is called when no version
 holds its row; an input getter's (the same shape) when its binding is dropped.
@@ -798,9 +819,9 @@ part of the bundle, and nothing about it is compiled by Tabular. Two tables refe
   machine's transitions between functions.
 
 Neither is a table kind (R6). The state-function table is an `entry` table whose command starts
-the function (`(start graze_fn)`), with an `exit` table whose command aborts it
-(`(abort graze_fn)`): the host aborts a state's function when the state is left, and an abort of
-one that already returned is the host's no-op. "It returned" is a message (R3) a step row keys on;
+the function (`(start graze_fn)`). The host aborts a state's function on every change of the
+state, so an exit command is not what stops it; an `exit` table's command (`(abort graze_fn)`)
+is the state's own cleanup, and an abort of one that already returned is the host's no-op. "It returned" is a message (R3) a step row keys on;
 until it arrives the state's blank run holds the state. The function-chain table is bridge states
 (R5(b), see Reload) whose entry commands start functions and whose rows move along on the return
 message instead of `clip_done`. Tests drive both with nothing but entry, exit and step clauses.
@@ -822,8 +843,11 @@ command starts the function as the new code names it, to the new sink.
 ## Budgets
 
 Each cost has a number and a benchmark that fails when the number is broken (P17). The numbers are measured; each budget is the measurement with a margin, so the
-gate catches a regression. Whether a number is small enough for the runtime budget (~400 MHz,
-~150 MB for the slice, about 20× that load for the game) is a separate judgement: see the last paragraph of this section.
+gate catches a regression. Whether a number is small enough for the runtime budget is a separate
+judgement: see the last paragraph of this section. That budget (~400 MHz, ~150 MB) is the
+vertical slice's: 2 metarooms of the full game's 20, counting what scales with the world (tables,
+machines) and fixed costs alike. It is a scaling test, not a target machine: a slice over it cannot
+grow 10× into the game (owner, 2026-10-19).
 
 | Cost | Paid | Budget |
 |---|---|---|
@@ -892,7 +916,8 @@ The relation rows are the first version's shapes: a plain mutable table like `sp
 (100 owners' rows over 500 int keys, one `FindOrdered` per query) and a mutable best table like
 the display owners (50 displays × 4 owners' ranked rows, one `PickBest` per query). Each costs
 in proportion to the table, not the change: an insert into an ordered plain table moves the rows
-after it, a retract rebuilds the key indexes (a retract is a reload, not a per-tick operation),
+after it, a retract rebuilds the key indexes (a retract is a reload, not a per-tick operation:
+nothing changes a relation every frame, owner 2026-10-19),
 and a best table's change builds and proves a new version.
 
 **What the step costs, and compiling it (spec R8).** 125 ns per row evaluated is about 400 cycles here, so about
@@ -902,10 +927,12 @@ key tuple (25%) and to the cell (23%); the clause's own code around them (`RunLi
 pick inlined: source reads, the rank loop, the sets, 33%); and the input checks and clamp (7%),
 on a working set of 30 tables. Compiling the step to machine code could shrink only the third
 around the searches, not the searches themselves, so it is not the lever these numbers point
-at; a cheaper search to the tuple (a state member's index in place of a binary search) would be. The
-question stays open for the owner: the budgets above are regression gates set from measurement, and whether
-1 µs per row at 400 MHz is enough needs a load target (machines × rows per tick) that this file
-does not state.
+at; a cheaper search to the tuple (a state member's index in place of a binary search) would be. That
+is the question the owner asks of "compiling" (2026-10-19): a prepared machine holds immutable
+versions (RCU) and runs the same queries every step, so can the searches to the tuple and the cell
+become a direct index built at `Prepare`, as a `switch` is a jump table? The load is about 2,000
+machines in the full game at 1 ms frames, most of them asleep in a state function on most ticks
+rather than querying their tables, so no firm target is set; it stays open (Undecided).
 
 ## First version (owner, 2026-10-15)
 
@@ -929,7 +956,7 @@ changed through the table's generation counter (see Generation).
    becomes those commands, through the `Spehleon/lib/Yaml` markup walker. A `tables:` sequence;
    each table has `name`, `columns` (`{name, type, key, input}`, type one of hash, flags, int,
    double, condition, command, vec2, string, band), an optional `order_by: {columns: [names],
-   unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range}`),
+   unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range, cyclic}`),
    `pick` (none, best, all, or, weighted), a key column's `domain` (see Key domains),
    `output` (an or table's flags column), `weight` (a
    weighted table's double column), `suffix` (the name of a trailing command column, see Suffix)
@@ -988,15 +1015,18 @@ These are open, not missing. Each is decided by editing this file. The spec's Op
 decisions lists them with the provisional rulings the built code follows, which the owner may
 overrule the same way.
 
-- A bounded repeat in a bridge (a head nod 1-4 times): rows keyed on an int count, each writing
-  the next count as a literal (enumerated, not arithmetic), or a state function. Bridges
-  themselves are states (R5(b), see Bridges are states).
-- Compiling the step to machine code (R8): needs a load target (machines × rows per tick) this
-  file does not state; see Budgets.
-- Per-type message arity: arguments are positional slots every type shares (see Messages).
-- Cyclic inputs for edges: crossing is linear (see Edges).
-- Arithmetic on data values in a value, such as `energy + 50` (see A row): tentative, not
-  built.
+- Messages as inputs (owner, 2026-10-19). The built form (R3: a message's type is a key, its
+  arguments positional slots every type shares, a missing one reading 0) is under review. The
+  owner's direction: a message is a kind of command, and outgoing commands have turned out far
+  more heterogeneous than expected, so messages are likely opaque to Tabular, as a bounded repeat
+  is. Open: whether and how a table reads a message's arguments (a collision's normal vector, for
+  one). The code stays as built until this is decided.
+- Turning the step's searches into a direct index (R8; see Budgets): no load target is set.
+- Arithmetic on data values (see A row): a more general question than `energy + 50` in a value;
+  not built, and the owner is not ready to decide it.
+- The stranded-dependent rule (see Key domains): the owner finds blocking every load into a
+  source while a dependent has gaps a bad rule, with no better one yet. A candidate: no load may
+  add a gap, and gaps a bare retract left are reported but do not block.
 
 ## The host's part
 
@@ -1019,7 +1049,10 @@ open there, not here:
   entry count captured by `:delay`, and `message_stale` an input flag the host supplies (R3);
 - mutable-table writes from s-expressions: the sink's consumer turns a command into
   `insert_row`;
-- script reading a machine's state by name (`instance::State` reads by index).
+- script reading a machine's state by name (`instance::State` reads by index);
+- a bounded repeat (a head nod 1-4 times) is a command the host runs, such as
+  `(anim nod :repeat random(1, 4))`, not rows (owner, 2026-10-19);
+- aborting a state's function on every change of the state (see State functions).
 
 The display relations are decided (R2): one relation per question (window, pointer mode,
 camera), each a total mutable best table; nothing new in Tabular.

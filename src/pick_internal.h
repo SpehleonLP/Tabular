@@ -20,8 +20,17 @@ namespace tabular::detail
 
 // A table input as a band compares it: a ranged input clamped in double into
 // [lo, the largest float below hi], so the top value lands in the top band and
-// a value past float's range never narrows; an unranged one as it is.
+// a value past float's range never narrows; a cyclic one wrapped into
+// [lo, hi), and NaN when it is not finite, since a period has no place for
+// it; an unranged one as it is.
 float ClampedInput(input_def const& in, double value);
+
+// Crossed for a cyclic input, whose range is a period: the move is taken the
+// shorter way around, exactly half a period upward, and it crossed when it
+// reached the end of the band it travelled toward (lo going up, hi going
+// down) on the way. So it entered, or passed through, and a move that leaves
+// the band and comes back into it the short way round has entered it too.
+bool CrossedOnPeriod(input_def const& in, cell band, float previous, float now);
 
 // P13's crossing, the one test of an edge: whether an input that moved from
 // previous to now (both as ClampedInput gives them) crossed into the band
@@ -30,9 +39,14 @@ float ClampedInput(input_def const& in, double value);
 // band is never skipped by a fast input. Leaving from inside crosses nothing,
 // and neither does reaching hi from above, since hi is not in the band; a
 // previous value on hi is outside, so moving down from it enters. NaN fails
-// every comparison and crosses nothing.
-inline bool Crossed(cell band, float previous, float now)
+// every comparison and crosses nothing. A cyclic input moves around its
+// period instead of along a line (CrossedOnPeriod).
+inline bool Crossed(input_def const& in, cell band, float previous, float now)
 {
+	if (in.cyclic)
+	{
+		return CrossedOnPeriod(in, band, previous, now);
+	}
 	if (previous < band.v[0])
 	{
 		return now >= band.v[0];
