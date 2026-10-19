@@ -104,7 +104,7 @@ Whatever the loader checks, an author can know by reading the table [def promise
 
 - [x] A measured number and a failing benchmark for each: build a definition, bind, create an instance, step (per row), relation insert / retract / query [def Budgets; retro; rem P17] (19 benchmarks in `Tabular/bench/`, time and memory, gated by `scripts/test-tabular-budgets.sh` at `-O2` on one stated machine; each budget is the measurement with its margin; the gate fails over budget, on a measurement of nothing, and when definition.md's table drifts; the Debug suite runs them small without thresholds) Tests: `TabularBudget`
 - [x] Parity / oracle tests with reddening mutations for any compiled path [cook §7; sr §9; guard §6] (`Step` against `PickBest`, `PickOr` and `PickWeighted` in every list, randomized; each helper both sides share was mutated and turned a non-parity test red; see def Parity) Tests: `StepParity`, `EdgeParity`, `ListParity`
-- [x] Provenance: the last few picks per object (table, row, inputs), debug only [arc §2.10; rem P16] (`instance::Provenance()`, a ring of the last 16 clause runs with up to 8 values each; on with `TABULAR_PROVENANCE`, which the engine's generated config header sets in Debug only; kept across `Rebind`; allocation-free; absent from release instances) Tests: `Provenance`
+- [x] Provenance: the last few picks per object (table, row, inputs), debug only [arc §2.10; rem P16] (`instance::Provenance()`, a ring of the last 16 clause runs with up to 8 values each; on with `TABULAR_PROVENANCE`, which Tabular's generated `tabular/build_config.h` sets in Debug only; kept across `Rebind`; allocation-free; absent from release instances) Tests: `Provenance`
 
 ## Host adapter (not Tabular)
 

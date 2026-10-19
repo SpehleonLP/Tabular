@@ -595,9 +595,9 @@ the OR `PickOr.OverlappingBandsOrTogether`, the crossing
 `EdgePick.PickBestHoldsAnEdgeOnlyWhenTheInputCrossedIntoItsBand`, the fall-through
 `MachineMessage.PickBestFallsThroughToTheBlankRunToo`).
 
-**Provenance (P16; debug builds).** With `TABULAR_PROVENANCE` set (the engine
-sets it to 1 in the Debug config and 0 in the release family, in a header it generates,
-`generated/tabular_build_config.h`, that only `tabular/instance.h` includes; a build that
+**Provenance (P16; debug builds).** With `TABULAR_PROVENANCE` set (Tabular's
+`CMakeLists.txt` sets it to 1 in the Debug config and 0 in the release family, in a header it
+generates, `tabular/build_config.h`, that only `tabular/instance.h` includes; a build that
 defines it itself keeps its own, and one with neither has it off), each
 instance keeps a ring of its last `kProvenanceDepth` (16) clause runs, and `instance::Provenance()`
 returns them oldest first. An entry (`provenance_entry`) names the run it belongs to (0 for

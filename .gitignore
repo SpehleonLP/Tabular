@@ -1,0 +1,4 @@
+# Qt Creator, when this directory is opened as its own project
+/build/
+/.qtcreator/
+CMakeLists.txt.user*

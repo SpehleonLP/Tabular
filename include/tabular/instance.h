@@ -165,8 +165,8 @@ struct clause_answer
 };
 
 // Provenance (P16), a debug-build aid: each instance keeps its last
-// kProvenanceDepth picks. The engine's build generates
-// <generated/tabular_build_config.h> (1 in the Debug config, 0 in the release
+// kProvenanceDepth picks. Tabular's CMakeLists.txt generates
+// <tabular/build_config.h> (1 in the Debug config, 0 in the release
 // family), read only here so the switch reaches the units that use instances
 // and no other command line; a build that defines TABULAR_PROVENANCE itself
 // (the budget gate sets 0) keeps its own, and one with neither (a standalone
@@ -177,8 +177,8 @@ struct clause_answer
 // in each object), so a unit compiled the other way fails to link instead of
 // reading another layout.
 #ifndef TABULAR_PROVENANCE
-#if __has_include(<generated/tabular_build_config.h>)
-#include <generated/tabular_build_config.h>
+#if __has_include(<tabular/build_config.h>)
+#include <tabular/build_config.h>
 #else
 #define TABULAR_PROVENANCE 0
 #endif
