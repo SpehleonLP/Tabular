@@ -52,8 +52,138 @@ owner with my recommendation. Merges still need the owner's approval.
   flexibility, which is where it differs from relational libraries. The interpreted picks stay
   as the oracle the compiled step must match. The design sketch was reviewed as
   https://claude.ai/artifact/1pMMs25cL7nDEr83XNCVg9 (P6, P7, P10, P11 below).
-- A ranked run using more than 8 flag bits is refused by `Prepare`. There is no interpreted
-  fallback, so there is one code path. (Claude's default; the owner did not pick.)
+- **Flags are 32 bits** (an `asDWORD`), and `Prepare` takes all 32 with no further limit. The
+  proof never enumerates flag values: totality needs only the default rows, and only rows with
+  equal flags shadow each other. Each cell stores its rows grouped by flag set, and `Step`
+  ranks those groups against the input flags.
+
+- **A published version is total** (slice 0 review). A load that brings rows checks every key
+  run in the version it would publish, not only the runs it touches or left; the special
+  "runs the owner left" path goes. A bare `Retract` stays unchecked, so crash recovery never
+  fails. This replaces R11's narrower check and makes `Retract` + `Load` agree with one `Load`.
+- **Two owners' rows with equal flags may not overlap in one key run.** Two contributors
+  claiming the same inputs is refused, naming both owners and lines. Within one owner, an
+  overlap is still priority by row order. Ties then never depend on load history, so reloading
+  identical rows is idempotent.
+
+- **A key says what its domain is** (owner, 2026-10-18, from the display-selection worked
+  example). Every key column of a best table declares where its domain comes from:
+  - members;
+  - another relation's column (a foreign key, e.g. `owner.display` from `display`);
+  - a machine clause's output; or
+  - explicitly `rows`, meaning the keys its own rows name.
+
+  Nothing is inferred. Totality is checked over the domain, so a run whose key has left the
+  domain (its display was retracted, its stimulus is no longer produced) is an orphan. It is
+  reported, never refused, and `Retract` needs no refuse or cascade rule. This refines the
+  version-totality ruling above: "every key run of the version" becomes "every key in the
+  domain". Mutable tables get totality on insert and retract the same way, since the
+  display tables are where "always picks a row" matters most.
+
+  Applied in slice 2 (coordinator, from the slice 2 review; the owner may overrule at code
+  review):
+  - **`rows` columns name sub-tuples, not a product.** The key columns declared `rows` together
+    contribute the joint sub-tuples the rows name; every other key column contributes its
+    declared domain, and the key's domain is their cross product. All-`rows` is exactly the
+    runs present. A product of per-column `rows` values would close one column's domain from
+    another's values, which is inference no source declared.
+  - **A stranded dependent blocks its source.** A change that brings rows proves every table
+    whose domain it feeds. So a dependent left not total by a bare retract refuses every
+    change to its source that brings rows until it is made total again. The refusal says the
+    dependent is not total; it does not blame the source change.
+  - **The report is the state, not a delta:** every orphan, and after a bare retract every
+    not-total run, of each table the change touched and of their dependents.
+  - **Slice 3:** a dependent's generation does not move when its domain changes (its rows and
+    picks do not). `Prepare` proves over the domain, so a prepared machine must watch the
+    generation of every table its domains read, not only the tables it picks from.
+
+  Applied in slice 3a (coordinator, from the slice 3a review; the owner may overrule at code
+  review):
+  - **A clause answers one value per column, not one row.** So a clause may read a best, an
+    `or` or a `weighted` table (definition.md's phase → lookup → bridge chain reads an `or`
+    table; §3's per-row site salt reads a weighted one). An `all` table has no single answer
+    and is refused. An `or` clause exposes only its flags output and cannot `emit`.
+  - **A source that does not close a key leaves the table's declared domain.** An input, an
+    int/double state column and an `or` clause's output close nothing, so that key is proved
+    over what the table declares. The machine's own sources close the rest (state members,
+    an earlier best clause's reachable answers, a literal). This is how "a machine clause's
+    output" as a domain reads: the machine supplies it at `Prepare`, and the table keeps its
+    declared domain for `Load`. One domain builder serves both.
+  - **`Prepare` reports orphans** as `Load` does: runs no clause can reach are noted, so a
+    typo'd key in a `rows` domain is visible.
+  - **P9's `writes:` is dropped.** A clause's `set:` names the state column; a table read by
+    two machines could not carry one `writes:`. The member check on a written hash therefore
+    runs at `Prepare`, not at load.
+  - **A literal for a ranged input must be finite and inside the range** (R12: a clamp has no
+    place for NaN; a constant outside the range is a mistake).
+  - **For 3b:** an input-bound key is proved only over the table's declared domain. A step
+    whose input value has no run holds that table and reports once, as P15 does for a failing
+    pick.
+
+  Applied in slice 3b (coordinator, from the slice 3b review; the owner may overrule at code
+  review):
+  - **An entry clause may not set a hash state column.** Entry runs once per step, after the
+    step list; a state an entry write reached would get no entry of its own, so its state
+    function (R6) would silently never start. A transition belongs in the step list. Entry
+    may still write int/double columns. "Entered" means "differs from current at the end of
+    the step", so A → B → A within one step enters nothing.
+  - **A step allocates nothing, holds included.** Tabular builds no error text on the step
+    path; the slice 4 report site adds context. A host's own failure message past small-string
+    size allocates on the host side.
+  - **Holds cascade:** a clause reading a held clause holds. Inputs are read once per step, as
+    one snapshot every clause shares.
+
+  Applied in slice 4 (coordinator, from the slice 4 review; the owner may overrule at code
+  review):
+  - **A message key is declared on the table** (`domain: message`) and bound both ways to the
+    machine's `message: {type, arguments}`. A blank cell there is hash 0, "no message", the
+    one place 0 is allowed. A type no run keys on falls through to the blank run; that is a
+    property of the table, so `PickBest` falls through too, through the one lookup helper.
+  - **0 does not leak.** A foreign-column domain read from a message key drops 0, and a
+    clause source carrying a message key into a key that is not one is refused.
+  - **Absorbed** means a run keyed on the type answered; a fall-through or a hold is not.
+  - **Commands go out after the swap,** in the order the lists ran: create then entry at
+    creation; step, exit, entry per step. Exit reads current and may not set a hash state.
+  - **A failure is reported once per (clause, row) per instance,** with the host's own error
+    from the one evaluation; a cascaded hold is not reported. Report memory covers scripted
+    rows only.
+  - **Arguments are positional slots shared by every type:** a missing one reads 0, as a step
+    with no message does. Extra arguments are reported once. Per-type arity is not declared;
+    the owner may want it.
+
+  Applied in slice 5 (coordinator, from the slice 5 review; the owner may overrule at code
+  review):
+  - **An edge holds when its input entered the band or passed through it** since the previous
+    step, in either direction; staying inside or leaving does not. An edge row is a
+    conditional row (like a scripted one), and its layout box is where a crossing can end, so
+    the between-owners overlap rule reads that box.
+  - **`NoEdge` (a blank cell) is "no edge"** in an edge column, as an empty closure is "no
+    condition".
+  - **One previous value per input,** set at creation (so create and entry cross nothing). A
+    held step still spends the crossing; a NaN or failed read does not advance it. Edges read
+    host inputs only: message arguments, state, clauses and literals are refused.
+  - **Crossing is linear.** An input that wraps (an animation phase 0.95 → 0.05) passes
+    through every band between. A cyclic input is not modelled; the owner may want it.
+
+  Applied in slice 6 (coordinator, from the slice 6 review; the owner may overrule at code
+  review):
+  - **`Rebind` cannot be refused** and returns nothing: a binding holds everything it reads,
+    migration always lands on a valid state, and a clause that cannot answer holds. It runs
+    the old binding's exit (to the old sink), migrates by name from the state the exit left
+    (a value kept while valid; an int ↔ double change resets), installs the new binding and
+    runs its entry (to the new sink). Create does not run again.
+  - **Previous input values carry only between getter inputs** of the same name and type; a
+    new, retyped or message-argument input takes the value read during `Rebind`, so a reload
+    crosses no edge. Report-once memory starts empty under the new binding.
+  - **A definition-only change moves no generation;** the host that rebuilt the definition
+    knows. An exit that holds sends no abort; the host learns of it through the report.
+  - **Bridges, state functions and function chains are consequences** with tests and no code.
+    Bounded repeat stays undecided.
+
+- **A version is a function of the owners' loads, not of load order** (follows from the
+  idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
+  owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
+  dead-row try order never change when an owner reloads identical rows.
 
 ## 1. The method: premises and consequences
 
@@ -72,7 +202,7 @@ Two kinds of finding go to the owner instead of into the code:
 
 | # | Premise | Checklist | Slice |
 |---|---|---|---|
-| P1 | **Owner handles.** A movable `owner_handle` holds an owner id and a store. Dropping it retracts that owner's rows from every mutable table. It does not touch read-only tables, which are retracted by load. | §1 RAII | 1 |
+| P1 | **Owner handles.** A movable `owner_handle` holds an owner id and a store. Dropping it retracts that owner's rows from every table, read-only and grids included, through the one `Retract` (slice 1 decision: a dead contributor has nobody left to reload its read-only rows, so a mutable-only handle would leave them behind). | §1 RAII | 1 |
 | P2 | **Relation generation.** Each table has a counter. It goes up on every change that becomes visible: a published version, an insert, a retract. "Rows changed" means the counter moved. | §1 report | 1 |
 | P3 | **The suffix is the trailing cells.** A table may declare `suffix: command` instead of a final command column. In CSV, every cell after the declared columns, joined back with their commas, is that row's command text. | §2 quoting; §7 commands | 1 |
 | P4 | **Counter-based draw.** `Draw(seed, site) -> uint64_t` is a pure hash with no stored state. `site` salts each draw site. | §7 randomness | 1 |
@@ -81,7 +211,7 @@ Two kinds of finding go to the owner instead of into the code:
 | P7 | **`create_machine`.** A command struct, written in YAML under `machines:`. It holds a state vector (named columns: `hash` with members and an initial member, or `int`/`double` with an initial value), the machine's inputs, and four ordered clause lists: `create`, `entry`, `step`, `exit`. A clause is `from` a table, `where` key = source, `given` input = source, then `set` state columns from value columns and/or `emit` the suffix. Transition and entry tables are clauses, not table kinds. | §6 definition, state vector, transition/entry tables | 2 |
 | P8 | **Binding and instance.** A binding is definition × host resolver. It resolves every input name to a getter the host supplies, through one function and with no symbol table. An instance holds the current and next state vectors, plus the edge history (P13). | §6 lifetimes | 2 |
 | P9 | **Values write the next vector, which starts as a copy.** A step first copies current to next. Value columns (`writes: <state column>`) write next. At the end, next becomes current. A hash value must name a member of its column's set, checked at load. | §6 next vector | 2 |
-| P10 | **`Prepare` proves by laying out.** `Prepare(create_machine, store)` returns an immutable `Machine` holding the table versions it read. For each clause and each tuple of its key domain, it cuts the input ranges at every band edge and stores, per cell, the rows the pick would try, in pick order, ending at the first row with no script. A ranked table adds the input flags to the cell, but only the bits the run uses; a run using more than 8 bits is refused. **Totality** is "every list ends in a row with no script", and **dead rows** are "a row in no list". The load-time checks of 2026-10-17 become this one layout, which `Load` keeps using for tables no machine reads, with the runs present as the domain. **Key domains:** a key reading a state column is closed by its members; a key reading an earlier clause is closed by the values that clause's table can answer; a key reading a host input is open, and its run must have a catch-all row. | §4 totality, shadowed rows; §6 exactly one row | 2 |
+| P10 | **`Prepare` proves by laying out.** `Prepare(create_machine, store)` returns an immutable `Machine` holding the table versions it read. For each clause and each tuple of its key domain, it cuts the input ranges at every band edge and stores, per cell, the rows the pick would try, in pick order, ending at the first row with no script. A ranked table's cell holds its rows grouped by flag set, and `Step` ranks the groups against the input flags (the proof needs no flag enumeration: totality reads the default rows, and only equal flags shadow). **Totality** is "every list ends in a row with no script", and **dead rows** are "a row in no list". The load-time checks of 2026-10-17 become this one layout, which `Load` keeps using for tables no machine reads, with the runs present as the domain. **Key domains:** a key reading a state column is closed by its members; a key reading an earlier clause is closed by the values that clause's table can answer; a key reading a host input is open, and its run must have a catch-all row. | §4 totality, shadowed rows; §6 exactly one row | 2 |
 | P11 | **Clauses name only earlier clauses.** The DAG holds by how a machine is written, so there is no cycle check. Two clauses setting one column are ordered by position: the later write wins. | §4 DAG, two writers | 2 |
 | P12 | **Sinks.** The step hands each picked row's suffix text, along with the instance id and table, to a host `sink` callback, in DAG order. Tabular does not interpret it. | §5 sinks; §7 commands | 4 |
 | P13 | **Edge condition.** A band column marked `edge` holds when the input crossed into the band between the previous step's value and this one, so a short band is never skipped. The instance keeps the previous value of every input an edge reads. | §3 edge | 5 |
@@ -108,7 +238,7 @@ Each row names the premises that must produce it. Its test uses only them.
 | **State functions restart on reload.** The binding is dropped, the host aborts what it started, and entering the state again starts it with the new code. | P14 + entry tables + P12 | §6 |
 | **Orthogonal regions.** Several machines on one object are several instances. | P8 | §6 |
 | **Edges are machine state.** | P13 + P8 | Consequences |
-| **A seed per instance and step.** The site salt is (machine, table, row). | P4 + P8 | Consequences |
+| **A seed per instance and step.** The site salt is (machine, clause list, clause): a table alone would make two clauses on one table draw alike, and the row is what the draw chooses. | P4 + P8 | Consequences |
 | **Delays are a message to self with `:delay`.** | P12 + no clock | Consequences |
 | **Every query picks a row at run time.** | built totality + P10 + built clamp | Consequences |
 | **A command cell can hold a comma.** | P3 | §2 |
@@ -196,20 +326,27 @@ message", which is hash 0. That conflicts with the rule refusing hash 0 (ruling 
 
 ## 5. Slices
 
-Each slice is one branch: implementer, reviewer, fixes, nearby tests, then the owner's merge.
+All slices run on one branch, `tabular-slice0`, one after another. Each is implemented,
+independently reviewed with §9, fixed and committed. The owner reviews the whole branch at
+the end (owner, 2026-10-18), and every ruling in §7 is accepted, so no slice is blocked.
 
+0. **Premise repairs** (§10). Done on the branch.
 1. **Relations completions:** P1–P5. These need no machine.
-2. **Machines:** P6–P10. YAML `machines:`, plus `Bind`, `CreateInstance` and `Step` with no
-   sinks. The worked example's brain, without the entry table's commands.
-3. **DAG:** P11 and the two-writer rule (R4).
-4. **Effects:** P12, P15, and messages as step inputs (R3).
+2. **Key domains:** every best table's key declares its domain (members, a relation's column,
+   or `rows`). Totality is checked over the domain, orphans are reported, and mutable best
+   tables are checked on insert and retract. The built per-run checks become one cell layout
+   (the P10 layout), which `Load`, `Insert`/`Retract` and later `Prepare` all use.
+3. **Machines:** P6–P11. `create_machine`, YAML `machines:`, `Prepare` (proof by layout over
+   key domains, including clause outputs), `CreateInstance`, `Step` with the next vector and
+   holds, `host_binding.resolve`. The worked example's brain.
+4. **Effects:** P12, P15, messages as step inputs (R3), and the `exit` trigger (R6).
 5. **Edges:** P13.
-6. **Reload:** P14, the state-function contract (R6), and bridges (R5).
-7. **Evidence:** P16, P17, and the compiled step (R8) with parity tests against the
-   interpreted step, which is the prior version.
-
-Slice 0 (§10) runs first; its B and E wait on R10. Slices 1, 2 and 5 need no rulings. Slice 3 waits on R4, slice 4 on R3, slice 6 on R5 and R6,
-and slice 7's compiled path on R8.
+6. **Reload:** P14. Bridges and state functions are tested as consequences (R5(b), R6).
+7. **Evidence:** P16, P17. The compiled step is `Prepare`'s layout. Parity tests run `Step`
+   against the interpreted picks, which are the prior version. Compiling to machine code is
+   struck if the budgets are met (R8).
+8. **Checklist closure:** move host-adapter items (§8) and the rulings' outcomes into the
+   checklist and `definition.md`. Land this spec with an As-built section.
 
 ## 6. Interfaces (sketch; slice plans fix the details)
 
@@ -225,11 +362,13 @@ tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(relation_store co
 struct host_binding {
     std::function<tl::expected<input_getter, ErrorContext>(std::string_view name)> resolve;   // P8
     std::function<void(uint64_t instance, uint32_t table, std::string_view command)> sink;    // P12
-    std::function<void(uint32_t table, size_t row, ErrorContext const&)>         report;      // P15
+    std::function<void(uint64_t instance, uint32_t table, size_t row, ErrorContext const&)> report; // P15
 };
-tl::expected<counted_ptr<Binding>, ErrorContext> Bind(counted_ptr<Definition>, host_binding&&);
-tl::expected<instance, ErrorContext> CreateInstance(Binding const&, uint64_t id, uint64_t seed);  // runs create + entry
-void Step(instance&, uint64_t seed);                                                              // step tables, swap
+tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const>, host_binding&&);
+instance CreateInstance(Binding const&, uint64_t id, uint64_t seed, void const* self);  // runs create + entry; cannot refuse
+void Step(instance&, void const* self, uint64_t seed);                                 // step list, entry on change, swap
+// self is the host object, passed per call: getters and conditions read it, and the instance
+// stores no pointer that a moved host object would leave dangling.
 tl::expected<void, ErrorContext> Rebind(instance&, counted_ptr<Binding>);                        // P14
 ```
 
@@ -320,7 +459,9 @@ Applied with `review-agentic-systems`. For every check, refusal, branch or mode 
 ## 10. Premise repairs found in the built code
 
 Reviewed at Tabular `cf9162b` (2026-10-18), with `review-agentic-systems` plus §9. These are
-**slice 0**, which runs before slice 1. Findings A, B, D and E were re-read against the code.
+**slice 0**, built on `tabular-slice0` (Tabular `1f41590`, `02d3721`) together with the
+version-totality and owner-overlap rulings. Two more reviews ran on it, and the full suite
+passes (6698 passed, 3 skipped). Findings A, B, D and E were re-read against the code.
 Each fix lands with the regression test named.
 
 **Emergence defects: a feature built directly, so a premise stayed wrong.**
