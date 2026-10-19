@@ -32,9 +32,9 @@ inline char const* TypeName(column_type type)
 	return "unknown type";
 }
 
-// Whether column of def is its message key (domain: message): its 0 is no
-// message, not a type.
-inline bool IsMessageKey(table_def const& def, uint32_t column)
+// Whether column of def is its fall-through key (fallthrough: true): its 0 is
+// the blank run's, not a value.
+inline bool IsFallThroughKey(table_def const& def, uint32_t column)
 {
 	if (!def.columns[column].key || def.domains.empty())
 	{
@@ -46,7 +46,7 @@ inline bool IsMessageKey(table_def const& def, uint32_t column)
 	{
 		k += def.columns[c].key ? 1 : 0;
 	}
-	return def.domains[k].kind == domain_kind::Message;
+	return def.domains[k].kind == domain_kind::FallThrough;
 }
 
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values

@@ -53,8 +53,7 @@ struct schema_document
 //         - {name: mode, type: hash, members: [idle, walk], initial: idle}
 //       inputs:
 //         - {name: energy, type: double, range: 0..1}
-//         - {name: message, type: hash}
-//       message: {type: message, arguments: []}  # optional; inputs Step fills
+//         - {name: event, type: hash}         # filled by the host for one step
 //       step:                                   # also create, entry, exit
 //         - from:  grazer_brain                 # a best, or or weighted table
 //           where: {mode: state.mode}           # every key column
@@ -65,10 +64,10 @@ struct schema_document
 // A source is state.<column>, input.<name>, clause.<n>.<column> (the row an
 // earlier clause of the same list picked) or {literal: <text>}, read as a cell
 // of the target's type. Hash members and literals are hashed as CSV cells are,
-// so within one machine hash 0 and two names with one hash are refused. A key
-// the table declares `domain: message` is bound to input.<the message type>,
-// and no other key may be. Each
-// machine is checked against the tables (CheckMachine) before it is returned.
+// so within one machine hash 0 and two names with one hash are refused. A
+// table's hash key may declare `fallthrough: true` in place of a domain: a
+// value with no run retries the blank run (a blank CSV cell, allowed only
+// there). Each machine is checked against the tables (CheckMachine) before it is returned.
 tl::expected<schema_document, ErrorContext> DocumentFromYaml(std::string_view text, std::string_view label);
 
 }

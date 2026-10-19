@@ -152,63 +152,6 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 	return out;
 }
 
-// Which inputs the step's message carries (R3): the type, a hash input, and
-// the arguments, other inputs, each once. Every other input has a getter.
-tl::expected<void, ErrorContext> ResolveMessage(create_machine const& m, machine_def& def)
-{
-	def.carried.assign(def.inputs.size(), detail::kFromGetter);
-	auto inputNamed = [&](std::string_view name) -> uint32_t
-	{
-		for (uint32_t i = 0; i < def.inputs.size(); ++i)
-		{
-			if (def.inputs[i].name == name)
-			{
-				return i;
-			}
-		}
-		return UINT32_MAX;
-	};
-	if (m.message.type.empty())
-	{
-		if (!m.message.arguments.empty())
-		{
-			return tl::make_unexpected(ErrorContext("the message names arguments and no type; a message is its type first"));
-		}
-		return {};
-	}
-	uint32_t const type = inputNamed(m.message.type);
-	if (type == UINT32_MAX)
-	{
-		return tl::make_unexpected(ErrorContext("the message's type is input '", m.message.type,
-			"', which the machine does not declare"));
-	}
-	if (def.inputs[type].type != column_type::Hash)
-	{
-		return tl::make_unexpected(ErrorContext("the message's type is input '", m.message.type, "', a ",
-			TypeName(def.inputs[type].type), "; a message's type is a hash"));
-	}
-	def.messageType   = type;
-	def.carried[type] = detail::kMessageType;
-	for (uint32_t a = 0; a < m.message.arguments.size(); ++a)
-	{
-		std::string_view const name  = m.message.arguments[a];
-		uint32_t const         input = inputNamed(name);
-		if (input == UINT32_MAX)
-		{
-			return tl::make_unexpected(ErrorContext("message argument ", a, " is input '", name,
-				"', which the machine does not declare"));
-		}
-		if (def.carried[input] != detail::kFromGetter)
-		{
-			return tl::make_unexpected(ErrorContext("message argument ", a, " is input '", name, "', which the message ",
-				input == type ? "already carries as its type" : "already carries as an argument"));
-		}
-		def.carried[input] = a;
-	}
-	def.messageArguments = static_cast<uint32_t>(m.message.arguments.size());
-	return {};
-}
-
 // what names the target in messages: "key 'mode'", "input 'energy'";
 // targetInput is the table input a given binds, null for a key.
 tl::expected<resolved_source, ErrorContext> ResolveSource(source const& from, column_type targetType,
@@ -378,39 +321,24 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		{
 			return tl::make_unexpected(std::move(resolved.error()));
 		}
-		// The fall-through to the blank run is the message key's: the table says
-		// which key is one (and lets its CSV leave it blank), the machine says
-		// which input is the type, and the two must meet, or a type would retry
-		// a key with no blank run, or a message key would never see the type.
-		bool const readsType  = resolved->kind == source_kind::Input && resolved->index == def.messageType;
-		bool const messageKey = !t.domains.empty() && t.domains[at].kind == domain_kind::Message;
-		if (readsType && !messageKey)
+		if (!t.domains.empty() && t.domains[at].kind == domain_kind::FallThrough)
 		{
-			return tl::make_unexpected(ErrorContext("key '", b.target, "' reads the message type, and table '", t.name,
-				"' does not declare it a message key (domain: message)"));
+			out.fallThroughKey = static_cast<uint32_t>(at);
 		}
-		if (messageKey && !readsType)
-		{
-			return tl::make_unexpected(ErrorContext("key '", b.target, "' of table '", t.name,
-				"' is a message key; it reads the machine's message type"));
-		}
-		if (messageKey)
-		{
-			out.messageKey = static_cast<uint32_t>(at);
-		}
-		// An earlier clause keyed on a message can answer from its blank run,
-		// whose message key holds 0, no message: a value only a message key
-		// holds, so an ordinary key reading it would look up a run no row can
-		// name (a hash 0 is refused) instead of a type.
+		// An earlier clause keyed on a fall-through key can answer from its
+		// blank run, whose key holds 0: a value only a fall-through key holds,
+		// so an ordinary key reading it would look up a run no row can name (a
+		// hash 0 is refused) instead of a value.
 		if (resolved->kind == source_kind::Clause)
 		{
 			table_def const& source = tables.tables()[earlier[resolved->index].table];
-			if (IsMessageKey(source, resolved->column))
+			if (IsFallThroughKey(source, resolved->column) && !(!t.domains.empty()
+				&& t.domains[at].kind == domain_kind::FallThrough))
 			{
 				return tl::make_unexpected(ErrorContext("key '", b.target, "' reads column '",
-					source.columns[resolved->column].name, "' of clause ", resolved->index, ", the message key of table '",
-					source.name, "'; that clause can answer from its blank run, with 0 (no message), which only a message "
-					"key holds"));
+					source.columns[resolved->column].name, "' of clause ", resolved->index, ", the fall-through key of table '",
+					source.name, "'; that clause can answer from its blank run, with 0, which only a fall-through key "
+					"holds"));
 			}
 		}
 		out.keys[at] = *resolved;
@@ -467,8 +395,6 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 	// once per step through its getter, and an edge crosses from it. A literal
 	// never moves, so its edge never holds. A state column or an earlier
 	// clause is a value of this step's own making, with no previous value kept.
-	// A message argument is one message's value, 0 between messages, so its
-	// "previous" would be another message's, or nothing.
 	for (column_def const& col : t.columns)
 	{
 		if (!col.edge)
@@ -476,7 +402,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 			continue;
 		}
 		resolved_source const& from = out.inputs[col.input];
-		if (from.kind == source_kind::Input && def.carried[from.index] == detail::kFromGetter)
+		if (from.kind == source_kind::Input)
 		{
 			continue;
 		}
@@ -489,7 +415,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 				"' of clause ", from.index);
 			break;
 		case source_kind::Literal: here = "a literal"; break;
-		case source_kind::Input:   here = cc(std::string("message argument "), def.carried[from.index]); break;
+		case source_kind::Input:   break;   // continued above
 		}
 		return tl::make_unexpected(ErrorContext("input '", t.inputs[col.input].name, "' is read by edge '", col.name,
 			"', which compares it with its value on the previous step; it comes from a machine input's getter, and here from ",
@@ -599,11 +525,6 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 		return tl::make_unexpected(std::move(inputs.error()).with(where()));
 	}
 	def.inputs = std::move(*inputs);
-	auto message = ResolveMessage(definition, def);
-	if (!message)
-	{
-		return tl::make_unexpected(std::move(message.error()).with(where()));
-	}
 	auto state = ResolveState(definition);
 	if (!state)
 	{
@@ -766,10 +687,15 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 			closed = false;
 			break;
 		}
-		if (closed)
+		// A fall-through key is open whatever feeds it: a value with no run
+		// falls through to the blank run, so a source's values need no run of
+		// their own.
+		bool const fallThrough = !t.domains.empty() && t.domains[k].kind == domain_kind::FallThrough;
+		if (closed && !fallThrough)
 		{
 			continue;
 		}
+		values.clear();
 		if (t.domains.empty())
 		{
 			out.overRows[k] = 1;

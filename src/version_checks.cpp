@@ -454,7 +454,7 @@ void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, tab
 		break;
 	case domain_kind::Column:
 		ColumnValues(*foreign, declared.column, values);
-		if (IsMessageKey(*foreignDef, declared.column))
+		if (IsFallThroughKey(*foreignDef, declared.column))
 		{
 			auto blank = std::lower_bound(values.begin(), values.end(), int64_t(0));
 			if (blank != values.end() && *blank == 0)
@@ -463,9 +463,9 @@ void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, tab
 			}
 		}
 		break;
-	case domain_kind::Message:
+	case domain_kind::FallThrough:
 		values.assign(1, 0);
-		domains.messageKey = k;
+		domains.fallThroughKey = k;
 		break;
 	case domain_kind::None:
 		break;   // the schema refuses a best table's key with no domain
@@ -549,15 +549,15 @@ void ResolveDomain(table_rows const& rows, key_domains& domains)
 	// In key order only when the columns over their rows lead the keys, and
 	// the walk needs key order.
 	SortTuples(domains.tuples, keys, count, false);
-	if (domains.messageKey == UINT32_MAX)
+	if (domains.fallThroughKey == UINT32_MAX)
 	{
 		return;
 	}
 
-	// A message key: so far every tuple has the blank. A run keyed on a type is
-	// in the domain when its blank twin is, so it is checked because it is
-	// there, and a type no run names falls through to that twin.
-	size_t const         m = domains.messageKey;
+	// A fall-through key: so far every tuple has the blank. A run keyed on a
+	// value is in the domain when its blank twin is, so it is checked because
+	// it is there, and a value no run names falls through to that twin.
+	size_t const         m = domains.fallThroughKey;
 	std::vector<int64_t> tuple(keys);
 	std::vector<int64_t> twin(keys);
 	size_t               added = 0;

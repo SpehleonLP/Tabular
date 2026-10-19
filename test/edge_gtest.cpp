@@ -706,13 +706,6 @@ TEST(MachineEdge, AnEdgeReadsAMachineInputThroughItsGetter)
 	std::string const state = MachineRefusal("given: {threat: input.energy, energy: input.energy}");
 	EXPECT_EQ(state, "(accepted)") << "any getter's input will do";
 
-	std::string withMessage(kStartle);
-	std::string const inputs = "      - {name: energy, type: double, range: 0..1}\n    step:";
-	withMessage.replace(withMessage.find(inputs), inputs.size(),
-		"      - {name: energy, type: double, range: 0..1}\n      - {name: kind, type: hash}\n"
-		"    message: {type: kind, arguments: [threat]}\n    step:");
-	std::string const argument = RefusalOf(DocumentFromYaml(withMessage, "edge.yaml"));
-	EXPECT_TRUE(Mentions(argument, "here from message argument 0")) << argument;
 }
 
 TEST(MachineEdge, AnEdgeFromAStateOrAnEarlierClauseIsRefused)

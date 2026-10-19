@@ -97,7 +97,8 @@ the feature is wrong, not the rule.
 - **No timers or counters (owner, 2026-10-12).** Tabular has no clock. A delay is a command to
   the outside, a message to self that arrives later:
   `(message :who this :from this :what "panic_cooldown" :delay random(0.4, 1.0))`.
-  The table absorbs it when it arrives. Accumulators such as energy are object state the host
+  When it arrives the host fills an event input with it for one step, and a fall-through
+  key picks it up. Accumulators such as energy are object state the host
   owns; tables read them as inputs.
 - **Not a Turing machine.** Anything that needs one is a message to script.
 
@@ -242,18 +243,22 @@ the column's `domain:`:
   column holds in the other table's current rows, read-only or mutable. A missing table or
   column, or a column of another type than the key, is refused. Tables whose domains come from
   other tables form a DAG; a cycle, a table naming itself included, is refused naming it. A
-  foreign column that is the other table's message key gives its types without its 0: the
-  blank is no message, not a type the dependent key could name (and a hash 0 is refused in its
-  CSV), so the dependent is total over the real types alone.
+  foreign column that is the other table's fall-through key gives its values without its 0:
+  the blank is the blank run's, not a value the dependent key could name (and a hash 0 is
+  refused in its CSV), so the dependent is total over the real values alone.
 - `rows` (`domain: rows`): the key's own table's rows name its values.
-- `message` (`domain: message`): the key is the type of the message a step is given (see
-  Machines, Messages), on a hash key, at most one per table. It contributes the blank, 0 (no
-  message), so every tuple of the other keys demands a blank run; a run keyed on a type is in
-  the domain when its blank twin is (so it is checked because it is there), and an orphan when
-  its other keys are outside theirs. A blank CSV cell in a message key is that 0, in a rows file
-  or a pivoted one; every other blank value cell is still refused. The fall-through is the
-  table's: every lookup of its runs, `PickBest`'s as much as a machine step's, retries a type
-  with no run once with 0 in the message key, and only a miss of both finds no run.
+- fall-through (`fallthrough: true` in place of `domain:`; `key_domain::FallThrough()` in the
+  builder; commands-and-messages spec Part 3, built 2026-10-19): an open key, on a hash key, at
+  most one per table (an order for several is designed in Part 4, not built). Any value may
+  come, and one no run keys on falls through to the blank run. It contributes the blank, 0, so
+  every tuple of the other keys demands a blank run; a run keyed on a value is in the domain
+  when its blank twin is (so it is checked because it is there), and an orphan when its other
+  keys are outside theirs. A blank CSV cell in a fall-through key is that 0, in a rows file or
+  a pivoted one; every other blank value cell is still refused. The fall-through is the
+  table's: every lookup of its runs, `PickBest`'s as much as a machine step's, retries a value
+  with no run once with 0 in that key, and only a miss of both finds no run. It replaces R3's
+  `domain: message`: a machine that branches on argument-free event types (the craft bench's
+  `select`, `back`) keys on one, fed by a hash input the host fills for one step.
 - A machine clause's output is the fifth kind. It is not declared on the table: a machine's
   `Prepare` closes a clause's key by its source (see Machines), and the table keeps one of the
   four kinds above for its own loads.
@@ -338,12 +343,9 @@ clause setting a hash state column (entry runs once per step, after the step lis
 an entry write moved to would get no entry of its own and its R6 state function would never
 start: a transition belongs in the step list; int and double writes are data and stay
 allowed), and an `exit` clause setting one (exit runs once the step list has chosen a state,
-keyed on the one being left, so its write would overrule that choice); a message whose type is
-not a declared hash input, an argument that is not a declared input or is the type or repeated,
-or arguments with no type; a key that reads the message type on a key the table does not
-declare `domain: message`, a message key bound to anything but the message type, and a key that
-is not a message key reading an earlier clause's message-key column (`clause.N.<column>`: that
-clause can answer from its blank run with 0, no message, which only a message key holds); a hash
+keyed on the one being left, so its write would overrule that choice); a key that is not a
+fall-through key reading an earlier clause's fall-through column (`clause.N.<column>`: that
+clause can answer from its blank run with 0, which only a fall-through key holds); a hash
 state with no members, a duplicate member, or an initial value that is not a member. Both the
 YAML front end and the definition build name a clause the same way: `machine 'grazer' step
 clause 0 (table 'grazer_brain')`. In YAML, members
@@ -418,8 +420,7 @@ id, and the instance keeps no pointer that a moved host object would leave dangl
 the binding is dropped. `Bind` refuses, naming the machine and the input, when `resolve` is
 missing (a machine with no inputs needs none), refuses an input, or returns a getter with no
 `read`; it adopts every getter `resolve` returns, so a refusal releases those already
-returned. Message inputs (below) are filled by `Step`, not by a getter, and are never
-resolved. Emitted commands are not handed to the host but returned (P12; built 2026-10-19,
+returned. Every input is a getter's: Tabular has no message concept (see Messages). Emitted commands are not handed to the host but returned (P12; built 2026-10-19,
 commands-and-messages spec Part 2): `Step` and `Rebind` return a `std::span<emitted const>`,
 and `instance::Emitted()` is the same span for the last run, which is how creation's commands
 are read. An `emitted` is `{list, table, command}`: the list the clause is in (so a host tells
@@ -445,7 +446,7 @@ first occurrence of a failure the instance reports (below), whose report carries
 error from the step's one asking. The interpreted picks, and the report, are the callers that
 name the table and row. Tests count the global `operator new` calls of steps that answer,
 raise in a script condition, see NaN, lose a getter, find no run, run an or → best → weighted
-chain, emit, take a message (absorbed or falling through), run exit, cross edges, and repeat a
+chain, emit, fall through to a blank run, run exit, close, cross edges, and repeat a
 reported failure (a raise, a NaN, a key with no run and a lost getter, each with `report`
 set): zero, after a first round in which each report builds its error once.
 A host's own failure message longer than the small-string size allocates on the host's side,
@@ -454,11 +455,10 @@ returns the instance (it cannot be refused: a clause that cannot answer holds, a
 with every state column at its initial value, after running the `create` list and the
 `entry` list as a step runs a list (creation enters the initial state).
 
-**`Step(instance, self, seed, message)`** runs the prepared query:
+**`Step(instance, self, seed)`** runs the prepared query:
 
 1. Every input is read once, so every clause of the step sees one value of it. A getter that
-   fills `error_out` leaves its input without a value this step. The message's type and
-   arguments are inputs too, read from the `message` passed (default: none). An edge crosses
+   fills `error_out` leaves its input without a value this step. An edge crosses
    from its input's previous value (see Edges); the values read become the previous values at
    the end of the step.
 2. Next is set to a copy of current. **A column no clause writes holds** because of this copy,
@@ -484,8 +484,9 @@ with every state column at its initial value, after running the `create` list an
    flag set wider than 32 bits), when its key tuple has no run (`NoRun`: an input-bound key's
    value outside the domain `Prepare` proved), or when a script condition cannot answer
    (`Failed`). Inputs are checked before the run is found, as a pick checks its query first.
-   A clause keyed on a message type with no run of its own retries once with the blank, 0
-   (the fall-through); only a miss of both is `NoRun`.
+   A clause whose fall-through key's value has no run of its own retries once with the blank,
+   0; only a miss of both is `NoRun`. The answer says it fell through
+   (`clause_answer::fellThrough`).
 5. **Entry.** "Entered" means a hash state column of next differs from current at the end of
    the step list, so A → B → A within one step enters nothing. Then the `entry` list runs once
    against next, its writes landing on top of the step list's (so across lists, step writes,
@@ -506,41 +507,51 @@ with every state column at its initial value, after running the `create` list an
 
 **Reports (P15).** A failure reaches `report` once per instance: a getter failure once per
 input (`table` is `kNoTable`, `row` `kNoRow`, the error the getter's, naming the machine and
-input); a message carrying more arguments than the machine declares once (`kNoTable`,
-`kNoRow`, naming the machine and both counts); a bad table input (NaN, an over-wide flag set)
-once per (clause, input); a key with no run once per clause, naming the key as it came (a
-message type, not the blank it retried); a script condition that cannot answer once per
+input); a bad table input (NaN, an over-wide flag set)
+once per (clause, input); a key with no run once per clause, naming the key as it came (the
+fall-through key's value, not the blank it retried); a script condition that cannot answer once per
 (clause, row), `row` being the failing row. A hold caused by another hold (`SourceHeld`) is not
 reported: its cause was. The error names the clause as the definition build does. A condition
 is asked **once** per evaluation: the step passes its own `ErrorContext` down to the row's
 test, and the report carries the host's error from that one asking, with the table, row and
 clause added only when it is the first report. The memory is a bit set in the instance, sized
-at creation: one bit per machine input, one for extra arguments, and per clause one for no
+at creation: one bit per machine input, and per clause one for no
 run, one per table input and one per row that has a script condition (`Bind` ranks those rows
 per clause; only they can fail, so a large table of unscripted rows costs nothing, and a
 weighted table, which has no conditions, no row bits). Only a first occurrence builds an
 error, so a repeat allocates nothing.
 
-**Messages (R3; under review, see Undecided).** A machine takes one message per step: `message: {type: <hash input>,
-arguments: [<input>, ...]}` in YAML, `create_machine::message` in the builder. The type and
-the arguments are machine inputs filled from `Step`'s `message{type, arguments}`, not from
-getters. Arguments are positional slots every message type shares; a type's own arity is not
-declared. An argument not passed reads 0, the value every argument has on a step with no
-message, and is no failure. More arguments than the machine declares still step (a step cannot
-be refused), the extra ones unread, and the instance reports it once. 0 is no message. A
-table keys on it through a `domain: message` key, and a clause must bind that key to the type,
-both ways. A type with no run falls through to the blank run, as in `PickBest`. `instance::Absorbed()` says the
-last step's message was answered by a run keyed on its type, so the host can route a message
-nothing absorbed to script; a fall-through, or a clause that held, absorbs nothing. Passing a
-message allocates nothing: the arguments are a span the host owns for the call.
+**Messages (commands-and-messages spec Part 3, built 2026-10-19).** Tabular has no message
+concept. A message's payload is like a one-row relation that exists only for that event, joined
+only by the query that handles it, so **the host dispatches a message to a handler machine**
+whose declared inputs are that message type's payload, named and typed (a collision's `ny` and
+`speed`); its getters read them from the message, and the host steps the handler once per
+message. Arity is the handler's input list. A machine that branches on many argument-free
+event types keys on a fall-through key (Key domains) fed by an ordinary hash input the host
+fills for one step. **Outgoing, a message is a command** (`(message target type args…)`) in a
+row's list. Machines chain by state: one writes state, and a command or a getter carries it to
+the next. A level physics knows every tick ("on the ground", "against a wall") is a wire, not
+rebuilt from collision messages. Routing a message to its handler, and to the object's script
+when there is none, is the host's (see the host adapter list); the host knows whether it has a
+handler, so Tabular has no `Absorbed()`. R3's `message_inputs`, `Step`'s message, the positional
+argument slots and their report, and `domain: message` are removed.
+
+**Close.** `Close(instance, self, seed)` ends an instance's run, as the host does when the
+object leaves, from any state: closing is not a transition, so no exit row is needed per state.
+It is the leaving half of a rebind under the instance's own binding: every input read once,
+crossing no edge, next set to a copy of current, the `exit` list run against current, next made
+current, and exit's commands returned (the same span as `Emitted()`), so the host hears the
+aborts of what the state started before it destroys the instance. It cannot be refused and
+allocates nothing beyond a report's first occurrence (tested); the other lists' answers are left
+as they were.
 
 **Reload (P14).** `Rebind(instance, binding, self, seed)` moves an instance onto a new binding. It
 is a step that enters a state with migration where the step list would be, and it uses the step's
 own pieces (the input read, the exit and entry lists, the results), so a reload has no list or pick
 path of its own:
 
-1. **Leaving, under the old binding.** Every input is read once with the old getters (no message),
-   next is set to a copy of current, the old `exit` list runs against current, and next becomes
+1. **Leaving, under the old binding** (what `Close` runs). Every input is read once with the old
+   getters, next is set to a copy of current, the old `exit` list runs against current, and next becomes
    current. What exit emitted comes first in the results, so the host hears the abort of what a
    state started (R6) from the code that started it, before the new code starts it again.
 2. **Migration by name**, from the state exit left (an exit's int or double write is kept like a
@@ -554,15 +565,13 @@ path of its own:
 3. **Entering again, under the new binding.** Every input is read with the new getters, the new
    `entry` list runs against the migrated state, next becomes current, and what entry emitted
    follows exit's in the results. The `create` list does not run: the instance is not new. Afterwards only the new
-   entry clauses have answered, and `Absorbed()` is false.
+   entry clauses have answered.
 
 A reload is no movement of an input, so it **crosses no edge and spends none**. The exit and entry
 lists see each input's previous value as the value read for them, as creation's lists do.
-Afterwards an input the old machine also had, with the same name and type, and which both
-machines read from a getter, keeps its previous value, so the next step crosses from the last
-value a step read. An input new to the machine, retyped, or a message argument on either side
-(its previous value is another message's, not a getter's), or one with no previous value yet,
-takes the value read at the rebind, as at creation.
+Afterwards an input the old machine also had, with the same name and type, keeps its previous
+value, so the next step crosses from the last value a step read. An input new to the machine,
+retyped, or one with no previous value yet, takes the value read at the rebind, as at creation.
 Previous values are raw, so a changed range is applied by the clamp where they are used.
 
 `Rebind` cannot be refused, and returns nothing. Everything a binding reads, it holds (its
@@ -585,10 +594,10 @@ keeps `mode`, and deleting `panic` while an instance panics resets `mode` to `id
 aborts the run and the new entry starts `idle`'s animation.
 
 **Bridges are states (R5(b)).** A transition row writes `mode = bridge_c, target = walk`; the
-bridge states have rows keyed on `target` and on a message (`clip_done`) that move along when
+bridge states have rows keyed on `target` and on an event (`clip_done`, the host's event input on a fall-through key) that move along when
 the clip ends, and the last one moves to the target. Each bridge state's entry emits its clip,
 and the machine holds the bridge state while the clip plays. This needs nothing beyond two hash
-state columns, a step clause keyed on both and the message, and an entry clause; the machine's
+state columns, a step clause keyed on both and the event, and an entry clause; the machine's
 proof covers it (a bridge state with no run for some target is refused by `Prepare`). A bridge
 that only the animation system needs stays a suffix command it plays (R5(a)).
 
@@ -604,7 +613,7 @@ Randomized tests compare every clause's answer, and the state it leaves, with `P
 and `PickWeighted` on the version the binding holds, through cuts, the range's ends and beyond,
 NaN, over-wide flags and scripts that fail:
 
-- the step list: the spec grazer (keys from a state and a message input, a message type that
+- the step list: the spec grazer (keys from a state and an event input, an event value that
   falls through, a ranked flags input, scripted rows), the sketch's grazer (two bands, a
   script), an or → best → weighted chain, each term of the flag rank made the deciding one, and
   signed two-key int tuples where key 0 ties and key 1 decides (`StepParity`);
@@ -620,14 +629,14 @@ What parity tests is `Step`'s own code: the tuple search, the laid-out groups, c
 the list order and what each list reads (current or next, earlier answers, the migrated state).
 It cannot test the helpers both sides share, since both run the same code: the clamp, the input
 checks, the condition call, the flag rank and which groups it ranks, the OR, the draw, the
-crossing and the message fall-through. Those rest on the pick and machine suites: each was
+crossing and the fall-through. Those rest on the pick and machine suites: each was
 mutated (14 mutations, 2026-10-19) and each turned at least one test outside the parity suites
 red (for example the clamp's top `PickBest.ARangedInputIsClampedAndNanIsRefused`, the draw's
 weights `PickWeighted.RowsLandInProportionToTheirWeights`, the full-match term
 `PickBest.AFullMatchBeatsALargerPartialOne`, the R term `PickBest.RanksLikeAnimationsLookupBest`,
 the OR `PickOr.OverlappingBandsOrTogether`, the crossing
 `EdgePick.PickBestHoldsAnEdgeOnlyWhenTheInputCrossedIntoItsBand`, the fall-through
-`MachineMessage.PickBestFallsThroughToTheBlankRunToo`).
+`FallThroughKey.PickBestFallsThroughToTheBlankRunToo`).
 
 **Provenance (P16; debug builds).** With `TABULAR_PROVENANCE` set (Tabular's
 `CMakeLists.txt` sets it to 1 in the Debug config and 0 in the release family, in a header it
@@ -635,10 +644,10 @@ generates, `tabular/build_config.h`, that only `tabular/instance.h` includes; a 
 defines it itself keeps its own, and one with neither has it off), each
 instance keeps a ring of its last `kProvenanceDepth` (16) clause runs, and `instance::Provenance()`
 returns them oldest first. An entry (`provenance_entry`) names the run it belongs to (0 for
-creation, then one more per `Step` or `Rebind`, and which of the three), the list, the clause
-and its table, the clause's answer (outcome, row, OR bits, refused input), whether a message
-type fell through to the blank run, and up to `kProvenanceValues` (8) values the clause read:
-its keys, the message type as read; its table inputs, as read before the clamp; and, for a table
+creation, then one more per `Step`, `Rebind` or `Close`, and which of the four), the list, the clause
+and its table, the clause's answer (outcome, row, OR bits, refused input), whether its
+fall-through key's value fell through to the blank run, and up to `kProvenanceValues` (8)
+values the clause read: its keys, the fall-through key's value as read; its table inputs, as read before the clamp; and, for a table
 with edges, the previous value each input crossed from. A wider clause keeps the first eight
 and says it was cut. A clause held by a source read nothing whole and keeps no values; one
 refused on an input keeps its keys and inputs. A list that did not run records nothing. The
@@ -789,9 +798,8 @@ test, and the interpreted picks and a machine's step both call it through one ro
   crossing is measured from it on the next step and is not skipped. Until one value has been
   read the previous value is NaN, which crosses nothing. An edge reads **only a machine input
   with a getter**: the definition build refuses a literal (it never moves), a state column or
-  an earlier clause's answer (values of the step's own making, with no previous value kept),
-  and a message argument (one message's value, 0 between messages, so its "previous" would be
-  another message's). The buffers are sized at creation or rebind, so a step with edges allocates
+  or an earlier clause's answer (values of the step's own making, with no previous value
+  kept). The buffers are sized at creation or rebind, so a step with edges allocates
   nothing (tested). A rebind crosses no edge and spends none (see Reload).
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
@@ -818,7 +826,14 @@ The host supplies:
 - **Running the commands** each `Step`, `CreateInstance` and `Rebind` returns (Tabular never
   interprets one) and, optionally, **a report** for failures (`host_binding::report`); see
   Machines.
-- **The message** a step is given, if any (`Step`'s `message`).
+- **Routing messages** (commands-and-messages spec Part 3): dispatch each message to its
+  handler machine, whose getters read the payload, and step it once per message; route one with
+  no handler to the object's script; fill an event input for one step for a machine keyed on
+  argument-free types. A message an instance's own command sends never comes back into that
+  instance's machine (the host tags it with the sender and skips that machine), and a message a
+  command sends goes into the object's Mailbox under the engine's ordinary delivery rules.
+- **Ending an instance** with `Close` when its object leaves, running the exit commands it
+  returns.
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
 - **Running state functions:** start a named function for an instance on the command an entry
   clause emits, abort it on **every change of the state** (owner, 2026-10-19: it reads the
@@ -853,7 +868,7 @@ part of the bundle, and nothing about it is compiled by Tabular. Two tables refe
 Neither is a table kind (R6). The state-function table is an `entry` table whose command starts
 the function (`(start graze_fn)`). The host aborts a state's function on every change of the
 state, so an exit command is not what stops it; an `exit` table's command (`(abort graze_fn)`)
-is the state's own cleanup, and an abort of one that already returned is the host's no-op. "It returned" is a message (R3) a step row keys on;
+is the state's own cleanup, and an abort of one that already returned is the host's no-op. "It returned" is an event the host fills for one step, which a step row keys on through a fall-through key;
 until it arrives the state's blank run holds the state. The function-chain table is bridge states
 (R5(b), see Reload) whose entry commands start functions and whose rows move along on the return
 message instead of `clip_done`. Tests drive both with nothing but entry, exit and step clauses.
@@ -908,13 +923,13 @@ only the operation it names: a build repeat frees the previous repeat's workload
 clock starts, and an insert repeat's rows are retracted (to put the table back for the next) on
 a clock of their own, which is the retract row. Memory is
 glibc's heap in use (`mallinfo2`) before and after making many objects, malloc's overhead
-included, plus `sizeof(instance)` (328 bytes, 40 of them the last run's results and the binding a rebind left) for an instance; Windows' heap differs only in its
+included, plus `sizeof(instance)` (320 bytes, 40 of them the last run's results and the binding a rebind left) for an instance; Windows' heap differs only in its
 overhead. **Margin:** times 2×, except the grazer's whole build, which varies most (0.2 ms of
 allocation-bound parsing; its runs here have reached 536 µs), held to about 2.2× that slowest
 run; bytes 1.25×; rounded up.
 
 **Workloads.** The *grazer* is the spec's (§4, as the step tests run it): one step clause over a
-21-row best table with a message key that falls through, a ranked flags input, a band and two
+21-row best table with a fall-through key fed by a host-filled event, a ranked flags input, a band and two
 script conditions, and an entry clause that emits. The *brain* is synthetic and larger: a hash
 state of 30 members and 30 chained step clauses, each over its own 300-row best table keyed on
 the state and writing it, half of them with a ranked flags input of two groups. No row has a
@@ -933,8 +948,8 @@ run 1,000 instances × 50 ticks, inputs varying per instance and tick from a tab
 | bind: brain binding | 37,100 bytes | 47000 bytes |
 | create an instance: grazer | 0.43 to 0.45 us | 0.9 us |
 | create an instance: brain | 0.40 to 0.42 us | 0.9 us |
-| create an instance: grazer instance | 728 bytes | 820 bytes |
-| create an instance: brain instance | 1,140 bytes | 1400 bytes |
+| create an instance: grazer instance | 720 bytes | 820 bytes |
+| create an instance: brain instance | 1,132 bytes | 1400 bytes |
 | step: per row evaluated | 124 to 126 ns | 250 ns |
 | step: grazer | 251 to 275 ns | 550 ns |
 | relation insert: mutable | 11.3 to 12.3 us | 25 us |
@@ -1058,12 +1073,6 @@ These are open, not missing. Each is decided by editing this file. The spec's Op
 decisions lists them with the provisional rulings the built code follows, which the owner may
 overrule the same way.
 
-- Messages as inputs (owner, 2026-10-19). The built form (R3: a message's type is a key, its
-  arguments positional slots every type shares, a missing one reading 0) is under review. The
-  owner's direction: a message is a kind of command, and outgoing commands have turned out far
-  more heterogeneous than expected, so messages are likely opaque to Tabular, as a bounded repeat
-  is. Open: whether and how a table reads a message's arguments (a collision's normal vector, for
-  one). The code stays as built until this is decided.
 - Turning the step's searches into a direct index (R8; see Budgets): no load target is set.
 - Arithmetic on data values (see A row): a more general question than `energy + 50` in a value;
   not built, and the owner is not ready to decide it.
@@ -1089,7 +1098,7 @@ open there, not here:
   generator ordinary script uses (likely access masks choosing it in table context; owner:
   "doable"), and how `random(...)` inside a command is drawn (R9);
 - a delayed message that arrives after its state ended and was re-entered: the instance's
-  entry count captured by `:delay`, and `message_stale` an input flag the host supplies (R3);
+  entry count captured by `:delay`, and `message_stale` an input flag the host supplies;
 - mutable-table writes from s-expressions: the host, running a returned command, turns it into
   `insert_row`;
 - script reading a machine's state by name (`instance::State` reads by index);

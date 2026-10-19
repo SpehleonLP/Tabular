@@ -21,9 +21,10 @@
 using namespace tabular;
 
 // A step's effects: the commands it returns (P12), the failures it
-// reports once (P15), the message it is given (R3) and the exit list it runs
-// when a state is left (R6). The worked example is the spec's grazer (§4)
-// with an exit table that aborts what entry started.
+// reports once (P15), the fall-through key a host-filled event feeds
+// (commands-and-messages spec, Part 3) and the exit list it runs when a state
+// is left (R6). The worked example is the spec's grazer (§4) with an exit
+// table that aborts what entry started.
 
 namespace
 {
@@ -63,6 +64,16 @@ struct host_object
 	int64_t food_near = 0;
 	int64_t level     = 0;
 	double  t         = 0.5;
+	// What the host fills for one step from the event it dispatches: its type
+	// (0 for none) and the food's distance it carries.
+	int64_t event     = 0;
+	double  distance  = 0;
+	// A collision's payload, which a handler machine's getters read.
+	double  ny        = 0;
+	double  speed     = 0;
+	// What the craft bench's gambit conditions test.
+	bool    sort_open = false;
+	bool    can_back  = false;
 	bool    cornered  = false;
 	bool    broken    = false;   // every condition fails to answer
 	bool    unwired   = false;   // the level getter fails to answer
@@ -89,6 +100,36 @@ cell ReadFoodNear(void*, void const* self, ErrorContext*)
 cell ReadT(void*, void const* self, ErrorContext*)
 {
 	return cell::Real(Host(self).t);
+}
+
+cell ReadEvent(void*, void const* self, ErrorContext*)
+{
+	return cell::Integer(Host(self).event);
+}
+
+cell ReadDistance(void*, void const* self, ErrorContext*)
+{
+	return cell::Real(Host(self).distance);
+}
+
+cell ReadNy(void*, void const* self, ErrorContext*)
+{
+	return cell::Real(Host(self).ny);
+}
+
+cell ReadSpeed(void*, void const* self, ErrorContext*)
+{
+	return cell::Real(Host(self).speed);
+}
+
+bool SortOpen(void*, void const* self, ErrorContext*)
+{
+	return Host(self).sort_open;
+}
+
+bool CanBack(void*, void const* self, ErrorContext*)
+{
+	return Host(self).can_back;
 }
 
 cell ReadLevel(void*, void const* self, ErrorContext* error_out)
@@ -146,6 +187,14 @@ tl::expected<closure, ErrorContext> Conditions(std::string_view text)
 	if (text == "flaky_or")
 	{
 		return closure{&FlakyOr, nullptr, nullptr};
+	}
+	if (text == "sort_open")
+	{
+		return closure{&SortOpen, nullptr, nullptr};
+	}
+	if (text == "can_back")
+	{
+		return closure{&CanBack, nullptr, nullptr};
 	}
 	return tl::make_unexpected(ErrorContext("no condition '", text, "'"));
 }
@@ -221,6 +270,22 @@ host_binding LoggingHost(effect_log& log)
 		{
 			return input_getter{&ReadT};
 		}
+		if (name == "event")
+		{
+			return input_getter{&ReadEvent};
+		}
+		if (name == "distance")
+		{
+			return input_getter{&ReadDistance};
+		}
+		if (name == "ny")
+		{
+			return input_getter{&ReadNy};
+		}
+		if (name == "speed")
+		{
+			return input_getter{&ReadSpeed};
+		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
 	host.report = [&log](uint64_t instance, uint32_t table, size_t row, ErrorContext const& error)
@@ -233,6 +298,13 @@ host_binding LoggingHost(effect_log& log)
 	};
 	return host;
 }
+
+// An event the host dispatches: its type and its payload.
+struct event
+{
+	int64_t               type = 0;
+	std::span<cell const> arguments;
+};
 
 // A document's tables loaded with rows (one text per table, in table order),
 // its first machine prepared and bound to LoggingHost(log).
@@ -291,27 +363,40 @@ struct effects_fixture
 		return out;
 	}
 
-	// A step, its commands kept in log.
-	std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+	// A step, its commands kept in log. With an event, the host fills the
+	// event input and the distance it carries (0 when it carries none) for
+	// this one step, as a host dispatching an event does; Tabular sees an
+	// ordinary step.
+	std::span<emitted const> Step(instance& subject, host_object* self, uint64_t seed, event const& e)
 	{
-		std::span<emitted const> const results = tabular::Step(subject, self, seed, msg);
+		self->event    = e.type;
+		self->distance = e.arguments.empty() ? 0 : e.arguments[0].d;
+		std::span<emitted const> const results = Step(subject, static_cast<void const*>(self), seed);
+		self->event    = 0;
+		self->distance = 0;
+		return results;
+	}
+	std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed)
+	{
+		std::span<emitted const> const results = tabular::Step(subject, self, seed);
 		log.Record(subject.id(), results);
 		return results;
 	}
 };
 
-message Message(std::string_view type, std::span<cell const> arguments = {})
+event Message(std::string_view type, std::span<cell const> arguments = {})
 {
-	return message{static_cast<uint32_t>(Hash(type)), arguments};
+	return event{Hash(type), arguments};
 }
 
 // ---- The worked example ------------------------------------------------------------
 //
-// The spec's grazer with a message argument and an exit table: entering a
-// state starts its animation (grazer_enter), leaving it aborts it
-// (grazer_exit). food_found carries the food's distance: near food is eaten,
-// far food is noted and the grazer keeps walking. A type no row keys on falls
-// through to the blank run. A cornered check in panic raises when the host
+// The spec's grazer, keyed on a host-filled event, with an exit table: entering
+// a state starts its animation (grazer_enter), leaving it aborts it
+// (grazer_exit). food_found carries the food's distance, which the host
+// fills as the distance input: near food is eaten, far food is noted and the
+// grazer keeps walking. An event no row keys on falls through to the blank
+// run. A cornered check in panic raises when the host
 // object is broken.
 
 constexpr std::string_view kGrazer = R"(
@@ -325,13 +410,13 @@ tables:
       - {name: distance,  type: double, range: 0..10}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: event,   type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: dist,    type: band, input: distance}
       - {name: when,    type: condition}
       - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
+    order_by: {columns: [mode, event]}
   - name: grazer_enter
     read_only: true
     pick: best
@@ -353,12 +438,11 @@ machines:
     inputs:
       - {name: energy,    type: double, range: 0..1}
       - {name: food_near, type: flags}
-      - {name: message,   type: hash}
+      - {name: event,     type: hash}
       - {name: distance,  type: double, range: 0..10}
-    message: {type: message, arguments: [distance]}
     step:
       - from:  grazer_brain
-        where: {mode: state.mode, message: input.message}
+        where: {mode: state.mode, event: input.event}
         given: {energy: input.energy, food_near: input.food_near, distance: input.distance}
         set:   {mode: next}
     exit:
@@ -372,7 +456,7 @@ machines:
 )";
 
 constexpr std::string_view kBrainRows = R"(# grazer_brain
-mode,  message,    energy, near, dist,  when,     next
+mode,  event,      energy, near, dist,  when,     next
 idle,  ,           0..0.3, 1,    0..10, ,         eat
 idle,  ,           0..1,   0,    0..10, ,         walk
 walk,  ,           0..1,   0,    0..10, ,         walk
@@ -416,28 +500,27 @@ TEST(GrazerEffects, EveryEntryAndExitIsReturnedInOrder)
 	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"1:((anim stand))"})) << "creation enters idle and leaves nothing";
 	EXPECT_EQ(grazer.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
 
-	f.Step(grazer, &host, 1);   // no message: idle's blank run, energy 0.8, no food
+	f.Step(grazer, &host, 1);   // no event: idle's blank run, energy 0.8, no food
 	EXPECT_EQ(grazer.State(0).i, Hash("walk"));
 	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort stand))", "1:((anim walk))"}))
 		<< "exit, keyed on the idle being left, then entry";
-	EXPECT_FALSE(grazer.Absorbed());
+	EXPECT_FALSE(grazer.Answer(trigger::Step, 0).fellThrough) << "no event: the blank run itself";
 
 	f.Step(grazer, &host, 2, Message("sneeze"));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "sneeze fell through to walk's blank run";
-	EXPECT_FALSE(grazer.Absorbed()) << "the host routes sneeze to the script";
+	EXPECT_TRUE(grazer.Answer(trigger::Step, 0).fellThrough) << "walk has no sneeze run";
 	EXPECT_TRUE(f.log.Take().empty()) << "nothing was entered, so nothing was emitted";
 	EXPECT_EQ(grazer.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
 
 	cell const far[] = {cell::Real(5)};
 	f.Step(grazer, &host, 3, Message("food_found", far));
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "far food: noted, still walking";
-	EXPECT_TRUE(grazer.Absorbed()) << "walk has a food_found run, and it answered";
+	EXPECT_FALSE(grazer.Answer(trigger::Step, 0).fellThrough) << "walk has a food_found run, and it answered";
 	EXPECT_TRUE(f.log.Take().empty());
 
 	cell const near[] = {cell::Real(1)};
 	f.Step(grazer, &host, 4, Message("food_found", near));
 	EXPECT_EQ(grazer.State(0).i, Hash("eat"));
-	EXPECT_TRUE(grazer.Absorbed());
 	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"2:((abort walk))", "1:((anim chew) (message food \"eat\"))"}));
 
 	f.Step(grazer, &host, 5, Message("scared"));
@@ -491,37 +574,20 @@ TEST(GrazerEffects, ARaisingConditionHoldsAndIsReportedOnce)
 	EXPECT_EQ(f.log.reports[1].instance, 8u);
 }
 
-// ---- Messages ----------------------------------------------------------------------
+// ---- Fall-through keys ------------------------------------------------------------------
 
-TEST(MachineMessage, AnArgumentTheMessageDoesNotCarryReadsZero)
-{
-	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
-	ASSERT_TRUE(f.binding);
-	host_object host;
-	instance grazer = f.Create(host);
-	f.Step(grazer, &host, 1);
-	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
-	f.Step(grazer, &host, 2, Message("food_found"));
-	EXPECT_EQ(grazer.State(0).i, Hash("eat")) << "distance 0 is near";
-	grazer = f.Create(host);
-	f.Step(grazer, &host, 1);
-	cell const two[] = {cell::Real(5), cell::Real(0)};
-	f.Step(grazer, &host, 2, Message("food_found", two));
-	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "an argument past the declared ones is not read";
-}
-
-TEST(MachineMessage, ABlankCellIsNoMessageOnlyInAMessageKey)
+TEST(FallThroughKey, ABlankCellIsAllowedOnlyInAFallThroughKey)
 {
 	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
 	ASSERT_TRUE(f.machine);
 	auto blank = f.store.Value(Brain, 0, 1);
 	ASSERT_TRUE(blank.has_value()) << RefusalOf(blank);
-	EXPECT_EQ(blank->i, 0) << "idle's first row, message blank";
+	EXPECT_EQ(blank->i, 0) << "idle's first row, event blank";
 	// The same blank in mode is refused, as every other blank value cell is.
 	csv_rows load;
 	load.table     = Brain;
 	load.owner     = 2;
-	load.text      = "mode,message,energy,near,dist,when,next\n,scared,0..1,0,0..10,,idle\n";
+	load.text      = "mode,event,energy,near,dist,when,next\n,scared,0..1,0,0..10,,idle\n";
 	load.label     = "more.csv";
 	load.condition = &Conditions;
 	std::string const error = RefusalOf(LoadCsv(f.store, load));
@@ -529,7 +595,7 @@ TEST(MachineMessage, ABlankCellIsNoMessageOnlyInAMessageKey)
 	EXPECT_TRUE(Mentions(error, "more.csv:2")) << error;
 }
 
-TEST(MachineMessage, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
+TEST(FallThroughKey, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 {
 	auto doc = DocumentFromYaml(kGrazer, "machine.yaml");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
@@ -547,7 +613,7 @@ TEST(MachineMessage, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 		+ ", 0): energy 0, distance 0 has no row with no flags and no script condition; no row has this key, and the key "
 		"is in the table's domain")) << error;
 
-	// A run keyed on a type is in the domain because it is there, so it is
+	// A run keyed on a value is in the domain because it is there, so it is
 	// checked: food_found's distance bands leave a gap.
 	std::string const gap = Replace(kBrainRows, "walk,  food_found, 0..1,   0,    2..10, ,         walk\n", "");
 	load.text = gap;
@@ -556,7 +622,7 @@ TEST(MachineMessage, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 		+ std::to_string(Hash("food_found")) + "): energy 0, distance 2 has no row")) << gapError;
 }
 
-TEST(MachineMessage, ARunKeyedOnATypeWhoseOtherKeysLeftTheDomainIsAnOrphan)
+TEST(FallThroughKey, ARunKeyedOnAValueWhoseOtherKeysLeftTheDomainIsAnOrphan)
 {
 	// mode closes over members without sleep: sleep's runs, blank or typed,
 	// are outside the domain, reported and unchecked.
@@ -592,55 +658,40 @@ std::string BuildRefusal(std::string_view from, std::string_view to)
 
 }
 
-TEST(MachineMessage, TheMessageIsAHashInputAndItsArgumentsOtherInputs)
+// Tabular has no message concept: a machine declares no message, and every
+// input is a getter's.
+TEST(FallThroughKey, AMachineDeclaresNoMessage)
 {
-	std::string const unknown = BuildRefusal("message: {type: message,", "message: {type: msg,");
-	EXPECT_TRUE(Mentions(unknown, "machine 'grazer'")) << unknown;
-	EXPECT_TRUE(Mentions(unknown, "the message's type is input 'msg', which the machine does not declare")) << unknown;
-	std::string const typed = BuildRefusal("message: {type: message,", "message: {type: energy,");
-	EXPECT_TRUE(Mentions(typed, "the message's type is input 'energy', a double; a message's type is a hash")) << typed;
-	std::string const missing = BuildRefusal("arguments: [distance]", "arguments: [distance, range]");
-	EXPECT_TRUE(Mentions(missing, "message argument 1 is input 'range', which the machine does not declare")) << missing;
-	std::string const twice = BuildRefusal("arguments: [distance]", "arguments: [distance, distance]");
-	EXPECT_TRUE(Mentions(twice, "message argument 1 is input 'distance', which the message already carries as an argument"))
-		<< twice;
-	std::string const type = BuildRefusal("arguments: [distance]", "arguments: [message]");
-	EXPECT_TRUE(Mentions(type, "message argument 0 is input 'message', which the message already carries as its type"))
-		<< type;
-	std::string const blank = BuildRefusal("message: {type: message,", "message: {type: \"\",");
-	EXPECT_TRUE(Mentions(blank, "the message's type names no input")) << blank;
+	std::string const error = BuildRefusal("    step:\n      - from:  grazer_brain",
+		"    message: {type: event}\n    step:\n      - from:  grazer_brain");
+	EXPECT_TRUE(Mentions(error, "message")) << error;
+	EXPECT_NE(error, "(accepted)") << "an unknown key fails the document";
 }
 
-TEST(MachineMessage, ArgumentsWithNoTypeAreRefused)
+// Any hash source may feed a fall-through key: a value with no run falls
+// through whatever it came from, so the key is open to the proof either way.
+TEST(FallThroughKey, AnyHashSourceMayFeedIt)
 {
-	auto doc = DocumentFromYaml(kGrazer, "machine.yaml");
-	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
-	create_machine           m         = doc->machines()[0];
-	std::string_view const   args[]    = {"distance"};
-	m.message                          = message_inputs{{}, args};
-	std::string const        error     = RefusalOf(CheckMachine(m, doc->tables));
-	EXPECT_TRUE(Mentions(error, "the message names arguments and no type")) << error;
+	std::string const yaml = Replace(kGrazer, "event: input.event}", "event: {literal: scared}}");
+	effects_fixture f(yaml, {kBrainRows, kEnterRows, kExitRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance grazer = f.Create(host);
+	f.Step(grazer, &host, 1);
+	EXPECT_EQ(grazer.State(0).i, Hash("panic")) << "the literal scared keys idle's scared run";
+	f.Step(grazer, &host, 2);
+	EXPECT_EQ(grazer.State(0).i, Hash("panic")) << "panic has no scared run, so it falls through to the blank run";
+	EXPECT_TRUE(grazer.Answer(trigger::Step, 0).fellThrough);
 }
 
-TEST(MachineMessage, AMessageKeyAndTheMessageTypeAreBoundToEachOther)
+TEST(FallThroughKey, ItDeclaresNoOtherDomain)
 {
-	std::string const literal = BuildRefusal("message: input.message}", "message: {literal: scared}}");
-	EXPECT_TRUE(Mentions(literal, "machine 'grazer' step clause 0 (table 'grazer_brain')")) << literal;
-	EXPECT_TRUE(Mentions(literal, "key 'message' of table 'grazer_brain' is a message key; it reads the machine's message type"))
-		<< literal;
-	// The type bound to a key the table does not mark: a rows key has no blank
-	// run to fall through to.
-	std::string const unmarked = RefusalOf(DocumentFromYaml(Replace(kGrazer,
-		"{name: message, type: hash, key: true, domain: message}", "{name: message, type: hash, key: true, domain: rows}"),
-		"machine.yaml"));
-	EXPECT_TRUE(Mentions(unmarked, "key 'message' reads the message type, and table 'grazer_brain' does not declare it a "
-		"message key (domain: message)")) << unmarked;
-	// A machine that takes no message cannot fill a message key.
-	std::string const none = BuildRefusal("    message: {type: message, arguments: [distance]}\n", "");
-	EXPECT_TRUE(Mentions(none, "is a message key; it reads the machine's message type")) << none;
+	std::string const both = BuildRefusal("{name: event,   type: hash, key: true, fallthrough: true}",
+		"{name: event,   type: hash, key: true, fallthrough: true, domain: rows}");
+	EXPECT_TRUE(Mentions(both, "column 'event' of table 'grazer_brain' falls through and declares a domain")) << both;
 }
 
-TEST(MachineMessage, AMessageKeyIsOneHashKey)
+TEST(FallThroughKey, IsOneHashKey)
 {
 	std::string const flags = RefusalOf(DocumentFromYaml(R"(
 tables:
@@ -648,23 +699,199 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: m, type: int, key: true, domain: message}
+      - {name: m, type: int, key: true, fallthrough: true}
       - {name: v, type: int}
     order_by: {columns: [m]}
 )", "t.yaml"));
-	EXPECT_TRUE(Mentions(flags, "key 'm' of table 't' is a int; a message key is a hash, the message's type")) << flags;
+	EXPECT_TRUE(Mentions(flags, "key 'm' of table 't' is a int; a fall-through key is a hash")) << flags;
 	std::string const two = RefusalOf(DocumentFromYaml(R"(
 tables:
   - name: t
     read_only: true
     pick: best
     columns:
-      - {name: a, type: hash, key: true, domain: message}
-      - {name: b, type: hash, key: true, domain: message}
+      - {name: a, type: hash, key: true, fallthrough: true}
+      - {name: b, type: hash, key: true, fallthrough: true}
       - {name: v, type: int}
     order_by: {columns: [a, b]}
 )", "t.yaml"));
-	EXPECT_TRUE(Mentions(two, "key 'b' of table 't' is a second message key; a table keys on one message")) << two;
+	EXPECT_TRUE(Mentions(two, "key 'b' of table 't' is a second fall-through key; a table has at most one")) << two;
+}
+
+// ---- Messages out of Tabular ---------------------------------------------------------
+
+namespace
+{
+
+// A handler machine: the host dispatches each collision to it and steps it
+// once, and its inputs are the collision's payload, read by getters from the
+// message. Tabular sees an ordinary machine being stepped.
+constexpr std::string_view kCollision = R"(
+tables:
+  - name: contact_kind
+    read_only: true
+    pick: best
+    inputs:
+      - {name: ny,    type: double, range: -1..1}
+      - {name: speed, type: double, range: 0..50}
+    columns:
+      - {name: ny,    type: band, input: ny}
+      - {name: speed, type: band, input: speed}
+      - {name: kind,  type: hash}
+    suffix: command
+machines:
+  - name: on_collision
+    inputs:
+      - {name: ny,    type: double, range: -1..1}
+      - {name: speed, type: double, range: 0..50}
+    state:
+      - {name: contact, type: hash, members: [none, floor, wall, ceiling], initial: none}
+    step:
+      - from:  contact_kind
+        given: {ny: input.ny, speed: input.speed}
+        set:   {contact: kind}
+        emit:  command
+)";
+
+constexpr std::string_view kContactRows = R"(ny,        speed,  kind,    command
+0.7..1,    20..50, floor,   sound thud
+0.7..1,    0..50,  floor,   ()
+-0.7..0.7, 0..50,  wall,    ()
+-1..-0.7,  0..50,  ceiling, ()
+)";
+
+}
+
+TEST(MessageHandler, ACollisionHandlerClassifiesTheContactFromItsPayload)
+{
+	effects_fixture f(kCollision, {kContactRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance handler = f.Create(host);
+	f.log.Take();
+	auto collide = [&](double ny, double speed)
+	{
+		host.ny    = ny;
+		host.speed = speed;
+		f.Step(handler, &host, 1);
+		return f.log.Take();
+	};
+	EXPECT_EQ(collide(0.9, 5), (std::vector<std::string>{"0:()"}));
+	EXPECT_EQ(handler.State(0).i, Hash("floor"));
+	EXPECT_EQ(collide(0.0, 30), (std::vector<std::string>{"0:()"}));
+	EXPECT_EQ(handler.State(0).i, Hash("wall")) << "a wall is not a floor, however hard the hit";
+	EXPECT_EQ(collide(-0.9, 5), (std::vector<std::string>{"0:()"}));
+	EXPECT_EQ(handler.State(0).i, Hash("ceiling"));
+	EXPECT_EQ(collide(0.9, 30), (std::vector<std::string>{"0:((sound thud))"})) << "a hard landing sounds";
+	EXPECT_EQ(handler.State(0).i, Hash("floor"));
+}
+
+namespace
+{
+
+// The craft bench's Back as a gambit list (commands-and-messages spec,
+// "first match wins"): the host fills kind for the step an argument-free
+// event arrives, a value with no run of its own falls through to the blank
+// run, and Back's rows are tried in row order through script conditions.
+constexpr std::string_view kBench = R"(
+tables:
+  - name: bench_page
+    read_only: true
+    pick: best
+    columns:
+      - {name: page, type: hash, key: true, domain: rows}
+      - {name: kind, type: hash, key: true, fallthrough: true}
+      - {name: when, type: condition}
+      - {name: next_page, type: hash}
+    order_by: {columns: [page, kind]}
+    suffix: command
+machines:
+  - name: craft_bench
+    inputs:
+      - {name: event, type: hash}
+    state:
+      - {name: page, type: hash, members: [experiment, closed], initial: experiment}
+    step:
+      - from:  bench_page
+        where: {page: state.page, kind: input.event}
+        set:   {page: next_page}
+        emit:  command
+)";
+
+constexpr std::string_view kBenchRows = R"(page,       kind, when,      next_page,  command
+experiment, ,     ,          experiment, ()
+experiment, back, sort_open, experiment, toggle-sort
+experiment, back, can_back,  experiment, basket-back
+experiment, back, ,          closed,     close
+closed,     ,     ,          closed,     ()
+)";
+
+}
+
+TEST(MessageHandler, TheCraftBenchsBackIsAGambitOverAFallThroughKey)
+{
+	effects_fixture f(kBench, {kBenchRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance bench = f.Create(host);
+	f.log.Take();
+	host.sort_open = true;
+	host.can_back  = true;
+	f.Step(bench, &host, 1, Message("back"));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(toggle-sort)"})) << "the first line that matches wins";
+	host.sort_open = false;
+	f.Step(bench, &host, 2, Message("back"));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(basket-back)"}));
+	f.Step(bench, &host, 3, Message("select"));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:()"})) << "select has no run here: the blank run";
+	EXPECT_TRUE(bench.Answer(trigger::Step, 0).fellThrough);
+	host.can_back = false;
+	f.Step(bench, &host, 4, Message("back"));
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(close)"}));
+	EXPECT_EQ(bench.State(0).i, Hash("closed"));
+}
+
+// Closing is not a transition: the host ends the instance from any state, and
+// Close runs the exit list against that state and returns its commands.
+TEST(MachineClose, CloseRunsTheExitListAndReturnsItsCommands)
+{
+	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance grazer = f.Create(host);
+	f.Step(grazer, &host, 1);
+	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
+	f.log.Take();
+	clause_answer const step = grazer.Answer(trigger::Step, 0);
+	std::span<emitted const> const closed = Close(grazer, &host, 2);
+	ASSERT_EQ(closed.size(), 1u);
+	EXPECT_EQ(closed[0].list, trigger::Exit);
+	EXPECT_EQ(closed[0].table, uint32_t(Exit));
+	EXPECT_EQ(closed[0].command, "((abort walk))") << "the abort of what walk started";
+	EXPECT_EQ(grazer.Emitted().data(), closed.data()) << "the same span as Emitted()";
+	EXPECT_EQ(grazer.Answer(trigger::Exit, 0).outcome, clause_outcome::Answered);
+	EXPECT_EQ(grazer.Answer(trigger::Entry, 0).outcome, clause_outcome::Answered) << "entry did not run again";
+	EXPECT_EQ(grazer.Answer(trigger::Step, 0).row, step.row) << "nor did the step list";
+	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "exit writes no hash state";
+}
+
+TEST(MachineClose, CloseAllocatesNothing)
+{
+	if (!kCountsAllocations)
+	{
+		GTEST_SKIP() << "a sanitizer owns operator new in this build, so nothing counts allocations";
+	}
+	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance grazer = f.Create(host);
+	Close(grazer, &host, 1);
+	AllocationCount count;
+	for (int i = 0; i < 20; ++i)
+	{
+		Close(grazer, &host, uint64_t(i));
+	}
+	EXPECT_EQ(count.Count(), 0u);
 }
 
 // ---- Exit ---------------------------------------------------------------------------
@@ -1054,7 +1281,7 @@ TEST(MachineReport, WithNoReportTheHoldsStillHold)
 
 // ---- Allocation --------------------------------------------------------------------
 
-TEST(GrazerEffects, StepsThatEmitTakeMessagesExitAndRepeatReportsAllocateNothing)
+TEST(GrazerEffects, StepsThatEmitFallThroughExitAndRepeatReportsAllocateNothing)
 {
 	if (!kCountsAllocations)
 	{
@@ -1101,7 +1328,7 @@ TEST(GrazerEffects, StepsThatEmitTakeMessagesExitAndRepeatReportsAllocateNothing
 	EXPECT_EQ(f.log.commandCount - commands, 10 * 8) << "four changes a round, each an exit and an entry";
 }
 
-TEST(MachineMessage, APivotedTablesBlankMessageKeyIsNoMessage)
+TEST(FallThroughKey, APivotedTablesBlankCellIsTheBlank)
 {
 	auto doc = DocumentFromYaml(R"(
 tables:
@@ -1112,7 +1339,7 @@ tables:
       - {name: mode, type: flags}
     columns:
       - {name: label, type: int, key: true, domain: rows}
-      - {name: msg,   type: hash, key: true, domain: message}
+      - {name: msg,   type: hash, key: true, fallthrough: true}
       - {name: req,   type: flags, input: mode}
       - {name: clip,  type: string}
     order_by: {columns: [label, msg]}
@@ -1208,7 +1435,7 @@ machines:
 
 // ---- The fall-through is the table's ---------------------------------------------------
 
-TEST(MachineMessage, PickBestFallsThroughToTheBlankRunToo)
+TEST(FallThroughKey, PickBestFallsThroughToTheBlankRunToo)
 {
 	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
 	ASSERT_TRUE(f.machine);
@@ -1226,12 +1453,12 @@ TEST(MachineMessage, PickBestFallsThroughToTheBlankRunToo)
 	EXPECT_EQ(pick(Hash("sneeze")), blank) << "walk has no sneeze run; the pick answers from walk's blank run";
 	std::optional<size_t> const food = pick(Hash("food_found"));
 	ASSERT_TRUE(food.has_value());
-	EXPECT_NE(*food, *blank) << "a type with a run of its own answers from it";
+	EXPECT_NE(*food, *blank) << "a value with a run of its own answers from it";
 }
 
-// ---- A message key's 0 stays in message keys -------------------------------------------
+// ---- A fall-through key's 0 stays in fall-through keys ----------------------------------
 
-TEST(MachineMessage, AColumnDomainFromAMessageKeyHoldsItsTypesWithoutTheBlank)
+TEST(FallThroughKey, AColumnDomainFromOneHoldsItsValuesWithoutTheBlank)
 {
 	auto doc = DocumentFromYaml(R"(
 tables:
@@ -1239,7 +1466,7 @@ tables:
     read_only: true
     pick: best
     columns:
-      - {name: msg, type: hash, key: true, domain: message}
+      - {name: msg, type: hash, key: true, fallthrough: true}
       - {name: v,   type: int}
     order_by: {columns: [msg]}
   - name: b
@@ -1261,18 +1488,18 @@ tables:
 		rows.label = "rows.csv";
 		return RefusalOf(LoadCsv(store, rows));
 	};
-	EXPECT_EQ(load(0, 1, "msg,v\n,0\n"), "(accepted)") << "a's blank run alone: b's domain has no type yet";
+	EXPECT_EQ(load(0, 1, "msg,v\n,0\n"), "(accepted)") << "a's blank run alone: b's domain has no value yet";
 	EXPECT_EQ(load(1, 1, "msg,w\nwalk,1\nsneeze,2\n"), "(accepted)");
 	EXPECT_EQ(load(0, 2, "msg,v\nwalk,1\nsneeze,2\n"), "(accepted)")
-		<< "b is total over a's real types; a's blank is no message, not a type b could key";
+		<< "b is total over a's values; a's blank is the blank run's, not a value b could key";
 	std::string const gap = load(0, 3, "msg,v\nhop,3\n");
 	EXPECT_TRUE(Mentions(gap, "table 'b'")) << "b has no hop run: " << gap;
 }
 
-TEST(MachineMessage, ANonMessageKeyMayNotReadAnEarlierClausesMessageKey)
+TEST(FallThroughKey, AnOrdinaryKeyMayNotReadAnEarlierClausesFallThroughKey)
 {
-	// mood keys on what the brain's message key answered: the brain answers 0
-	// from its blank run, which no ordinary key can hold.
+	// mood keys on what the brain's fall-through key answered: the brain
+	// answers 0 from its blank run, which no ordinary key can hold.
 	std::string const tables = Replace(kGrazer, "machines:\n", R"(  - name: mood
     read_only: true
     pick: best
@@ -1284,25 +1511,22 @@ machines:
 )");
 	std::string const reader = Replace(tables, "        set:   {mode: next}\n", R"(        set:   {mode: next}
       - from:  mood
-        where: {kind: clause.0.message}
+        where: {kind: clause.0.event}
 )");
 	std::string const error = RefusalOf(DocumentFromYaml(reader, "machine.yaml"));
 	EXPECT_TRUE(Mentions(error, "machine 'grazer' step clause 1 (table 'mood')")) << error;
-	EXPECT_TRUE(Mentions(error, "key 'kind' reads column 'message' of clause 0, the message key of table 'grazer_brain'"))
+	EXPECT_TRUE(Mentions(error, "key 'kind' reads column 'event' of clause 0, the fall-through key of table 'grazer_brain'"))
 		<< error;
 	EXPECT_TRUE(Mentions(error, "its blank run")) << error;
 
-	// Into a message key the read is the message key's own rule: it reads the
-	// machine's message type, and nothing else.
-	std::string const intoMessage = Replace(Replace(tables, "      - {name: kind, type: hash, key: true, domain: rows}\n",
-		"      - {name: kind, type: hash, key: true, domain: message}\n"), "        set:   {mode: next}\n", R"(        set:   {mode: next}
+	// Into a fall-through key the blank is a value it holds: 0 looks up the
+	// blank run itself.
+	std::string const intoFallThrough = Replace(Replace(tables, "      - {name: kind, type: hash, key: true, domain: rows}\n",
+		"      - {name: kind, type: hash, key: true, fallthrough: true}\n"), "        set:   {mode: next}\n", R"(        set:   {mode: next}
       - from:  mood
-        where: {kind: clause.0.message}
+        where: {kind: clause.0.event}
 )");
-	std::string const messageError = RefusalOf(DocumentFromYaml(intoMessage, "machine.yaml"));
-	EXPECT_TRUE(Mentions(messageError, "key 'kind' of table 'mood' is a message key; it reads the machine's message type"))
-		<< messageError;
-	EXPECT_FALSE(Mentions(messageError, "its blank run")) << messageError;
+	EXPECT_EQ(RefusalOf(DocumentFromYaml(intoFallThrough, "machine.yaml")), "(accepted)");
 }
 
 // ---- Report memory per scripted row -----------------------------------------------------
@@ -1362,7 +1586,7 @@ machines:
 
 // ---- NoRun names the key as it came -----------------------------------------------------
 
-TEST(MachineReport, ANoRunOnAMessageKeyNamesTheTypeNotTheBlank)
+TEST(MachineReport, ANoRunOnAFallThroughKeyNamesTheValueNotTheBlank)
 {
 	effects_fixture f(R"(
 tables:
@@ -1371,7 +1595,7 @@ tables:
     pick: best
     columns:
       - {name: level, type: int, key: true, domain: rows}
-      - {name: msg,   type: hash, key: true, domain: message}
+      - {name: msg,   type: hash, key: true, fallthrough: true}
       - {name: next,  type: int}
     order_by: {columns: [level, msg]}
 machines:
@@ -1380,12 +1604,11 @@ machines:
       - {name: mode,  type: hash, members: [a], initial: a}
       - {name: count, type: int, initial: 0}
     inputs:
-      - {name: level,   type: int}
-      - {name: message, type: hash}
-    message: {type: message}
+      - {name: level, type: int}
+      - {name: event, type: hash}
     step:
       - from: poke
-        where: {level: input.level, msg: input.message}
+        where: {level: input.level, msg: input.event}
         set: {count: next}
 )", {"level,msg,next\n0,,1\n0,poke,2\n"});
 	ASSERT_TRUE(f.binding);
@@ -1398,36 +1621,6 @@ machines:
 	ASSERT_EQ(f.log.reports.size(), 1u);
 	EXPECT_TRUE(Mentions(f.log.reports[0].error, "table 'poke' key (5, " + std::to_string(Hash("poke")) + ") has no run"))
 		<< f.log.reports[0].error;
-}
-
-// ---- Extra message arguments --------------------------------------------------------------
-
-TEST(MachineMessage, ExtraArgumentsAreReportedOnceAndTheStepStillRuns)
-{
-	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
-	ASSERT_TRUE(f.binding);
-	host_object host;
-	instance grazer = f.Create(host);
-	f.Step(grazer, &host, 1);
-	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
-	cell const two[] = {cell::Real(5), cell::Real(0)};
-	f.Step(grazer, &host, 2, Message("food_found", two));
-	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "the declared argument, distance 5, was read: far food";
-	EXPECT_TRUE(grazer.Absorbed());
-	ASSERT_EQ(f.log.reports.size(), 1u);
-	EXPECT_EQ(f.log.reports[0].table, kNoTable);
-	EXPECT_EQ(f.log.reports[0].row, kNoRow);
-	EXPECT_TRUE(Mentions(f.log.reports[0].error, "machine 'grazer'")) << f.log.reports[0].error;
-	EXPECT_TRUE(Mentions(f.log.reports[0].error, "a message carries 2 arguments, and the machine declares 1"))
-		<< f.log.reports[0].error;
-	cell const three[] = {cell::Real(5), cell::Real(0), cell::Real(0)};
-	f.Step(grazer, &host, 3, Message("food_found", three));
-	EXPECT_EQ(f.log.reports.size(), 1u) << "reported once per instance";
-
-	// A missing argument is no failure: it reads 0, as on a step with no message.
-	f.Step(grazer, &host, 4, Message("food_found"));
-	EXPECT_EQ(grazer.State(0).i, Hash("eat"));
-	EXPECT_EQ(f.log.reports.size(), 1u);
 }
 
 // ---- Steps that find no run allocate nothing ----------------------------------------------

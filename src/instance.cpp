@@ -77,7 +77,7 @@ struct staged_getters
 struct Binding::Data
 {
 	counted_ptr<Machine const>                         machine;
-	// Per machine input; an input the message carries has none (no read).
+	// Per machine input.
 	immutable_array<input_getter>                      getters;
 	std::function<void(uint64_t, uint32_t, size_t, ErrorContext const&)>  report;
 	// Per list: where its clauses' answers start in an instance's answers,
@@ -85,9 +85,7 @@ struct Binding::Data
 	std::array<uint32_t, kTriggerCount + 1>            answerStart{};
 	std::array<immutable_array<uint64_t>, kTriggerCount> sites;
 	// An instance's report-once bits: one per machine input (its getter
-	// failed), one for a message carrying more arguments than the machine
-	// declares (the bit right after the inputs'), then per clause, from its
-	// start: no run, one per table input (refused), one per version row that
+	// failed), then per clause, from its start: no run, one per table input (refused), one per version row that
 	// has a script condition (it could not answer). Only a scripted row can
 	// fail, so a clause costs 1 + its table inputs + its scripted rows: a
 	// 1000-row table with 3 scripted rows and 2 inputs takes 6 bits, not 1003;
@@ -141,7 +139,6 @@ struct instance_access
 	static std::vector<cell>&          Keys(instance& i) { return i._keys; }
 	static std::vector<cell>&          Given(instance& i) { return i._given; }
 	static std::vector<float>&         Axes(instance& i) { return i._axes; }
-	static bool&                       Absorbed(instance& i) { return i._absorbed; }
 	static std::vector<emitted>&       Emitted(instance& i) { return i._emitted; }
 	static size_t&                     EmittedCount(instance& i) { return i._emittedCount.n; }
 	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
@@ -187,8 +184,7 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	detail::machine_def const&  def      = prepared.def;
 	auto data     = std::make_unique<binding_access::Data>();
 	data->machine = machine;
-	bool const needsResolve = std::find(def.carried.begin(), def.carried.end(), detail::kFromGetter) != def.carried.end();
-	if (needsResolve && !host.resolve)
+	if (!def.inputs.empty() && !host.resolve)
 	{
 		return tl::make_unexpected(ErrorContext("machine '", def.name,
 			"' has inputs, and the host binding has no resolve to supply them"));
@@ -200,11 +196,6 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	for (size_t i = 0; i < def.inputs.size(); ++i)
 	{
 		input_def const& in = def.inputs[i];
-		if (def.carried[i] != detail::kFromGetter)
-		{
-			staged.getters.push_back(input_getter{});
-			continue;
-		}
 		auto getter = host.resolve(in.name);
 		if (!getter)
 		{
@@ -219,7 +210,7 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	}
 
 	uint32_t              answers = 0;
-	size_t                bits    = def.inputs.size() + 1;   // the getters, then extra arguments
+	size_t                bits    = def.inputs.size();   // the getters
 	std::vector<uint64_t> sites;
 	std::vector<uint32_t> starts;
 	std::vector<uint32_t> rankStarts;
@@ -286,7 +277,6 @@ struct list_run
 	std::vector<cell>&                 given;
 	std::vector<cell>&                 givenBefore;
 	std::vector<float>&                axes;
-	bool&                              absorbed;
 	uint64_t                           id;
 	void const*                        self;
 	uint64_t                           seed;
@@ -598,10 +588,18 @@ clause_answer RunClause(list_run const& run, size_t index)
 		}
 		before = std::span<cell const>(run.givenBefore.data(), rc.inputs.size());
 	}
-	// A message type with no run falls through to the blank run, as every
-	// lookup of the table does; the retry writes run.keys itself.
-	size_t const tuple = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()), rc.messageKey,
-		[&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; });
+	// A fall-through key's value with no run falls through to the blank run,
+	// as every lookup of the table does. The retry writes run.keys itself, and
+	// a hit leaves the blank there; the value read is put back, so a report
+	// and provenance name the key as it came.
+	cell const   asRead = rc.fallThroughKey != UINT32_MAX ? keys[rc.fallThroughKey] : cell::Integer(0);
+	size_t const tuple  = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()),
+		rc.fallThroughKey, [&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; });
+	if (rc.fallThroughKey != UINT32_MAX && asRead.i != 0 && run.keys[rc.fallThroughKey].i == 0)
+	{
+		answer.fellThrough               = true;
+		run.keys[rc.fallThroughKey]      = asRead;
+	}
 	if (tuple == SIZE_MAX)
 	{
 		answer.outcome = clause_outcome::NoRun;
@@ -677,12 +675,6 @@ clause_answer RunClause(list_run const& run, size_t index)
 	{
 		run.next[state] = AnswerValue(pc, answer, column);
 	}
-	// A clause that fell through left its message key blank, so only a run
-	// keyed on the type itself absorbs the message.
-	if (rc.messageKey != UINT32_MAX && run.keys[rc.messageKey].i != 0)
-	{
-		run.absorbed = true;
-	}
 	return answer;
 }
 
@@ -696,15 +688,14 @@ list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state,
 		instance_access::Inputs(subject), instance_access::InputRead(subject), instance_access::Previous(subject), own,
 		instance_access::Reported(subject), instance_access::Keys(subject), instance_access::Given(subject),
 		instance_access::GivenBefore(subject), instance_access::Axes(subject),
-		instance_access::Absorbed(subject), subject.id(), self, seed, list};
+		subject.id(), self, seed, list};
 }
 
 #if TABULAR_PROVENANCE
 // Writes what clause index of run read and answered into the next slot of the
 // ring, overwriting the oldest once it is full. Reads the scratch buffers the
-// clause left: its keys (with the message type put back where it fell
-// through to the blank run), its inputs and, with edges, their previous
-// values. Copies into the ring sized at creation, so it allocates nothing.
+// clause left: its keys (as read, also where one fell through to the blank
+// run), its inputs and, with edges, their previous values. Copies into the ring sized at creation, so it allocates nothing.
 void Record(instance& subject, list_run const& run, size_t index, clause_answer const& answer)
 {
 	resolved_clause const& rc  = run.machine.def.lists[run.list][index];
@@ -735,18 +726,10 @@ void Record(instance& subject, list_run const& run, size_t index, clause_answer 
 		}
 		++stored;
 	};
+	entry.fellThrough = answer.fellThrough;
 	for (size_t k = 0; k < rc.keys.size(); ++k)
 	{
-		cell value = run.keys[k];
-		// A clause keyed on the message always reads the type from the
-		// message input, and only the fall-through leaves 0 where it was not.
-		if (k == rc.messageKey && value.i == 0 && rc.keys[k].kind == source_kind::Input
-			&& run.inputs[rc.keys[k].index].i != 0)
-		{
-			value             = run.inputs[rc.keys[k].index];
-			entry.fellThrough = true;
-		}
-		keep(value);
+		keep(run.keys[k]);
 	}
 	for (size_t g = 0; g < rc.inputs.size(); ++g)
 	{
@@ -789,41 +772,16 @@ void MarkNotRun(instance& subject, trigger list)
 }
 
 // Every input once per step, so every clause of the step reads one value of
-// it: a getter's, or the message's. A getter that fails is reported once; the
+// it, from its getter. A getter that fails is reported once; the
 // clauses reading it then hold without reporting again.
-void ReadInputs(instance& subject, void const* self, message const& msg)
+void ReadInputs(instance& subject, void const* self)
 {
 	binding_access::Data const&  binding = binding_access::Of(*instance_access::BindingOf(subject));
 	detail::machine_def const&   def     = machine_access::Of(*binding.machine).def;
 	std::vector<cell>&    inputs  = instance_access::Inputs(subject);
 	std::vector<uint8_t>& read    = instance_access::InputRead(subject);
-	// Arguments are positional slots every message type shares, and a type's
-	// own arity is not declared: a missing one reads 0, as on a step with no
-	// message, and is no failure. More than the machine declares is a sender
-	// that disagrees with the declaration: the step still runs (it cannot be
-	// refused), and the instance says so once.
-	if (msg.arguments.size() > def.messageArguments && FirstReport(instance_access::Reported(subject), def.inputs.size())
-		&& binding.report)
-	{
-		binding.report(subject.id(), kNoTable, kNoRow,
-			ErrorContext("a message carries ", msg.arguments.size(), " arguments, and the machine declares ",
-				def.messageArguments, "; the extra ones are not read").with("machine '", def.name, "' message"));
-	}
 	for (size_t i = 0; i < binding.getters.size(); ++i)
 	{
-		uint32_t const carried = def.carried[i];
-		if (carried == detail::kMessageType)
-		{
-			inputs[i] = cell::Integer(msg.type);
-			read[i]   = 1;
-			continue;
-		}
-		if (carried != detail::kFromGetter)
-		{
-			inputs[i] = carried < msg.arguments.size() ? msg.arguments[carried] : cell::Integer(0);
-			read[i]   = 1;
-			continue;
-		}
 		input_getter const& g = binding.getters[i];
 		ErrorContext        error;
 		inputs[i] = g.read(g.data, self, &error);
@@ -919,15 +877,14 @@ void SizeFor(instance& subject, binding_access::Data const& data)
 	instance_access::Axes(subject).assign(data.maxAxes, 0.f);
 	// Results already returned by this run (a rebind's exit) are kept.
 	instance_access::Emitted(subject).resize(instance_access::EmittedCount(subject) + data.emitters);
-	instance_access::Absorbed(subject) = false;
 }
 
-// Reads every input once (no message) and makes the values read the
+// Reads every input once and makes the values read the
 // previous ones, so the lists run next cross no edge, as at creation. An
 // input whose read failed, or a NaN, has no previous value.
 void ReadStill(instance& subject, void const* self)
 {
-	ReadInputs(subject, self, message{});
+	ReadInputs(subject, self);
 	std::vector<cell>& previous = instance_access::Previous(subject);
 	std::fill(previous.begin(), previous.end(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
 	AdvancePrevious(subject);
@@ -959,23 +916,32 @@ cell Migrated(detail::state_column const& to, std::span<detail::state_column con
 	return to.initial;
 }
 
+// Leaves the current state for good, as a rebind's first half and Close do:
+// every input read once, crossing no edge, the exit list run against current
+// (the state being left) writing next, which becomes current, and its
+// commands added to the run's results.
+void Leave(instance& subject, void const* self, uint64_t seed)
+{
+	std::vector<cell>& current = instance_access::Current(subject);
+	std::vector<cell>& next    = instance_access::Next(subject);
+	ReadStill(subject, self);
+	std::copy(current.begin(), current.end(), next.begin());
+	RunList(subject, trigger::Exit, current, self, seed);
+	std::swap(current, next);
+	Emit(subject, trigger::Exit);
+}
+
 // The previous value the old input of the new input's name and type had
 // (raw: a changed range is the clamp's business where it is used); none for an
 // input the old machine did not have, or a double it never read a value for
-// (NaN). Only an input both machines read from a getter has a previous value
-// that means the same thing: a message argument's is another message's, so an
-// input that was one, or becomes one, is new. Only a double's previous value is
-// ever read, since an edge reads only a band's input.
+// (NaN). Only a double's previous value is ever read, since an edge reads
+// only a band's input.
 std::optional<cell> CarriedPrevious(detail::machine_def const& to, size_t input, detail::machine_def const& from, std::span<cell const> previous)
 {
-	if (to.carried[input] != detail::kFromGetter)
-	{
-		return std::nullopt;
-	}
 	input_def const& wanted = to.inputs[input];
 	for (size_t i = 0; i < from.inputs.size(); ++i)
 	{
-		if (from.inputs[i].name != wanted.name || from.inputs[i].type != wanted.type || from.carried[i] != detail::kFromGetter)
+		if (from.inputs[i].name != wanted.name || from.inputs[i].type != wanted.type)
 		{
 			continue;
 		}
@@ -1053,20 +1019,19 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	return out;
 }
 
-std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg)
+std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed)
 {
 	// A moved-from instance has no binding, and stepping one is caller misuse.
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is stepped: caller misuse");
 	machine_access::Data const& machine = machine_access::Of(*binding_access::Of(subject.binding()).machine);
 	std::vector<cell>&          current = instance_access::Current(subject);
 	std::vector<cell>&          next    = instance_access::Next(subject);
-	instance_access::Absorbed(subject)  = false;
 	BeginResults(subject);
 #if TABULAR_PROVENANCE
 	++instance_access::Pass(subject);
 	instance_access::Run(subject) = provenance_run::Step;
 #endif
-	ReadInputs(subject, self, msg);
+	ReadInputs(subject, self);
 	// Unwritten columns hold because next starts as current.
 	std::copy(current.begin(), current.end(), next.begin());
 	RunList(subject, trigger::Step, next, self, seed);
@@ -1115,11 +1080,7 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	// from the code that started what the state runs (R6). The edge history is
 	// kept aside, since a reload neither crosses an edge nor spends one.
 	std::vector<cell> const history = instance_access::Previous(subject);
-	ReadStill(subject, self);
-	std::copy(current.begin(), current.end(), next.begin());
-	RunList(subject, trigger::Exit, current, self, seed);
-	std::swap(current, next);
-	Emit(subject, trigger::Exit);
+	Leave(subject, self, seed);
 
 	// Migration by name, from the state exit left.
 	std::vector<cell> migrated;
@@ -1155,6 +1116,18 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 		}
 	}
 	Emit(subject, trigger::Entry);
+	return subject.Emitted();
+}
+
+std::span<emitted const> Close(instance& subject, void const* self, uint64_t seed)
+{
+	assert(instance_access::BindingOf(subject) && "a moved-from instance is closed: caller misuse");
+	BeginResults(subject);
+#if TABULAR_PROVENANCE
+	++instance_access::Pass(subject);
+	instance_access::Run(subject) = provenance_run::Close;
+#endif
+	Leave(subject, self, seed);
 	return subject.Emitted();
 }
 

@@ -54,6 +54,7 @@ struct host_object
 	bool    cornered  = false;
 	bool    broken    = false;
 	bool    unwired   = false;   // the energy getter cannot answer
+	int64_t event     = 0;       // filled by the host for one step: the event it dispatches
 };
 
 host_object const& Host(void const* self)
@@ -74,6 +75,11 @@ cell ReadEnergy(void*, void const* self, ErrorContext* error_out)
 cell ReadT(void*, void const* self, ErrorContext*)
 {
 	return cell::Real(Host(self).t);
+}
+
+cell ReadEvent(void*, void const* self, ErrorContext*)
+{
+	return cell::Integer(Host(self).event);
 }
 
 cell ReadFoodNear(void*, void const* self, ErrorContext*)
@@ -164,7 +170,7 @@ struct World
 		host.resolve = [](std::string_view name) -> tl::expected<input_getter, ErrorContext>
 		{
 			static std::map<std::string_view, cell (*)(void*, void const*, ErrorContext*)> const reads = {
-				{"energy", &ReadEnergy}, {"t", &ReadT}, {"food_near", &ReadFoodNear}};
+				{"energy", &ReadEnergy}, {"t", &ReadT}, {"food_near", &ReadFoodNear}, {"message", &ReadEvent}};
 			auto found = reads.find(name);
 			if (found == reads.end())
 			{
@@ -231,12 +237,31 @@ instance Created(Binding const& binding, uint64_t id, uint64_t seed, void const*
 	return out;
 }
 
-void Stepped(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+void Stepped(instance& subject, void const* self, uint64_t seed)
 {
-	for (emitted const& result : Step(subject, self, seed, msg))
+	for (emitted const& result : Step(subject, self, seed))
 	{
 		Log(subject.binding(), result);
 	}
+}
+
+// An event the host dispatches, by its type's hash (0 for none).
+struct posted
+{
+	int64_t type = 0;
+};
+
+posted Message(int64_t type)
+{
+	return posted{type};
+}
+
+// A step with an event: the host fills the message input for this one step.
+void Stepped(instance& subject, host_object* self, uint64_t seed, posted msg)
+{
+	self->event = msg.type;
+	Stepped(subject, static_cast<void const*>(self), seed);
+	self->event = 0;
 }
 
 // A rebind's exit commands are the old binding's, and its entry's the new one's.
@@ -272,15 +297,11 @@ std::string CommandOf(TableVersion const& version, size_t row)
 	return command ? std::string(*command) : std::string();
 }
 
-message Message(int64_t type)
-{
-	return message{static_cast<uint32_t>(type), {}};
-}
 
 // ---- The life machine: every list, every clause kind ---------------------------------
 //
 // create draws a mood (weighted). step moves mode with the spec grazer's brain
-// (best: a message key that falls through, a ranked flags input, a band, two
+// (best: a fall-through key, a ranked flags input, a band, two
 // script conditions). exit, reading the state being left, picks a best row
 // with a band and a script and emits it. entry chains an or (arrive) into a
 // best keyed by its answer (settle, which has no run for 4, so it holds there)
@@ -296,7 +317,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -353,7 +374,6 @@ machines:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}
       - {name: message, type: hash}
-    message: {type: message}
     create:
       - from: mood
         where: {mode: state.mode}
@@ -852,7 +872,7 @@ TEST(Provenance, AnEntryHoldsTheTableRowAndTheValuesTheStepRead)
 	EXPECT_FALSE(brain.fellThrough);
 	ASSERT_EQ(brain.Keys().size(), 2u);
 	EXPECT_EQ(brain.Keys()[0].i, Hash("idle")) << "the state it read";
-	EXPECT_EQ(brain.Keys()[1].i, 0) << "no message";
+	EXPECT_EQ(brain.Keys()[1].i, 0) << "no event";
 	ASSERT_EQ(brain.Inputs().size(), 2u);
 	EXPECT_EQ(brain.Inputs()[0].d, 0.2) << "as read, before the clamp";
 	EXPECT_EQ(brain.Inputs()[1].i, 1);
@@ -910,7 +930,6 @@ TEST(Provenance, AFallThroughIsMarkedAndKeepsTheTypeAsRead)
 	EXPECT_TRUE(brain->fellThrough);
 	EXPECT_EQ(brain->answer.outcome, clause_outcome::Answered);
 	EXPECT_EQ(brain->Keys()[1].i, Hash("sneeze")) << "the type read, not the blank it fell to";
-	EXPECT_FALSE(subject.Absorbed());
 
 	Stepped(subject, &host, 2, Message(Hash("scared")));
 	provenance_view const ring = subject.Provenance();
@@ -925,7 +944,6 @@ TEST(Provenance, AFallThroughIsMarkedAndKeepsTheTypeAsRead)
 	ASSERT_NE(scared, nullptr);
 	EXPECT_FALSE(scared->fellThrough) << "scared has a run of its own";
 	EXPECT_EQ(scared->Keys()[1].i, Hash("scared"));
-	EXPECT_TRUE(subject.Absorbed());
 }
 
 TEST(Provenance, HoldsAreRecordedWithWhatWasRead)

@@ -555,7 +555,7 @@ tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_tabl
 		{
 		case domain_kind::None:
 			return tl::make_unexpected(ErrorContext("key '", in.name, "' of best table '", c.name,
-				"' declares no domain; a key's domain is its members, another table's column, its rows, or a message's type"));
+				"' declares no domain; a key's domain is its members, another table's column, its rows, or open (fallthrough)"));
 		case domain_kind::Members:
 		{
 			if (in.type != column_type::Hash && in.type != column_type::Int)
@@ -626,20 +626,20 @@ tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_tabl
 		}
 		case domain_kind::Rows:
 			break;
-		case domain_kind::Message:
+		case domain_kind::FallThrough:
 			if (in.type != column_type::Hash)
 			{
 				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' is a ",
-					TypeName(in.type), "; a message key is a hash, the message's type"));
+					TypeName(in.type), "; a fall-through key is a hash"));
 			}
-			// A step carries one message, so a second message key could only
-			// repeat the first; the fall-through to the blank run has one slot.
+			// The retry has one slot; an order for several is designed
+			// (commands-and-messages spec, Part 4) and not built.
 			for (domain_def const& earlier : out)
 			{
-				if (earlier.kind == domain_kind::Message)
+				if (earlier.kind == domain_kind::FallThrough)
 				{
 					return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
-						"' is a second message key; a table keys on one message"));
+						"' is a second fall-through key; a table has at most one"));
 				}
 			}
 			break;

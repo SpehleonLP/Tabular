@@ -1,7 +1,7 @@
 # Commands and messages
 
-**Status:** Parts 1 and 2 built (2026-10-19, branch tabular-commands; see "As built" under
-each); Parts 3 and 4 are design, not built. Taken from the owner's conversation of 2026-10-19, after slices
+**Status:** Parts 1, 2 and 3 built (2026-10-19, branch tabular-commands; see "As built" under
+each); Part 4 is design, not built. Taken from the owner's conversation of 2026-10-19, after slices
 0–8 landed. It replaces the slice-4 message design (R3: the message type as a key, arguments
 as positional input slots). **Contract:** `docs/definition.md`; each part below names the
 contract text it changes.
@@ -257,6 +257,28 @@ fall-through, or each gets a handler.
 hard hit. A fall-through key: an unnamed type answers from the blank run, and a blank cell
 outside a fall-through column is refused. The grazer and craft-bench machines step with no
 message concept.
+
+**As built** (2026-10-19). `message_inputs`, `struct message`, `Step`'s message parameter, the
+argument slots and their report, and `Absorbed()` are gone; every machine input is a getter's.
+`Close(instance, self, seed)` is the host's "run the exit list and return its commands"; the
+rebind's leaving half is the same code. Decided in building:
+
+- **Spelling:** `fallthrough: true` on a column, in place of `domain:` (declaring both is
+  refused). In the builder it stays a key domain, `key_domain::FallThrough()` (R3's `Message`
+  kind renamed), so the domain machinery (blank twin, orphans, a foreign domain dropping the 0)
+  carries over unchanged.
+- **At most one per table** still: the retry order for several is Part 4's.
+- **Any hash source may feed it.** R3 bound a message key to the message type both ways; with no
+  message concept that pairing is gone. A fall-through key stays open to `Prepare` whatever
+  feeds it (a state column or literal does not close it), since a value with no run falls
+  through rather than being a gap. An ordinary key still may not read an earlier clause's
+  fall-through column (it can answer 0); a fall-through key may.
+- **`clause_answer::fellThrough`** replaces `Absorbed()` as the per-clause record (it fits in the
+  answer's padding, so no instance grows); provenance reads it, and keys keep the value as read.
+- **`Close`** reads inputs without crossing an edge, as a rebind's exit does, and leaves the
+  other lists' answers as they were; `provenance_run::Close` marks its entries.
+- Tests rewrote R3's message tests as event inputs the host fills for one step; the extra-arguments
+  and argument-previous-value tests went with the concept.
 
 ## Part 4. Hierarchy: entry per column, fall-through order, override clauses
 

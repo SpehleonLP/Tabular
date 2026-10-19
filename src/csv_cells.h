@@ -39,8 +39,8 @@ bool ParseRange(std::string_view text, float& start, float& end);
 
 // The one rule for an empty cell, whatever the column's type: it is refused.
 // Exceptions are the callers' own: a condition column's blank cell is "no
-// condition", a pivoted table's blank cell is no row, and a message key's
-// blank cell is no message (see the table_def ReadCell); all are accepted
+// condition", a pivoted table's blank cell is no row, and a fall-through
+// key's blank cell is the blank run's (see the table_def ReadCell); all are accepted
 // before asking. A command or string column holds text and no cell value, so
 // its caller asks this instead of ReadCell and keeps the text.
 tl::expected<void, ErrorContext> RefuseBlank(column_def const& column, std::string_view text);
@@ -65,9 +65,9 @@ private:
 tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_view text, hash_names& names,
 	uint32_t line);
 
-// A cell of def's column as ReadCell reads it, except that a blank cell in the
-// message key is "no message", hash 0: the one blank a value column takes and
-// the one place a hash may be 0. Any text there is a message type, and hashing
+// A cell of def's column as ReadCell reads it, except that a blank cell in a
+// fall-through key is the blank, hash 0: the one blank a value column takes
+// and the one place a hash may be 0. Any text there is a value, and hashing
 // to 0 is refused for it as for every name.
 tl::expected<cell, ErrorContext> ReadCell(table_def const& def, uint32_t column, std::string_view text,
 	hash_names& names, uint32_t line);

@@ -240,10 +240,14 @@ cell ValueOf(TableVersion const& version, size_t row, std::string_view column)
 	return cell::Integer(0);
 }
 
-// A step's message of the named type, with no arguments.
-message Message(std::string_view type)
+// A step on an event of the named type: the host fills the message input for
+// this one step, as a host dispatching an event does.
+std::span<emitted const> StepOn(instance& subject, host_object& host, uint64_t seed, std::string_view type)
 {
-	return message{static_cast<uint32_t>(Hash(type)), {}};
+	host.message = Hash(type);
+	std::span<emitted const> const results = Step(subject, &host, seed);
+	host.message = 0;
+	return results;
 }
 
 // ---- The worked example: the grazer of the design sketch ------------------------
@@ -525,7 +529,7 @@ size_t CountedSteps(instance& subject, host_object const& host, int steps, Vary 
 	for (int i = 0; i < steps; ++i)
 	{
 		vary(i);
-		Step(subject, &host, uint64_t(i), message{static_cast<uint32_t>(host.message), {}});
+		Step(subject, &host, uint64_t(i));
 		for (watched_clause const& w : watched)
 		{
 			++seen[size_t(subject.Answer(w.list, w.clause).outcome)];
@@ -857,7 +861,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -878,7 +882,6 @@ machines:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}
       - {name: message, type: hash}
-    message: {type: message}
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -930,28 +933,28 @@ machine_fixture SpecGrazer()
 
 }
 
-TEST(MachineStep, AMessageNoRowKeysOnFallsThroughToTheBlankRun)
+TEST(MachineStep, AValueNoRowKeysOnFallsThroughToTheBlankRun)
 {
 	machine_fixture f = SpecGrazer();
 	ASSERT_TRUE(f.binding);
 	TableVersion const& brain = f.Version(trigger::Step, 0);
 	host_object host;
 	instance grazer = f.Create(host);
-	Step(grazer, &host, 1, Message("scared"));
+	StepOn(grazer, host, 1, "scared");
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
-	EXPECT_TRUE(grazer.Absorbed()) << "idle has a scared run";
-	Step(grazer, &host, 2, Message("sneeze"));   // no run keys on sneeze
+	EXPECT_FALSE(grazer.Answer(trigger::Step, 0).fellThrough) << "idle has a scared run";
+	StepOn(grazer, host, 2, "sneeze");   // no run keys on sneeze
 	clause_answer const fell = grazer.Answer(trigger::Step, 0);
 	ASSERT_EQ(fell.outcome, clause_outcome::Answered) << "panic's blank run answered";
+	EXPECT_TRUE(fell.fellThrough);
 	EXPECT_EQ(ValueOf(brain, fell.row, "message").i, 0);
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
-	EXPECT_FALSE(grazer.Absorbed()) << "it fell through: the host routes sneeze to the script";
-	Step(grazer, &host, 3);   // no message: type 0, the blank run directly
+	Step(grazer, &host, 3);   // no event: 0, the blank run directly
 	EXPECT_EQ(grazer.Answer(trigger::Step, 0).row, fell.row);
-	EXPECT_FALSE(grazer.Absorbed());
-	Step(grazer, &host, 4, Message("calm"));
+	EXPECT_FALSE(grazer.Answer(trigger::Step, 0).fellThrough);
+	StepOn(grazer, host, 4, "calm");
 	EXPECT_EQ(grazer.State(0).i, Hash("idle"));
-	EXPECT_TRUE(grazer.Absorbed());
+	EXPECT_FALSE(grazer.Answer(trigger::Step, 0).fellThrough);
 }
 
 TEST(MachineStep, TheFlagsRankTheGroupsAsPickBestRanksRows)
@@ -1225,17 +1228,16 @@ TEST(StepParity, TheSpecGrazerMatchesPickBestStepByStep)
 		host.cornered  = rng() % 2 == 0;
 		host.broken    = rng() % 25 == 0;
 		cell const before = grazer.State(0);
-		// R3's fall-through is the table's: PickBest retries a type with no run
-		// on the blank run itself. Whether the type has a run of its own is
-		// read off the version, for Absorbed.
+		// The fall-through is the table's: PickBest retries a value with no run
+		// on the blank run itself. Whether the value has a run of its own is
+		// read off the version, for fellThrough.
 		std::vector<cell> const keys = {before, cell::Integer(host.message)};
 		auto const run = brain.FindOrdered(keys);
 		ASSERT_TRUE(run.has_value()) << RefusalOf(run);
-		bool const absorbs = host.message != 0 && run->first != run->last;
 		bool const falls   = host.message != 0 && run->first == run->last;
 		std::vector<cell> const inputs = {cell::Real(host.energy), cell::Integer(host.food_near)};
 		auto const oracle = PickBest(brain, pick_query{keys, inputs, &host});
-		Step(grazer, &host, uint64_t(i), message{static_cast<uint32_t>(host.message), {}});
+		Step(grazer, &host, uint64_t(i));
 		auto where = [&]() { return "step " + std::to_string(i) + " "; };
 		clause_answer const got = grazer.Answer(trigger::Step, 0);
 		ExpectSameAnswer(oracle, got, where);
@@ -1244,7 +1246,10 @@ TEST(StepParity, TheSpecGrazerMatchesPickBestStepByStep)
 		(got.outcome == clause_outcome::Answered ? answered : held) += 1;
 		// Both sides fall through, or neither would answer a type with no run.
 		fell += falls && got.outcome == clause_outcome::Answered ? 1 : 0;
-		EXPECT_EQ(grazer.Absorbed(), absorbs && got.outcome == clause_outcome::Answered) << where();
+		if (got.outcome == clause_outcome::Answered)
+		{
+			EXPECT_EQ(got.fellThrough, falls) << where();
+		}
 		if (wanted.i != before.i)
 		{
 			++entered;

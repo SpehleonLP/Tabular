@@ -48,9 +48,9 @@ int64_t Hash(std::string_view text)
 // The spec's tables, with what today's front ends need and the spec's sketch
 // leaves out: the inputs a band and a ranking flags column read, each key's
 // domain, the order a pick's keys lead, and no `writes:` (a clause's set says
-// which state column a value writes). The message key declares its domain
-// `message` (R3): a blank cell is "no message", and a type no row keys on
-// falls through to the blank run.
+// which state column a value writes). The message key declares
+// `fallthrough: true`: a blank cell is the blank run's, and a value no row
+// keys on falls through to it. The host fills the message input for a step.
 constexpr std::string_view kGrazerTables = R"(
 tables:
   - name: grazer_brain
@@ -61,7 +61,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -94,8 +94,7 @@ machines:
     inputs:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}      # host wire: bit 0 set when food is in reach
-      - {name: message, type: hash}         # 0 on a step with no message (ruling R3)
-    message: {type: message}
+      - {name: message, type: hash}         # 0 on a step with no event, filled by the host
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -253,7 +252,7 @@ TEST(GrazerMachine, TheRunDirectoryNamesVersionRowsOfEachTuplesRun)
 TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByTheLoad)
 {
 	// The spec's reading (§4): panic's calm row puts panic in mode's rows
-	// domain, and a message key demands the blank run of every tuple of the
+	// domain, and a fall-through key demands the blank run of every tuple of the
 	// other keys, so the load refuses before any machine is prepared.
 	auto doc = Document(kGrazerTables, kGrazerMachine);
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
@@ -347,7 +346,7 @@ TEST(GrazerMachine, TwoClausesWritingOneColumnAreOrderedByPosition)
 
 TEST(GrazerMachine, ALiteralKeyIsOneValue)
 {
-	// A message key reads only the message type, so the literal closes mode.
+	// The fall-through key stays open, so the literal closes mode alone.
 	std::string const machines = Replace(kGrazerMachine, "where: {mode: state.mode,", "where: {mode: {literal: idle},");
 	grazer_fixture f(Parsed(kGrazerTables, machines), kBrainRows, kEnterRows);
 	auto machine = Prepare(f.Definition(), f.store);
@@ -691,7 +690,7 @@ TEST(MachineDefinition, CommandStructsAreCheckedWithoutYaml)
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
 	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, sets, {}}};
-	create_machine    m{"grazer", state, inputs, {}, {}, step, {}, message_inputs{"message", {}}};
+	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
 	EXPECT_TRUE(Mentions(RefusalOf(CheckMachine(m, doc->tables)), "set writes state column 'mode' twice"));
 
 	add_clause const once[] = {{"grazer_brain", where, given, std::span<set_state const>(sets, 1), {}}};
@@ -845,7 +844,7 @@ std::string EnergyLiteralRefusal(schema const& tables, double lit)
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
 	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, {}, {}}};
-	create_machine    m{"grazer", state, inputs, {}, {}, step, {}, message_inputs{"message", {}}};
+	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
 	return RefusalOf(CheckMachine(m, tables));
 }
 

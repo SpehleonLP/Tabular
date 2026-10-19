@@ -107,6 +107,7 @@ struct bench_host
 	double  energy   = 0.5;
 	int64_t near     = 0;
 	bool    cornered = false;
+	int64_t event    = 0;   // filled by the host for one step: the event it dispatches
 };
 
 bench_host const& Host(void const* self)
@@ -122,6 +123,11 @@ cell ReadEnergy(void*, void const* self, ErrorContext*)
 cell ReadNear(void*, void const* self, ErrorContext*)
 {
 	return cell::Integer(Host(self).near);
+}
+
+cell ReadEvent(void*, void const* self, ErrorContext*)
+{
+	return cell::Integer(Host(self).event);
 }
 
 bool Cornered(void*, void const* self, ErrorContext*)
@@ -160,6 +166,10 @@ host_binding BenchHost()
 		{
 			return input_getter{&ReadNear, nullptr, nullptr};
 		}
+		if (name == "message")
+		{
+			return input_getter{&ReadEvent, nullptr, nullptr};
+		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
 	return host;
@@ -167,7 +177,7 @@ host_binding BenchHost()
 
 // ---- The workloads ------------------------------------------------------------------
 
-// The spec's grazer (§4) as the step tests run it: a message key, a ranked
+// The spec's grazer (§4) as the step tests run it: a fall-through key, a ranked
 // flags input, a band and two script conditions, and an entry clause that
 // emits.
 constexpr std::string_view kGrazer = R"(
@@ -180,7 +190,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -201,7 +211,6 @@ machines:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}
       - {name: message, type: hash}
-    message: {type: message}
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -526,8 +535,8 @@ tl::expected<void, ErrorContext> MeasureMachine(results& r, budget_sizes const& 
 				host.energy   = energies[(i + ticks * 7) & 1023];
 				host.near     = flags[(i + ticks) % std::size(flags)];
 				host.cornered = ((i + ticks) & 4) != 0;
-				message const msg{grazer ? static_cast<uint32_t>(messages[(i * 3 + ticks) % std::size(messages)]) : 0u, {}};
-				Step(instances[i], &host, ticks, msg);
+				host.event    = grazer ? messages[(i * 3 + ticks) % std::size(messages)] : 0;
+				Step(instances[i], &host, ticks);
 			}
 		}
 	});
@@ -546,7 +555,7 @@ tl::expected<void, ErrorContext> MeasureMachine(results& r, budget_sizes const& 
 	if (grazer)
 	{
 		TABULAR_TRY(r.Add("step: grazer", stepNs / steps,
-			cc("one Step of the spec grazer (one step clause, its entry clause on a change; messages, flags, bands and scripts varied), "
+			cc("one Step of the spec grazer (one step clause, its entry clause on a change; events, flags, bands and scripts varied), "
 				"over ", instances.size(), " instances x ", sizes.steps, " ticks, the fastest of ", sizes.repeats)));
 	}
 	else

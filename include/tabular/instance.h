@@ -44,16 +44,14 @@ struct input_getter
 
 // What the host supplies to bind a machine.
 //
-// resolve is called once per machine input a getter reads (every input but
-// those a message carries), at Bind, with the input's name; it is the only
+// resolve is called once per machine input, at Bind, with the input's name; it is the only
 // place a name meets the host, and there is no symbol table.
 //
 // report receives each failure that held a clause (P15), once per instance
 // for each (clause, row) whose script condition could not answer, (clause,
 // table input) a pick refused (NaN for a ranged input, a flag set wider than
 // 32 bits), clause whose key tuple had no run, and machine input whose getter
-// failed, and once for a message carrying more arguments than the machine
-// declares. table is kNoTable for a getter or the message, row kNoRow when no
+// failed. table is kNoTable for a getter, row kNoRow when no
 // row is at fault. The error names the machine, the clause list and the
 // clause (or the input), the table and the row or key, after the host's own
 // message where there is one: a condition is asked once per evaluation, and
@@ -76,19 +74,13 @@ struct host_binding
 	std::function<void(uint64_t instance, uint32_t table, size_t row, ErrorContext const& error)> report;
 };
 
-// A message for one step (R3): its type, as the CityHash32 of its name, and
-// its arguments, in the order the machine's message_inputs declares them. The
-// machine reads them as inputs. Arguments are positional slots every message
-// type shares; a type's own arity is not declared. A step with no message has
-// type 0, and an argument the message does not carry reads 0, as every
-// argument does on a step with no message. Arguments past the declared ones
-// are not read, and the instance reports that once (see host_binding). The
-// host runs several messages in one tick as successive steps.
-struct message
-{
-	uint32_t              type = 0;
-	std::span<cell const> arguments;
-};
+// Tabular has no message concept (commands-and-messages spec, Part 3). The
+// host dispatches a message to a handler machine, whose inputs are that
+// message type's payload, read by getters from the message, and steps it once
+// per message; it routes a message it has no handler for to the object's
+// script. A machine that branches on argument-free event types keys on a
+// fall-through key fed by a hash input the host fills for one step. A message
+// a machine sends is a command in a row's list.
 
 // One command a run emitted (P12): a clause with an emit answered, and this
 // is the list it is in (so a host tells an exit's abort from an entry's
@@ -153,7 +145,7 @@ enum class clause_outcome : uint8_t
 {
 	NotRun,       // its list has not run: exit or entry on a step that entered no state
 	Answered,     // it picked: row (best, weighted) or bits (or), and its sets wrote next
-	NoRun,        // its key tuple has no run: a key value outside the domain Prepare proved (a message type with none falls through to the blank run first)
+	NoRun,        // its key tuple has no run: a key value outside the domain Prepare proved (a fall-through key's value with none falls through to the blank run first)
 	Failed,       // the pick failed: a script condition could not answer, or a ranged input was NaN, or a flag set was wider than 32 bits
 	SourceHeld,   // a source had no value: an earlier clause that did not answer, or an input whose getter failed
 };
@@ -163,6 +155,9 @@ enum class clause_outcome : uint8_t
 struct clause_answer
 {
 	clause_outcome outcome = clause_outcome::NotRun;
+	// Its fall-through key's value had no run, and it looked up the blank run
+	// instead (which answered, or is the NoRun).
+	bool           fellThrough = false;
 	// Answered (best, weighted): the version row picked. Failed: the row whose
 	// script condition could not answer, or UINT32_MAX when an input was.
 	uint32_t       row     = UINT32_MAX;
@@ -218,6 +213,7 @@ enum class provenance_run : uint8_t
 	Create,
 	Step,
 	Rebind,   // the old binding's exit, then the new binding's entry
+	Close,    // the exit list, as the host ends the instance
 };
 
 // One clause's pick, as the instance ran it. values holds what the clause read,
@@ -231,8 +227,8 @@ struct provenance_entry
 	uint64_t       pass  = 0;                       // 0 for creation, then one more per Step or Rebind
 	provenance_run run   = provenance_run::Create;
 	trigger        list  = {};
-	// A message type with no run answered from the blank run (R3); keys still
-	// hold the type, as read.
+	// The fall-through key's value had no run and the blank run was looked up
+	// (answer.fellThrough); keys still hold the value, as read.
 	bool           fellThrough   = false;
 	uint8_t        keyCount      = 0;
 	uint8_t        inputCount    = 0;
@@ -321,12 +317,6 @@ public:
 	// until a step).
 	clause_answer Answer(trigger list, size_t clause) const;
 
-	// Whether the last step absorbed its message: some clause keyed on its
-	// type found a run for that type (not the blank run it falls through to)
-	// and answered. False on a step with no message. The host routes a message
-	// the machine did not absorb to the object's script (R3).
-	bool Absorbed() const { return _absorbed; }
-
 	// What the last run (creation, a step or a rebind) emitted, in the order
 	// its lists ran: the span Step and Rebind return, and creation's, which
 	// CreateInstance cannot. Valid until the instance next runs, is moved or
@@ -386,7 +376,6 @@ private:
 	};
 	emitted_count              _emittedCount;
 	counted_ptr<Binding const> _left;        // the binding a rebind left, while its exit's commands are returned
-	bool                       _absorbed = false;
 #if TABULAR_PROVENANCE
 	std::vector<provenance_entry> _provenance;           // the ring, kProvenanceDepth entries
 	size_t                        _provenanceNext  = 0;  // where the next pick goes
@@ -397,7 +386,7 @@ private:
 };
 
 // A new instance of binding with the given id, its state at each column's
-// initial value. It reads every input once (with no message), then runs the
+// initial value. It reads every input once, then runs the
 // create list and the entry list (creation enters the initial state; no exit
 // runs) against the next vector, as a step runs its lists, makes the result
 // current, and returns in Emitted() what the create, then the entry clauses
@@ -409,15 +398,15 @@ private:
 // crossing only if its input moved since creation.
 instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void const* self);
 
-// One step, with msg as its message (none by default: type 0).
+// One step.
 //
-// 1. Reads every input once: a getter's, or the message's type and arguments.
+// 1. Reads every input once, from its getter.
 // 2. Copies current into next, so a column no clause writes holds.
 // 3. Runs the step list in order, each clause reading state from next (so it
 //    sees what earlier clauses wrote this step) and an earlier clause's answer
 //    from this step, and writing its sets into next (a later write wins). A
-//    clause keyed on the message finds the run for its type, or, when the type
-//    has none, the blank run (the same keys with 0 in the message key).
+//    clause with a fall-through key finds the run for its value, or, when the
+//    value has none, the blank run (the same keys with 0 in that key).
 // 4. If any hash state column of next differs from current, a state was
 //    entered (so A -> B -> A within one step enters nothing). Then the exit
 //    list runs, its state sources reading current (the state being left), and
@@ -440,14 +429,14 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // and is reported once (see host_binding). Allocates nothing, holds included,
 // except a report's first occurrence (see input_getter for a host's own
 // failure message).
-std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed, message const& msg = {});
+std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed);
 
 // Moves subject onto binding (P14): a reload, which the host runs on each
 // instance once it has prepared the changed machine again and bound it. Like a
 // step that enters a state, with migration where the step list would be:
 //
-// 1. Leaving, under the old binding: every input is read once with its getter
-//    (no message), next is set to a copy of current, the old exit list runs
+// 1. Leaving, under the old binding: every input is read once with its getter,
+//    next is set to a copy of current, the old exit list runs
 //    against current, and next becomes current. What exit emitted comes
 //    first in the result, so the host hears the abort of what a state started
 //    (R6) from the code that started it, before the new code starts it again.
@@ -469,8 +458,7 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 // for them, and afterwards an input the old machine also had (same name and
 // type, read from a getter by both machines) keeps the previous value it had,
 // so the next step crosses from the last value a step read. An input new to
-// the machine, retyped, or a message argument on either side, or one with no
-// previous value yet, takes the value read here, as at creation. Previous values are
+// the machine, retyped, or one with no previous value yet, takes the value read here, as at creation. Previous values are
 // raw, so a changed range is applied by the clamp where they are used.
 //
 // It cannot be refused: everything a binding reads it holds (its machine and
@@ -483,6 +471,18 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 // until its next run, and that run may drop the last reference to it (see
 // Emitted()).
 std::span<emitted const> Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed);
+
+// Ends subject's run, as the host does when the object leaves (from any
+// state: closing is not a transition, so no exit row is needed per state).
+// Runs the leaving half of a rebind under subject's own binding: every input
+// read once with its getter, crossing no edge, next set to a copy of current,
+// the exit list run against current (the state being left), and next made
+// current. Returns what exit emitted (the same span as Emitted()), so the
+// host hears the aborts of what the state started; the host then runs them
+// and destroys the instance. Like a step it cannot be refused and allocates
+// nothing beyond a report's first occurrence; the other lists' answers are
+// left as they were.
+std::span<emitted const> Close(instance& subject, void const* self, uint64_t seed);
 
 }
 

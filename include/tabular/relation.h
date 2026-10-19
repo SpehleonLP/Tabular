@@ -90,13 +90,15 @@ enum class domain_kind : uint8_t
 	Members,   // a literal list
 	Column,    // the distinct values another table's column holds in its current rows
 	Rows,      // the table's own rows: the keys over their rows together take the sub-tuples the rows name
-	// A message's type (a hash key; at most one per table). Open: any type may
-	// arrive, and one no run keys on falls through to the blank run (key 0, a
-	// blank CSV cell, "no message"). So the domain is the blank for every tuple
-	// of the other keys, plus every run the rows name whose other keys are in
-	// it: the blank run is the catch-all that must be total, and a run keyed on
-	// a type is checked because it is there.
-	Message,
+	// A fall-through key (YAML `fallthrough: true`; a hash key, at most one per
+	// table). Open: any value may arrive, and one no run keys on falls through
+	// to the blank run (key 0, a blank CSV cell, which only this key may hold).
+	// So the domain is the blank for every tuple of the other keys, plus every
+	// run the rows name whose other keys are in it: the blank run is the
+	// catch-all that must be total, and a run keyed on a value is checked
+	// because it is there. A machine branching on argument-free event types
+	// keys on one, from a hash input the host fills for one step.
+	FallThrough,
 	// A machine clause's output closes a key the same way; it is a fifth kind.
 };
 
@@ -114,10 +116,10 @@ struct key_domain
 		return d;
 	}
 
-	static key_domain Message()
+	static key_domain FallThrough()
 	{
 		key_domain d;
-		d.kind = domain_kind::Message;
+		d.kind = domain_kind::FallThrough;
 		return d;
 	}
 };

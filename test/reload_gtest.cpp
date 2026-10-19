@@ -56,9 +56,15 @@ std::string Replace(std::string_view text, std::string_view from, std::string_vi
 	return out;
 }
 
-message Message(std::string_view type)
+// An event the host dispatches, by its type (empty for none).
+struct posted
 {
-	return message{static_cast<uint32_t>(Hash(type)), {}};
+	int64_t type = 0;
+};
+
+posted Message(std::string_view type)
+{
+	return posted{Hash(type)};
 }
 
 // The host object: what its getters read.
@@ -70,6 +76,7 @@ struct host_object
 	double  alarm     = 0.1;
 	bool    unwired   = false;   // the threat getter cannot answer
 	bool    broken    = false;   // a script condition raises
+	int64_t event     = 0;       // filled by the host for one step: the event it dispatches
 };
 
 host_object const& Host(void const* self)
@@ -85,6 +92,11 @@ cell ReadEnergy(void*, void const* self, ErrorContext*)
 cell ReadFoodNear(void*, void const* self, ErrorContext*)
 {
 	return cell::Integer(Host(self).food_near);
+}
+
+cell ReadEvent(void*, void const* self, ErrorContext*)
+{
+	return cell::Integer(Host(self).event);
 }
 
 cell ReadThreat(void*, void const* self, ErrorContext* error_out)
@@ -166,6 +178,10 @@ host_binding TaggedHost(reload_log& log, std::string tag, bool integerThreat = f
 		{
 			return input_getter{&ReadAlarm};
 		}
+		if (name == "message")
+		{
+			return input_getter{&ReadEvent};
+		}
 		return tl::make_unexpected(ErrorContext("no wire named '", name, "'"));
 	};
 	host.report = [&log, tag](uint64_t, uint32_t, size_t, ErrorContext const&)
@@ -210,12 +226,20 @@ instance Created(Binding const& binding, uint64_t id, uint64_t seed, void const*
 	return out;
 }
 
-void Stepped(instance& subject, void const* self, uint64_t seed, message const& msg = {})
+void Stepped(instance& subject, void const* self, uint64_t seed)
 {
-	for (emitted const& result : Step(subject, self, seed, msg))
+	for (emitted const& result : Step(subject, self, seed))
 	{
 		Log(subject.binding(), result);
 	}
+}
+
+// A step with an event: the host fills the message input for this one step.
+void Stepped(instance& subject, host_object* self, uint64_t seed, posted msg)
+{
+	self->event = msg.type;
+	Stepped(subject, static_cast<void const*>(self), seed);
+	self->event = 0;
 }
 
 // A rebind's exit commands are the old binding's, and its entry's the new one's.
@@ -321,7 +345,7 @@ tables:
     pick: best
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: next,    type: hash}
     order_by: {columns: [mode, message]}
   - name: m_enter
@@ -349,7 +373,6 @@ machines:
       - {name: speed, type: double, initial: 1.5}
     inputs:
       - {name: message, type: hash}
-    message: {type: message}
     step:
       - from:  m_step
         where: {mode: state.mode, message: input.message}
@@ -421,7 +444,7 @@ TEST(MachineRebind, TheOldExitsCommandsOutliveTheOldBindingUntilTheNextRun)
 	ASSERT_TRUE(v1);
 	host_object host;
 	instance mover = CreateInstance(*v1, 3, 0, &host);
-	Step(mover, &host, 1, Message("to_b"));
+	Stepped(mover, &host, 1, Message("to_b"));
 	w->Load(MoverExit, Replace(kMoverExitRows, "(exit b)", "(exit b reloaded)"));
 	counted_ptr<Binding const> v2 = w->Bound("v2", Quiet(kMover));
 	ASSERT_TRUE(v2);
@@ -527,7 +550,7 @@ TEST(MachineRebind, ATypeChangeResetsIncludingIntToDoubleAndBack)
 	EXPECT_EQ(mover.State(2).i, 7) << "a double that became an int is reset, not truncated";
 }
 
-TEST(MachineRebind, AfterRebindOnlyTheNewEntryHasAnsweredAndNoMessageWasAbsorbed)
+TEST(MachineRebind, AfterRebindOnlyTheNewEntryHasAnswered)
 {
 	auto w = Mover();
 	counted_ptr<Binding const> v1 = w->Bound("v1");
@@ -535,13 +558,11 @@ TEST(MachineRebind, AfterRebindOnlyTheNewEntryHasAnsweredAndNoMessageWasAbsorbed
 	host_object host;
 	instance mover = Created(*v1, 3, 0, &host);
 	Stepped(mover, &host, 1, Message("to_b"));
-	ASSERT_TRUE(mover.Absorbed());
 	ASSERT_EQ(mover.Answer(trigger::Step, 0).outcome, clause_outcome::Answered);
 
 	counted_ptr<Binding const> v2 = w->Bound("v2");
 	ASSERT_TRUE(v2);
 	Rebound(mover, *v2, &host, 2);
-	EXPECT_FALSE(mover.Absorbed());
 	EXPECT_EQ(mover.Answer(trigger::Step, 0).outcome, clause_outcome::NotRun);
 	EXPECT_EQ(mover.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun)
 		<< "the exit that ran was the old binding's clause, which the new answers do not index";
@@ -791,54 +812,6 @@ TEST(MachineRebind, AnInputWhoseTypeChangedIsANewInput)
 	EXPECT_EQ(grazer.State(0).i, Hash("startled")) << "the machine still crosses an edge it should";
 }
 
-TEST(MachineRebind, AMessageArgumentIsNoPreviousValueForAGetterInput)
-{
-	// The startle tables plus a plain one the old machine steps with: its threat
-	// is the message's argument, which no edge may read.
-	std::string const calm = R"(  - name: calm
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-)";
-	std::string const tables   = Replace(std::string(kStartle.substr(0, kStartle.find("machines:\n"))) + "machines:\n", "machines:\n", calm);
-	std::string const v2yaml   = tables + std::string(kStartle.substr(kStartle.find("machines:\n")));
-	std::string const v1yaml   = tables + R"(machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [graze, startled], initial: graze}
-    inputs:
-      - {name: message, type: hash}
-      - {name: threat, type: double, range: 0..1}
-    message: {type: message, arguments: [threat]}
-    step:
-      - from:  calm
-        where: {mode: state.mode}
-        set:   {mode: next}
-)";
-	reload_world w(v2yaml);
-	w.Load(0, kStartleRows);
-	w.Load(1, kStartleEnterRows);
-	w.Load(2, "mode, next\ngraze, graze\nstartled, graze\n");
-	counted_ptr<Binding const> v1 = w.Bound("v1", v1yaml);
-	counted_ptr<Binding const> v2 = w.Bound("v2");
-	ASSERT_TRUE(v1 && v2);
-	host_object host;
-	host.threat     = 0.1;
-	instance grazer = Created(*v1, 1, 0, &host);
-	cell const argument[] = {cell::Real(0.9)};
-	Stepped(grazer, &host, 1, message{static_cast<uint32_t>(Hash("seen")), argument});
-
-	Rebound(grazer, *v2, &host, 2);
-	w.Take();
-	host.threat = 0.9;
-	Stepped(grazer, &host, 3);
-	EXPECT_EQ(grazer.State(0).i, Hash("startled"))
-		<< "threat crosses from the 0.1 read at rebind, not from the 0.9 the last message carried";
-}
-
 TEST(MachineRebind, TheReportOnceMemoryIsClearedForTheNewBinding)
 {
 	auto w = Startle();
@@ -958,7 +931,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: next,    type: hash}
@@ -985,7 +958,6 @@ machines:
       - {name: energy,    type: double, range: 0..1}
       - {name: food_near, type: flags}
       - {name: message,   type: hash}
-    message: {type: message}
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -1187,7 +1159,7 @@ tables:
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
       - {name: target,  type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: next,    type: hash}
       - {name: goal,    type: hash}
     order_by: {columns: [mode, target, message]}
@@ -1205,7 +1177,6 @@ machines:
       - {name: target, type: hash, members: [idle, walk], initial: idle}
     inputs:
       - {name: message, type: hash}
-    message: {type: message}
     step:
       - from:  walker_brain
         where: {mode: state.mode, target: state.target, message: input.message}
@@ -1270,12 +1241,12 @@ TEST(MachineBridge, ABridgeIsStatesThatMoveAlongWhenTheClipEnds)
 	{
 		Stepped(walker, &host, 3, Message("clip_done"));
 		EXPECT_EQ(walker.State(0).i, Hash(mode));
-		EXPECT_TRUE(walker.Absorbed());
+		EXPECT_FALSE(walker.Answer(trigger::Step, 0).fellThrough);
 		EXPECT_EQ(w.Take(), (std::vector<std::string>{command}));
 	}
 	Stepped(walker, &host, 4, Message("clip_done"));
 	EXPECT_EQ(walker.State(0).i, Hash("walk")) << "a stray clip_done falls through to walk's blank run";
-	EXPECT_FALSE(walker.Absorbed());
+	EXPECT_TRUE(walker.Answer(trigger::Step, 0).fellThrough);
 }
 
 TEST(MachineBridge, AFunctionChainIsStatesThatStartFunctionsAndMoveAlongOnTheReturn)
@@ -1346,7 +1317,7 @@ tables:
     pick: best
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: message}
+      - {name: message, type: hash, key: true, fallthrough: true}
       - {name: next,    type: hash}
     order_by: {columns: [mode, message]}
   - name: forager_enter
@@ -1369,7 +1340,6 @@ machines:
       - {name: mode, type: hash, members: [idle, graze], initial: idle}
     inputs:
       - {name: message, type: hash}
-    message: {type: message}
     step:
       - from:  forager_brain
         where: {mode: state.mode, message: input.message}
@@ -1425,7 +1395,7 @@ TEST(StateFunction, EntryStartsItTheMachineHoldsUntilItReturnsAndExitAbortsIt)
 
 	Stepped(forager, &host, 3, Message("fn_returned"));
 	EXPECT_EQ(forager.State(0).i, Hash("idle"));
-	EXPECT_TRUE(forager.Absorbed());
+	EXPECT_FALSE(forager.Answer(trigger::Step, 0).fellThrough);
 	EXPECT_EQ(w->Take(), (std::vector<std::string>{"f:((abort graze_fn))", "f:((start stand_fn))"}))
 		<< "leaving aborts it whether or not it returned; for one that returned the host has nothing to abort";
 }

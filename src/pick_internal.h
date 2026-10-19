@@ -132,37 +132,37 @@ row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_i
 std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size_t last, pick_query const& query,
 	ErrorContext& error, size_t& failed_row);
 
-// The index among def's keys of its message key (domain: message), or
+// The index among def's keys of its fall-through key (fallthrough: true), or
 // UINT32_MAX when it has none.
-uint32_t MessageKeyOf(table_def const& def);
+uint32_t FallThroughKeyOf(table_def const& def);
 
-// R3's fall-through, a property of the table and so of every lookup of its
+// The fall-through, a property of the table and so of every lookup of its
 // runs, interpreted or prepared: find(keys); when that misses (missed says so)
-// and the message key carries a type, find once more with the same keys and 0
-// (no message) in the message key's slot, the blank run. The retry's keys are
-// written to scratch, which may be keys' own storage: then a retry that hits
-// leaves the blank there (which is how a step tells a fall-through from an
-// absorbed message), and one that misses puts the type back, so a report
-// names the key as it came. scratch is as wide as keys.
+// and the fall-through key holds a value, find once more with the same keys
+// and 0 in that key's slot, the blank run. The retry's keys are written to
+// scratch, which may be keys' own storage: then a retry that hits leaves the
+// blank there (which is how a step tells it fell through), and one that
+// misses puts the value back, so a report names the key as it came. scratch
+// is as wide as keys.
 template<typename Find, typename Missed>
-auto FindFallingThrough(std::span<cell const> keys, std::span<cell> scratch, uint32_t messageKey, Find const& find,
+auto FindFallingThrough(std::span<cell const> keys, std::span<cell> scratch, uint32_t fallThroughKey, Find const& find,
 	Missed const& missed)
 {
 	auto found = find(keys);
-	if (messageKey == UINT32_MAX || keys[messageKey].i == 0 || !missed(found))
+	if (fallThroughKey == UINT32_MAX || keys[fallThroughKey].i == 0 || !missed(found))
 	{
 		return found;
 	}
-	cell const type = keys[messageKey];
+	cell const type = keys[fallThroughKey];
 	if (scratch.data() != keys.data())
 	{
 		std::copy(keys.begin(), keys.end(), scratch.begin());
 	}
-	scratch[messageKey] = cell::Integer(0);
+	scratch[fallThroughKey] = cell::Integer(0);
 	found = find(std::span<cell const>(scratch));
 	if (missed(found))
 	{
-		scratch[messageKey] = type;
+		scratch[fallThroughKey] = type;
 	}
 	return found;
 }

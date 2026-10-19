@@ -35,23 +35,23 @@ struct key_domains
 {
 	std::vector<uint8_t>              overRows;   // per key column
 	std::vector<std::vector<int64_t>> values;     // per key column not over its rows: sorted, distinct
-	// The message key, if any: its values are {0}, the blank, and ResolveDomain
+	// The fall-through key, if any: its values are {0}, the blank, and ResolveDomain
 	// adds every run the rows name whose other keys are in the domain.
-	uint32_t                          messageKey = UINT32_MAX;
+	uint32_t                          fallThroughKey = UINT32_MAX;
 	// The domain: the distinct sub-tuples the rows name in the columns over
-	// their rows, crossed with every other column's values (and the message
-	// key's runs added). count tuples of one value per key, end to end, sorted
+	// their rows, crossed with every other column's values (and the
+	// fall-through key's runs added). count tuples of one value per key, end to end, sorted
 	// as Publish sorts rows (each key a signed int64, key 0 most significant)
 	// and distinct.
 	size_t               count = 0;
 	std::vector<int64_t> tuples;
 
-	// keys columns, none yet over its rows or a message key.
+	// keys columns, none yet over its rows or a fall-through key.
 	void Reset(size_t keys)
 	{
 		overRows.assign(keys, 0);
 		values.assign(keys, {});
-		messageKey = UINT32_MAX;
+		fallThroughKey = UINT32_MAX;
 	}
 };
 
@@ -66,8 +66,8 @@ void ColumnValues(table_rows const& rows, uint32_t column, std::vector<int64_t>&
 // Key column k of domains as declared: its members, the values of another
 // table's column (foreignDef and foreign, that table and its rows as the
 // caller reads them; read only for a Column domain), over its own rows, or a
-// message key. A column that is the other table's message key gives its
-// types without its 0: that is no message, not a type the dependent key
+// fall-through key. A column that is the other table's fall-through key gives
+// its values without its 0: that is the blank, not a value the dependent key
 // names. Load and a machine's Prepare both start a key from here; Prepare
 // then overrides the keys its sources close.
 void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, table_rows const* foreign, uint32_t k,

@@ -173,7 +173,7 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 tl::expected<cell, ErrorContext> ReadCell(table_def const& def, uint32_t column, std::string_view text,
 	hash_names& names, uint32_t line)
 {
-	if (text.empty() && IsMessageKey(def, column))
+	if (text.empty() && IsFallThroughKey(def, column))
 	{
 		return cell::Integer(0);
 	}

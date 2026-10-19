@@ -40,15 +40,10 @@ struct resolved_clause
 	// column wins, as a later clause's does.
 	std::vector<std::pair<uint32_t, uint32_t>> sets;
 	uint32_t                     emit  = UINT32_MAX;   // a Command column
-	// The key bound to the message type, the slot a step's run lookup retries
-	// with 0 (the blank run) when the type has no run; UINT32_MAX for none.
-	uint32_t                     messageKey = UINT32_MAX;
+	// The table's fall-through key, the slot a step's run lookup retries with
+	// 0 (the blank run) when its value has no run; UINT32_MAX for none.
+	uint32_t                     fallThroughKey = UINT32_MAX;
 };
-
-// How a step gets a machine input's value: from its getter, or from the
-// step's message (its type, or argument n for n below kMessageType).
-inline constexpr uint32_t kFromGetter   = UINT32_MAX;
-inline constexpr uint32_t kMessageType  = UINT32_MAX - 1;
 
 struct state_column
 {
@@ -63,9 +58,6 @@ struct machine_def
 	std::string                                               name;
 	std::vector<state_column>                                 state;
 	std::vector<input_def>                                    inputs;
-	std::vector<uint32_t>                                     carried;      // per input: kFromGetter, kMessageType or an argument
-	uint32_t                                                  messageType = UINT32_MAX;   // the input, if the machine takes messages
-	uint32_t                                                  messageArguments = 0;
 	std::array<std::vector<resolved_clause>, kTriggerCount>   lists;
 };
 
