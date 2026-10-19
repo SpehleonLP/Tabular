@@ -66,7 +66,8 @@ struct input_getter
 // its report carries what it said then. Building it allocates, the first
 // time only. Optional: without it the failures still hold, unreported.
 //
-// Both are called from Step and CreateInstance, on the thread running them;
+// Both are called from Step, CreateInstance and Rebind (the old binding's for
+// its exit, the new one's for its entry), on the thread running them;
 // instances sharing a binding may step concurrently, so a host stepping them
 // on several threads gives functions safe to call that way. Neither may step
 // or rebind the instance it is told about.
@@ -101,7 +102,7 @@ struct binding_access;
 // its Machine, and so the table versions that Machine was proved against, for
 // as long as it lives: a store change never reaches a running binding. The
 // host asks machine().Stale(store) when the store has changed; a stale machine
-// is prepared again and its instances rebound (slice 6).
+// is prepared again, bound, and its instances moved over with Rebind.
 class Binding
 {
 public:
@@ -266,6 +267,46 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // except a report's first occurrence (see input_getter for a host's own
 // failure message).
 void Step(instance& subject, void const* self, uint64_t seed, message const& msg = {});
+
+// Moves subject onto binding (P14): a reload, which the host runs on each
+// instance once it has prepared the changed machine again and bound it. Like a
+// step that enters a state, with migration where the step list would be:
+//
+// 1. Leaving, under the old binding: every input is read once with its getter
+//    (no message), next is set to a copy of current, the old exit list runs
+//    against current, next becomes current, and the old binding's sink is
+//    handed what exit emitted. So the host hears the abort of what a state
+//    started (R6) from the code that started it, before the new code starts
+//    it again.
+// 2. Migration by name: each state column of the new machine takes the old
+//    column of the same name, its value kept when the column has the same type
+//    and, for a hash, the value is still a member, and otherwise its new
+//    initial value (an int that became a double, or the reverse, is reset: a
+//    conversion would be arithmetic the machine never wrote). A column no
+//    longer declared is dropped. Every buffer is sized for the new binding,
+//    the report-once memory is cleared (a new binding is a new set of clauses
+//    and rows) and every clause answers NotRun.
+// 3. Entering again, under the new binding: every input is read once with the
+//    new getters, the new entry list runs against the migrated state, next
+//    becomes current, and the new binding's sink is handed what entry
+//    emitted. The create list does not run: the instance is not new.
+//
+// A reload is no movement of an input, so it crosses no edge and spends none:
+// the exit and entry lists see each input's previous value as the value read
+// for them, and afterwards an input the old machine also had (same name and
+// type, read from a getter by both machines) keeps the previous value it had,
+// so the next step crosses from the last value a step read. An input new to
+// the machine, retyped, or a message argument on either side, or one with no
+// previous value yet, takes the value read here, as at creation. Previous values are
+// raw, so a changed range is applied by the clamp where they are used.
+//
+// It cannot be refused: everything a binding reads it holds (its machine and
+// the versions that machine was proved against), migration always lands on a
+// valid state, and a clause that cannot answer holds as in a step. binding may
+// be the one subject already has, which restarts its state. self and seed are
+// as for Step: getters, script conditions and weighted draws need them.
+// Allocates (it sizes the new buffers); it is not a step.
+void Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed);
 
 }
 

@@ -397,13 +397,14 @@ resolved. `host_binding::sink(instance, table, command)` takes every emitted com
 `host_binding::report(instance, table, row, error)` takes a failure once (P15); it is optional,
 and without it holds still hold, silently. A binding keeps its `Machine`, and so the versions it was proved against: a store change never
 reaches a running binding. The host asks `binding.machine().Stale(store)` (an instance gives
-its `binding()`), and a stale machine is prepared again and its instances rebound (slice 6).
+its `binding()`), and a stale machine is prepared again, bound, and its instances moved over with
+`Rebind` (see Reload).
 
 **An `instance`** (snake_case: composited into the host's object, never `new`ed; move-only)
 holds its binding, its id, the current state vector, the next one, each input's previous value (see Edges), and what each clause last
 answered (`Answer(list, clause)`: `Answered` with the row picked, or for an or clause its OR;
 `NoRun`, `Failed` or `SourceHeld` when it held; `NotRun` when its list did not run). Every
-buffer is sized at creation, so **a step allocates nothing**, holds included: a step builds
+buffer is sized at creation or rebind, so **a step allocates nothing**, holds included: a step builds
 no error of its own and adds no context to a getter's or a condition's failure, except at the
 first occurrence of a failure the instance reports (below), whose report carries the host's
 error from the step's one asking. The interpreted picks, and the report, are the callers that
@@ -497,6 +498,62 @@ last step's message was answered by a run keyed on its type, so the host can rou
 nothing absorbed to script; a fall-through, or a clause that held, absorbs nothing. Passing a
 message allocates nothing: the arguments are a span the host owns for the call.
 
+**Reload (P14).** `Rebind(instance, binding, self, seed)` moves an instance onto a new binding. It
+is a step that enters a state with migration where the step list would be, and it uses the step's
+own pieces (the input read, the exit and entry lists, the sink), so a reload has no list or pick
+path of its own:
+
+1. **Leaving, under the old binding.** Every input is read once with the old getters (no message),
+   next is set to a copy of current, the old `exit` list runs against current, next becomes
+   current, and the old binding's sink gets what exit emitted. So the host hears the abort of
+   what a state started (R6) from the code that started it, before the new code starts it again.
+2. **Migration by name**, from the state exit left (an exit's int or double write is kept like a
+   step's). Each state column of the new machine takes the old column of the same name. The value
+   is kept when the type is the same and, for a hash, the value is still a member; otherwise the
+   column takes its new initial value. An int that became a double, or the reverse, is reset:
+   converting it would be arithmetic the machine never wrote. A column no longer declared is
+   dropped. Every buffer is sized for the new binding (a step after a rebind allocates nothing,
+   tested), the report-once memory is cleared, since a new binding is a new set of clauses and
+   rows, and every clause answers `NotRun`.
+3. **Entering again, under the new binding.** Every input is read with the new getters, the new
+   `entry` list runs against the migrated state, next becomes current, and the new sink gets what
+   entry emitted. The `create` list does not run: the instance is not new. Afterwards only the new
+   entry clauses have answered, and `Absorbed()` is false.
+
+A reload is no movement of an input, so it **crosses no edge and spends none**. The exit and entry
+lists see each input's previous value as the value read for them, as creation's lists do.
+Afterwards an input the old machine also had, with the same name and type, and which both
+machines read from a getter, keeps its previous value, so the next step crosses from the last
+value a step read. An input new to the machine, retyped, or a message argument on either side
+(its previous value is another message's, not a getter's), or one with no previous value yet,
+takes the value read at the rebind, as at creation.
+Previous values are raw, so a changed range is applied by the clamp where they are used.
+
+`Rebind` cannot be refused, and returns nothing. Everything a binding reads, it holds (its
+`Machine` and the versions that machine was proved against). Migration always lands on a valid
+state, and a clause that cannot answer holds as in a step. The binding may be the one the
+instance already has, which restarts its state, or one of a machine with a different name.
+An exit clause that holds (a condition raising, a getter failing) sends no abort: the host
+learns of it through the report, in a step or a reload alike, and the new entry still runs. It allocates (it sizes the new buffers); it is not
+a step.
+
+**The reload cycle is the host's composition**, and Tabular has no reload manager. Rows change (a
+load, which bumps the generation), `machine().Stale(store)` says so, the host calls `Prepare` again
+(with a new `create_machine` when the definition changed too: a definition change alone moves no
+generation, and the host that rebuilt it already knows), then `Bind`, then `Rebind` on each
+instance, and drops the old binding. A refused `Prepare` changes nothing, so the old binding keeps
+running (promise 5). The worked example (spec §4) is tested this way: adding the member `sleep`
+keeps `mode`, and deleting `panic` while an instance panics resets `mode` to `idle`; the old exit
+aborts the run and the new entry starts `idle`'s animation.
+
+**Bridges are states (R5(b)).** A transition row writes `mode = bridge_c, target = walk`; the
+bridge states have rows keyed on `target` and on a message (`clip_done`) that move along when
+the clip ends, and the last one moves to the target. Each bridge state's entry emits its clip,
+and the machine holds the bridge state while the clip plays. This needs nothing beyond two hash
+state columns, a step clause keyed on both and the message, and an entry clause; the machine's
+proof covers it (a bridge state with no run for some target is refused by `Prepare`). A bridge
+that only the animation system needs stays a suffix command it plays (R5(a)).
+
 A weighted clause's draw site is `DrawSite(machine name, list, clause)`: the machine name's
 CityHash32 in the high word, then the list and the clause's position. Two weighted clauses in
 one step, or two machines on one object stepped with one seed, draw different numbers, and a
@@ -553,7 +610,8 @@ another owner is refused while the grid holds a version owned by someone else. A
 front end expands.
 
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
-tables); every step; when a relation's rows change.
+tables); every step; when a relation's rows change (the machine is stale, prepared again, bound,
+and its instances rebound, which runs the old exit and the new entry: see Reload).
 
 **Lifetimes.**
 
@@ -638,8 +696,8 @@ and a machine's step both call it through one row test (`detail::EdgesHold`).
   with a getter**: the definition build refuses a literal (it never moves), a state column or
   an earlier clause's answer (values of the step's own making, with no previous value kept),
   and a message argument (one message's value, 0 between messages, so its "previous" would be
-  another message's). The buffers are sized at creation, so a step with edges allocates
-  nothing (tested).
+  another message's). The buffers are sized at creation or rebind, so a step with edges allocates
+  nothing (tested). A rebind crosses no edge and spends none (see Reload).
 
 **Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
@@ -694,6 +752,14 @@ part of the bundle, and nothing about it is compiled by Tabular. Two tables refe
   functions that runs between them, as the bridge table does for clips. It is the hierarchical
   machine's transitions between functions.
 
+Neither is a table kind (R6). The state-function table is an `entry` table whose command starts
+the function (`(start graze_fn)`), with an `exit` table whose command aborts it
+(`(abort graze_fn)`): the host aborts a state's function when the state is left, and an abort of
+one that already returned is the host's no-op. "It returned" is a message (R3) a step row keys on;
+until it arrives the state's blank run holds the state. The function-chain table is bridge states
+(R5(b), see Reload) whose entry commands start functions and whose rows move along on the return
+message instead of `clip_done`. Tests drive both with nothing but entry, exit and step clauses.
+
 A state function **may suspend** (`wait`, `lock`): waiting is often its point. Halting is
 required only of code that runs inside a step (conditions, wires) and of commutative writes. In
 exchange it **reads and writes only its own entity**, which the host checks as an asserted
@@ -704,6 +770,9 @@ it never acts on a view that went stale while it waited.
 dropped or rebuilt, a running state function is aborted and its state is entered again, so it
 restarts with the current code. Whatever it had already done stays done. A function for which
 that matters must be safe to restart, or its state's entry rows must decide what happens.
+Built as a consequence of `Rebind`: it runs the old binding's exit list, whose command aborts the
+function the old code started, to the old sink, and then the new binding's entry list, whose
+command starts the function as the new code names it, to the new sink.
 
 ## Budgets
 
@@ -798,8 +867,10 @@ These are open, not missing. Each is decided by editing this file.
 
 - Whether a command's consumer compiles its s-expression at bind time (as the host compiles
   snippets), so a step enqueues a prebuilt record rather than text.
-- What a bridge step carries (state or clip, exit, commands on entry, bounded repeat), and
-  whether a function-chain step carries the same.
+- A bounded repeat in a bridge (a head nod 1-4 times): rows keyed on an int count, each writing
+  the next count as a literal (enumerated, not arithmetic), or a state function. Bridges
+  themselves are states (R5(b), see Reload): a bridge step is a state with its entry and exit
+  commands, and a function-chain step is the same with function commands.
 - Random across the boundary. The oddity to remove: `random()` called from a script snippet
   inside a table uses a different generator from `random()` in ordinary script. Likely
   resolved host-side, with access masks choosing the deterministic generator in table context

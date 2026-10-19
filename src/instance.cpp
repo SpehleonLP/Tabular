@@ -832,6 +832,89 @@ void Emit(instance& subject, trigger list)
 	}
 }
 
+// Every buffer a step uses, sized for binding, so a step allocates nothing;
+// the report-once memory cleared and every clause NotRun. The state vectors are
+// the caller's: creation fills them with initial values, a rebind migrates.
+void SizeFor(instance& subject, binding_access::Data const& data)
+{
+	instance_access::Inputs(subject).assign(data.getters.size(), cell::Integer(0));
+	instance_access::InputRead(subject).assign(data.getters.size(), 0);
+	instance_access::Answers(subject).assign(data.answerStart[kTriggerCount], clause_answer{});
+	instance_access::Reported(subject).assign((data.reportBits + 63) / 64, 0);
+	instance_access::Keys(subject).assign(data.maxKeys, cell::Integer(0));
+	instance_access::Given(subject).assign(data.maxInputs, cell::Integer(0));
+	instance_access::GivenBefore(subject).assign(data.maxInputs, cell::Integer(0));
+	instance_access::Previous(subject).assign(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
+	instance_access::Axes(subject).assign(data.maxAxes, 0.f);
+	instance_access::Absorbed(subject) = false;
+}
+
+// Reads every input once (no message) and makes the values read the
+// previous ones, so the lists run next cross no edge, as at creation. An
+// input whose read failed, or a NaN, has no previous value.
+void ReadStill(instance& subject, void const* self)
+{
+	ReadInputs(subject, self, message{});
+	std::vector<cell>& previous = instance_access::Previous(subject);
+	std::fill(previous.begin(), previous.end(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
+	AdvancePrevious(subject);
+}
+
+// The value a new state column takes from the old columns: the old column of
+// its name, while that has the same type and, for a hash, its value is still
+// a member; otherwise its initial value. Converting an int to a double, or the
+// reverse, would be arithmetic the machine never wrote, so a type change
+// resets.
+cell Migrated(detail::state_column const& to, std::span<detail::state_column const> from, std::span<cell const> values)
+{
+	for (size_t s = 0; s < from.size(); ++s)
+	{
+		if (from[s].name != to.name)
+		{
+			continue;
+		}
+		if (from[s].type != to.type)
+		{
+			return to.initial;
+		}
+		if (to.type == column_type::Hash && !std::binary_search(to.members.begin(), to.members.end(), values[s].i))
+		{
+			return to.initial;
+		}
+		return values[s];
+	}
+	return to.initial;
+}
+
+// The previous value the old input of the new input's name and type had
+// (raw: a changed range is the clamp's business where it is used); none for an
+// input the old machine did not have, or a double it never read a value for
+// (NaN). Only an input both machines read from a getter has a previous value
+// that means the same thing: a message argument's is another message's, so an
+// input that was one, or becomes one, is new. Only a double's previous value is
+// ever read, since an edge reads only a band's input.
+std::optional<cell> CarriedPrevious(detail::machine_def const& to, size_t input, detail::machine_def const& from, std::span<cell const> previous)
+{
+	if (to.carried[input] != detail::kFromGetter)
+	{
+		return std::nullopt;
+	}
+	input_def const& wanted = to.inputs[input];
+	for (size_t i = 0; i < from.inputs.size(); ++i)
+	{
+		if (from.inputs[i].name != wanted.name || from.inputs[i].type != wanted.type || from.carried[i] != detail::kFromGetter)
+		{
+			continue;
+		}
+		if (wanted.type == column_type::Double && std::isnan(previous[i].d))
+		{
+			return std::nullopt;
+		}
+		return previous[i];
+	}
+	return std::nullopt;
+}
+
 }
 
 instance::instance(instance&&) noexcept            = default;
@@ -863,21 +946,12 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	{
 		current.push_back(column.initial);
 	}
-	instance_access::Next(out)      = current;
-	instance_access::Inputs(out).assign(data.getters.size(), cell::Integer(0));
-	instance_access::InputRead(out).assign(data.getters.size(), 0);
-	instance_access::Answers(out).assign(data.answerStart[kTriggerCount], clause_answer{});
-	instance_access::Reported(out).assign((data.reportBits + 63) / 64, 0);
-	instance_access::Keys(out).assign(data.maxKeys, cell::Integer(0));
-	instance_access::Given(out).assign(data.maxInputs, cell::Integer(0));
-	instance_access::GivenBefore(out).assign(data.maxInputs, cell::Integer(0));
-	instance_access::Previous(out).assign(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
-	instance_access::Axes(out).assign(data.maxAxes, 0.f);
+	instance_access::Next(out) = current;
+	SizeFor(out, data);
 
 	// Creation enters the initial state; nothing is left, so no exit runs. The
 	// values read are their own previous values, so creation crosses no edge.
-	ReadInputs(out, self, message{});
-	AdvancePrevious(out);
+	ReadStill(out, self);
 	std::vector<cell> const& next = instance_access::Next(out);
 	RunList(out, trigger::Create, next, self, seed);
 	RunList(out, trigger::Entry, next, self, seed);
@@ -919,6 +993,62 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 	// lists ran.
 	Emit(subject, trigger::Step);
 	Emit(subject, trigger::Exit);
+	Emit(subject, trigger::Entry);
+}
+
+void Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed)
+{
+	assert(instance_access::BindingOf(subject) && "a moved-from instance is rebound: caller misuse");
+	// Both bindings live to the end: holding fresh keeps a rebind onto the
+	// binding subject already holds safe when the assignment below drops its
+	// reference; old is what the exit and migration read until then.
+	counted_ptr<Binding const> const old   = instance_access::BindingOf(subject);
+	counted_ptr<Binding const> const fresh = CountedWrap(&binding);
+	detail::machine_def const&       from  = machine_access::Of(old->machine()).def;
+	detail::machine_def const&       to    = machine_access::Of(fresh->machine()).def;
+	std::vector<cell>&               current = instance_access::Current(subject);
+	std::vector<cell>&               next    = instance_access::Next(subject);
+
+	// Leaving, under the old binding, as a step leaves a state: the abort comes
+	// from the code that started what the state runs (R6). The edge history is
+	// kept aside, since a reload neither crosses an edge nor spends one.
+	std::vector<cell> const history = instance_access::Previous(subject);
+	ReadStill(subject, self);
+	std::copy(current.begin(), current.end(), next.begin());
+	RunList(subject, trigger::Exit, current, self, seed);
+	std::swap(current, next);
+	Emit(subject, trigger::Exit);
+
+	// Migration by name, from the state exit left.
+	std::vector<cell> migrated;
+	migrated.reserve(to.state.size());
+	for (detail::state_column const& column : to.state)
+	{
+		migrated.push_back(Migrated(column, from.state, current));
+	}
+	std::vector<std::optional<cell>> carried;
+	carried.reserve(to.inputs.size());
+	for (size_t i = 0; i < to.inputs.size(); ++i)
+	{
+		carried.push_back(CarriedPrevious(to, i, from, history));
+	}
+	instance_access::BindingOf(subject) = fresh;
+	SizeFor(subject, binding_access::Of(binding));
+	current = migrated;
+	next    = std::move(migrated);
+
+	// Entering again, under the new binding.
+	ReadStill(subject, self);
+	RunList(subject, trigger::Entry, next, self, seed);
+	std::swap(current, next);
+	std::vector<cell>& previous = instance_access::Previous(subject);
+	for (size_t i = 0; i < carried.size(); ++i)
+	{
+		if (carried[i])
+		{
+			previous[i] = *carried[i];
+		}
+	}
 	Emit(subject, trigger::Entry);
 }
 
