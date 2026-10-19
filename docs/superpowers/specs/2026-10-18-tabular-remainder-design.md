@@ -165,6 +165,21 @@ owner with my recommendation. Merges still need the owner's approval.
   - **Crossing is linear.** An input that wraps (an animation phase 0.95 → 0.05) passes
     through every band between. A cyclic input is not modelled; the owner may want it.
 
+  Applied in slice 6 (coordinator, from the slice 6 review; the owner may overrule at code
+  review):
+  - **`Rebind` cannot be refused** and returns nothing: a binding holds everything it reads,
+    migration always lands on a valid state, and a clause that cannot answer holds. It runs
+    the old binding's exit (to the old sink), migrates by name from the state the exit left
+    (a value kept while valid; an int ↔ double change resets), installs the new binding and
+    runs its entry (to the new sink). Create does not run again.
+  - **Previous input values carry only between getter inputs** of the same name and type; a
+    new, retyped or message-argument input takes the value read during `Rebind`, so a reload
+    crosses no edge. Report-once memory starts empty under the new binding.
+  - **A definition-only change moves no generation;** the host that rebuilt the definition
+    knows. An exit that holds sends no abort; the host learns of it through the report.
+  - **Bridges, state functions and function chains are consequences** with tests and no code.
+    Bounded repeat stays undecided.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
