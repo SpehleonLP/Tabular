@@ -935,13 +935,13 @@ panic, ,        0..1,   0,    panic
 panic, calm,    0..1,   0,    idle
 )";
 
-constexpr std::string_view kEnterRows = R"(# grazer_enter
+constexpr std::string_view kEnterRows = R"csv(# grazer_enter
 mode,  command
 idle,  (anim stand)
 walk,  (anim walk)
-eat,   (anim chew), (message food "eat")
-panic, (anim run), (message this "calm" :delay random(0.4, 1.0))
-)";
+eat,   (anim chew), "(message food ""eat"")"
+panic, (anim run), "(message this ""calm"" :delay random(0.4, 1.0))"
+)csv";
 
 constexpr std::string_view kExitRows = R"(# grazer_exit
 mode,  command
@@ -1059,7 +1059,7 @@ idle,  ,        0..1,   0,    walk
 walk,  ,        0..1,   0,    walk
 eat,   ,        0..1,   0,    eat
 )");
-	w->Load(Enter, Replace(kEnterRows, "panic, (anim run), (message this \"calm\" :delay random(0.4, 1.0))\n", ""));
+	w->Load(Enter, Replace(kEnterRows, "panic, (anim run), \"(message this \"\"calm\"\" :delay random(0.4, 1.0))\"\n", ""));
 	w->Load(Exit, Replace(kExitRows, "panic, (abort run)\n", ""));
 	ASSERT_TRUE(v1->machine().Stale(w->store));
 	std::string const v2yaml = Replace(kGrazer, "members: [idle, walk, eat, panic]", "members: [idle, walk, eat]");

@@ -62,9 +62,9 @@ TEST(SuffixCsv, ACommandWithCommasRoundTrips)
 	relation_store store = Store();
 	ASSERT_EQ(Load(store,
 		"mode, command\n"
-		"eat, (anim chew), (message food \"eat\")\n"
+		"eat, (anim chew), \"(message food \"\"eat\"\")\"\n"
 		"idle, (anim stand)\n"
-		"panic, (anim run), (message this \"calm\" :delay random(0.4, 1.0))\n"), "");
+		"panic, (anim run), \"(message this \"\"calm\"\" :delay random(0.4, 1.0))\"\n"), "");
 	ASSERT_EQ(store.RowCount(0), 3u);
 	// Rows sort by hash; find each by its key.
 	for (size_t r = 0; r < 3; ++r)
@@ -86,14 +86,14 @@ TEST(SuffixCsv, ACommandWithCommasRoundTrips)
 	}
 }
 
-// The suffix is the raw rest of the line, so the spacing between its own cells
-// is the author's, not the reader's: only the ends are trimmed.
-TEST(SuffixCsv, TheSuffixKeepsItsInnerTextAndIsTrimmedAtTheEnds)
+// The suffix is the row's remaining cells, each trimmed, empty ones dropped: a
+// spreadsheet pads rows, and spacing around a separator is not the author's.
+TEST(SuffixCsv, TheSuffixIsItsNonEmptyCellsTrimmed)
 {
 	relation_store store = Store();
 	ASSERT_EQ(Load(store, "mode,command\neat,   (a  ,b ,,\t c)  \n"), "");
 	ASSERT_EQ(store.RowCount(0), 1u);
-	EXPECT_EQ(CommandOf(store, 0), "(a  ,b ,,\t c)");
+	EXPECT_EQ(CommandOf(store, 0), "(a, b, c)");
 }
 
 TEST(SuffixCsv, AHashInsideTheSuffixIsTextAndOnlyALineStartingWithOneIsAComment)
@@ -118,12 +118,13 @@ TEST(SuffixCsv, AnEmptySuffixIsRefusedNamingTheLine)
 	EXPECT_TRUE(Mentions(blanks, "enter.csv:2")) << blanks;
 }
 
-TEST(SuffixCsv, ARowWithNoSuffixCellAtAllIsRefusedNamingTheLine)
+// A spreadsheet drops trailing empty cells, so no suffix cell is an empty one.
+TEST(SuffixCsv, ARowWithNoSuffixCellAtAllIsAnEmptySuffix)
 {
 	relation_store store = Store();
 	std::string const refused = Load(store, "mode, command\nidle\n");
 	EXPECT_TRUE(Mentions(refused, "enter.csv:2")) << refused;
-	EXPECT_TRUE(Mentions(refused, "suffix")) << refused;
+	EXPECT_TRUE(Mentions(refused, "empty")) << refused;
 }
 
 // The header names the declared columns and then the suffix column, which is

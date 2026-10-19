@@ -1,5 +1,5 @@
 #include "csv_cells.h"
-#include "Utility/load_csv.h"
+#include "csv_text.h"
 
 #include <string>
 #include <vector>
@@ -21,20 +21,19 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 		return tl::make_unexpected(ErrorContext("table '", def.name, "' is not a grid").with(std::string(command.label)));
 	}
 
-	std::string_view text = command.text;
-	if (text.starts_with("\xEF\xBB\xBF"))
+	auto read = detail::csv_text::Read(command.text, command.label, command.first_line);
+	if (!read)
 	{
-		text.remove_prefix(3);
+		return tl::make_unexpected(std::move(read.error()));
 	}
-	CSV::Options options;
-	options.normalizeUnicode = false;
-	CSV::File file(text, options, command.first_line);
-	if (file.rows() == 0 || file[0].size() < 2)
+	detail::csv_text const& file = *read;
+	if (file.rows() == 0 || file.used_width(0) < 2)
 	{
 		return tl::make_unexpected(ErrorContext("grid '", def.name, "' needs a header row naming its ",
 			def.grid_columns.name, " keys").with(std::string(command.label)));
 	}
-	size_t const   width      = file[0].size();
+	// Trailing empty header cells are a spreadsheet's padding.
+	size_t const   width      = file.used_width(0);
 	uint32_t const headerLine = file.line_of_row(0);
 
 	std::vector<cell> columnKeys;
@@ -57,9 +56,11 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 	for (size_t r = 1; r < file.rows(); ++r)
 	{
 		uint32_t const line = file.line_of_row(r);
-		if (file[r].size() != width)
+		// A spreadsheet pads every row to its widest with empty cells, so
+		// trailing empties past the header say nothing.
+		if (file.width(r) < width || file.used_width(r) > width)
 		{
-			return tl::make_unexpected(ErrorContext("row has ", file[r].size(), " cells, but the header has ", width)
+			return tl::make_unexpected(ErrorContext("row has ", file.used_width(r), " cells, but the header has ", width)
 				.with(label(line)));
 		}
 		auto key = detail::ReadCell(def.grid_rows, file.cell(0, r), names, line);

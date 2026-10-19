@@ -371,13 +371,13 @@ panic, ,           0..1,   0,    0..10, ,         panic
 panic, calm,       0..1,   0,    0..10, ,         idle
 )";
 
-constexpr std::string_view kEnterRows = R"(# grazer_enter
+constexpr std::string_view kEnterRows = R"csv(# grazer_enter
 mode,  command
 idle,  (anim stand)
 walk,  (anim walk)
-eat,   (anim chew), (message food "eat")
-panic, (anim run), (message this "calm" :delay random(0.4, 1.0))
-)";
+eat,   (anim chew), "(message food ""eat"")"
+panic, (anim run), "(message this ""calm"" :delay random(0.4, 1.0))"
+)csv";
 
 constexpr std::string_view kExitRows = R"(# grazer_exit
 mode,  command

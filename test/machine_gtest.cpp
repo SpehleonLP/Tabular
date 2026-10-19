@@ -122,13 +122,13 @@ panic,     ,    0..1,    0,    ,            panic
 panic, calm,    0..1,    0,    ,            idle
 )";
 
-constexpr std::string_view kEnterRows = R"(# grazer_enter
+constexpr std::string_view kEnterRows = R"csv(# grazer_enter
 mode,  command
-eat,   (anim chew), (message food "eat")
-panic, (anim run), (message this "calm" :delay random(0.4, 1.0))
+eat,   (anim chew), "(message food ""eat"")"
+panic, (anim run), "(message this ""calm"" :delay random(0.4, 1.0))"
 idle,  (anim stand)
 walk,  (anim walk)
-)";
+)csv";
 
 enum grazer_table : uint32_t { Brain, Enter, Tally, Kinds };
 

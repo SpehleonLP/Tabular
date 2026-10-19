@@ -145,13 +145,12 @@ the feature is wrong, not the rule.
   Bridge steps are such a command.
   Built (2026-10-18): a table declares `suffix: <name>` (YAML) or `create_table::suffix`
   (builder), which adds one Command column of that name after its declared columns, so the
-  store and the picks see an ordinary command column. In CSV the suffix is the rest of the
-  line: the text from the first cell after the declared ones to the end of the line, commas
-  and spacing between its parts kept exactly, trimmed only at its two ends. The header names
+  store and the picks see an ordinary command column. In CSV the suffix is the row's cells
+  after the declared ones, each read as any cell is (quoted or trimmed), empty ones dropped. The header names
   the declared columns and ends with the suffix column's name (the reader needs that last
   header cell to know where the rest of each line starts); a header that names anything else
-  extra, or puts the suffix column anywhere but last, is refused. A row with no suffix text, or
-  no cell for it, is refused naming its line. A grid or a pivoted table cannot have a suffix
+  extra, or puts the suffix column anywhere but last, is refused. A row with no suffix text is
+  refused naming its line. A grid or a pivoted table cannot have a suffix
   (a pivot cell holds one value), and a pivoted load into a suffix table is refused because the
   table has no pivot.
 
@@ -973,8 +972,19 @@ changed through the table's generation counter (see Generation).
    function the caller passes to the loader (`csv_rows::condition`, returning
    `tl::expected<closure, ErrorContext>`), which returns the compiled condition; that is the whole of Tabular's part in compiling
    conditions (owner, 2026-10-16: expanding Tabular to own this went badly in the first
-   version). The function is needed only when a non-blank condition cell appears. CSV has no quoting, so a command cell cannot hold a comma, except the suffix of a table that
-   declares one, which is the rest of the line. Cells are trimmed; blank lines and `#` lines are skipped; a
+   version). The function is needed only when a non-blank condition cell appears.
+   **Quoting** (built 2026-10-19, `src/csv_text.h`, one reader for the rows, pivoted and grid
+   front ends): RFC 4180, as a spreadsheet exports it. A cell holding a comma, a double quote or
+   a line break is quoted whole, each quote inside written twice, so `(message food "eat")` is
+   saved as `"(message food ""eat"")"` and read back as written. Spaces outside the quotes are
+   trimmed and text inside them is kept exactly; an unquoted cell is trimmed. A `"` inside an
+   unquoted cell, text after a closing quote, and a quote never closed are refused (the last
+   naming the line it opened on). A row is a comment only when its first unquoted character is
+   `#`, so a quoted `"#1"` is a cell. A spreadsheet pads every row to its widest with empty
+   cells and writes an empty row as its separators: trailing empty cells are ignored (a
+   non-empty cell past the header is refused), and a row of nothing but separators is a blank
+   line. Spehleon/lib's `CSV::File` is not used, since it has no quoting and the engine shares
+   it. Blank lines and comment rows are skipped; a
    leading BOM is dropped; text is not Unicode-normalised, so a hash cell hashes the bytes a
    script literal of the same name hashes. A refused load names the line, and for a unique
    clash the line it clashes with. Within one load, two texts with one hash, or a text

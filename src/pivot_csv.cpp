@@ -1,6 +1,6 @@
 #include "csv_cells.h"
 #include "table_layout.h"
-#include "Utility/load_csv.h"
+#include "csv_text.h"
 
 #include <cctype>
 #include <string>
@@ -154,20 +154,19 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 	uint32_t const               valueCount = layout.valueCount;
 	column_def const&            cells      = def.columns[def.pivot_cells];
 
-	std::string_view text = command.text;
-	if (text.starts_with("\xEF\xBB\xBF"))
+	auto read = csv_text::Read(command.text, command.label, command.first_line);
+	if (!read)
 	{
-		text.remove_prefix(3);
+		return tl::make_unexpected(std::move(read.error()));
 	}
-	CSV::Options options;
-	options.normalizeUnicode = false;
-	CSV::File file(text, options, command.first_line);
+	csv_text const& file = *read;
 	if (file.rows() == 0)
 	{
 		return tl::make_unexpected(ErrorContext("no header row for pivoted table '", def.name, "'")
 			.with(std::string(command.label)));
 	}
-	size_t const width      = file[0].size();
+	// Trailing empty header cells are a spreadsheet's padding.
+	size_t const width      = file.used_width(0);
 	uint32_t const headerLine = file.line_of_row(0);
 
 	// The keys, in key order (a picked table's keys are its leading order columns).
@@ -209,9 +208,11 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 	for (size_t r = 1; r < file.rows(); ++r)
 	{
 		uint32_t const line = file.line_of_row(r);
-		if (file[r].size() != width)
+		// A spreadsheet pads every row to its widest with empty cells, so
+		// trailing empties past the header say nothing.
+		if (file.width(r) < width || file.used_width(r) > width)
 		{
-			return tl::make_unexpected(ErrorContext("row has ", file[r].size(), " cells, but the header has ", width)
+			return tl::make_unexpected(ErrorContext("row has ", file.used_width(r), " cells, but the header has ", width)
 				.with(label(line)));
 		}
 		std::vector<cell> keys;

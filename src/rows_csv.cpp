@@ -1,7 +1,7 @@
 #include "tabular/rows_csv.h"
 #include "csv_cells.h"
 #include "table_layout.h"
-#include "Utility/load_csv.h"
+#include "csv_text.h"
 #include "cityhash/src/city.h"
 
 #include <charconv>
@@ -40,6 +40,27 @@ struct pending_conditions
 		}
 	}
 };
+
+// A suffix row's command text: its cells from the first undeclared one on,
+// the empty ones (a spreadsheet's padding) left out.
+std::string SuffixText(detail::csv_text const& file, size_t row, size_t first)
+{
+	std::string text;
+	for (size_t c = first; c < file.width(row); ++c)
+	{
+		std::string_view const part = file.cell(c, row);
+		if (part.empty())
+		{
+			continue;
+		}
+		if (!text.empty())
+		{
+			text += ", ";
+		}
+		text += part;
+	}
+	return text;
+}
 
 }
 
@@ -202,19 +223,12 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	uint32_t const stringCount    = layout.stringCount;
 	uint32_t const conditionCount = layout.conditionCount;
 
-	// A BOM is the editor's, not the first column's name. Unicode is left as
-	// written: a Hash column must hash the bytes a script literal hashes.
-	std::string_view text = command.text;
-	if (text.starts_with("\xEF\xBB\xBF"))
+	auto read = detail::csv_text::Read(command.text, command.label, command.first_line);
+	if (!read)
 	{
-		text.remove_prefix(3);
+		return tl::make_unexpected(std::move(read.error()));
 	}
-	CSV::Options options;
-	options.normalizeUnicode = false;
-	// A suffix table's last column is the rest of every line, commas included;
-	// the reader already knows how to cut a row that way.
-	options.restInLastColumn = def.suffix;
-	CSV::File file(text, options, command.first_line);
+	detail::csv_text const& file = *read;
 	if (file.rows() == 0)
 	{
 		return tl::make_unexpected(ErrorContext("no header row naming the columns of '", def.name, "'")
@@ -222,7 +236,8 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	}
 
 	// Header cell -> column.
-	size_t const          width = file[0].size();
+	// Trailing empty header cells are a spreadsheet's padding.
+	size_t const          width = file.used_width(0);
 	std::vector<uint32_t> columnOf(width);
 	std::vector<bool>     named(def.columns.size(), false);
 	for (size_t h = 0; h < width; ++h)
@@ -248,37 +263,42 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				.with(label(file.line_of_row(0))));
 		}
 	}
-	// Where the rest of the line starts is where the header's last cell is, so
-	// the suffix column must be that cell.
+	// The suffix is every cell from the header's last one on, so the suffix
+	// column must be that cell.
 	if (def.suffix && columnOf[width - 1] != def.columns.size() - 1)
 	{
 		return tl::make_unexpected(ErrorContext("the suffix column '", def.columns.back().name,
-			"' must be the header's last cell, because it takes the rest of each line").with(label(file.line_of_row(0))));
+			"' must be the header's last cell, because it takes every cell from there to the end of the row")
+			.with(label(file.line_of_row(0))));
 	}
+	// Cells a row has beyond the declared ones: the suffix's, or else padding.
+	size_t const declared = def.suffix ? width - 1 : width;
 
 	size_t const                  count = file.rows() - 1;
 	std::vector<cell>             values(count * valueCount);
 	std::vector<std::string_view> commands(count * commandCount);
 	std::vector<string_in>        strings(count * stringCount);
 	pending_conditions            conditions(count * conditionCount);
+	std::vector<std::string>      suffixes(def.suffix ? count : 0);   // commands views them until Load
 	detail::hash_names            names;
 	for (size_t r = 0; r < count; ++r)
 	{
 		uint32_t line = file.line_of_row(r + 1);
-		if (def.suffix && file[r + 1].size() + 1 == width)
+		// A spreadsheet pads every row to its widest with empty cells, so
+		// trailing empties past the declared cells say nothing.
+		if (file.width(r + 1) < declared || (!def.suffix && file.used_width(r + 1) > width))
 		{
-			return tl::make_unexpected(ErrorContext("row has no suffix cell; the text after the declared cells is the command '",
-				def.columns.back().name, "', and it is missing").with(label(line)));
-		}
-		if (file[r + 1].size() != width)
-		{
-			return tl::make_unexpected(ErrorContext("row has ", file[r + 1].size(), " cells, but the header has ", width)
+			return tl::make_unexpected(ErrorContext("row has ", file.used_width(r + 1), " cells, but the header has ", width)
 				.with(label(line)));
+		}
+		if (def.suffix)
+		{
+			suffixes[r] = SuffixText(file, r + 1, declared);
 		}
 		for (size_t h = 0; h < width; ++h)
 		{
 			column_def const& column = def.columns[columnOf[h]];
-			std::string_view  text   = file.cell(h, r + 1);
+			std::string_view  text   = def.suffix && h == declared ? std::string_view(suffixes[r]) : file.cell(h, r + 1);
 			// The one blank cell CSV accepts is a condition's: "no condition",
 			// which the loader must see to prove a table total.
 			if (column.type == column_type::Condition && text.empty())

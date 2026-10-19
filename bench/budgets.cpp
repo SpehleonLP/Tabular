@@ -238,12 +238,12 @@ walk,  calm,    0..1,     0,    ,         walk
 eat,   calm,    0..1,     0,    ,         eat
 )";
 
-constexpr std::string_view kGrazerEnterRows = R"(mode,  command
-eat,   (anim chew), (message food "eat")
-panic, (anim run), (message this "calm" :delay random(0.4, 1.0))
+constexpr std::string_view kGrazerEnterRows = R"csv(mode,  command
+eat,   (anim chew), "(message food ""eat"")"
+panic, (anim run), "(message this ""calm"" :delay random(0.4, 1.0))"
 idle,  (anim stand)
 walk,  (anim walk)
-)";
+)csv";
 
 std::string Decimal(double value)
 {

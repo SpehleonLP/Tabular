@@ -915,13 +915,13 @@ walk,  calm,    0..1,     0,    ,         walk
 eat,   calm,    0..1,     0,    ,         eat
 )";
 
-constexpr std::string_view kSpecEnterRows = R"(# grazer_enter
+constexpr std::string_view kSpecEnterRows = R"csv(# grazer_enter
 mode,  command
-eat,   (anim chew), (message food "eat")
-panic, (anim run), (message this "calm" :delay random(0.4, 1.0))
+eat,   (anim chew), "(message food ""eat"")"
+panic, (anim run), "(message this ""calm"" :delay random(0.4, 1.0))"
 idle,  (anim stand)
 walk,  (anim walk)
-)";
+)csv";
 
 machine_fixture SpecGrazer()
 {
