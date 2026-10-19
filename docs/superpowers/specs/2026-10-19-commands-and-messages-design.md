@@ -13,8 +13,10 @@ In that example no transition reads an argument's value. Three test something ab
 tests before the step and pass the result as a type or a flag. The payloads that matter (which
 item, how many) go only to commands.
 
-There are three parts, built in this order: CSV quoting, commands as lists, then messages out
-of Tabular. Part 2 depends on Part 1 reading cells correctly.
+There are four parts, built in this order: CSV quoting, commands as lists, messages out of
+Tabular, then hierarchy (entry per column, fall-through order, override clauses). Part 2 depends
+on Part 1 reading cells correctly, and Part 4's one-table form uses Part 3's fall-through
+declaration.
 
 ## Part 1. CSV quoting
 
@@ -201,6 +203,128 @@ hard hit. A fall-through key: an unnamed type answers from the blank run, and a 
 outside a fall-through column is refused. The grazer and craft-bench machines step with no
 message concept.
 
+## Part 4. Hierarchy: entry per column, fall-through order, override clauses
+
+**Why.** A hierarchical state machine (HFSM) is a left outer join with a coalesce: the
+substate's own transition wins, and where it has none, its superstate's applies.
+
+```sql
+SELECT COALESCE(child.next, parent.next)
+FROM state s
+LEFT JOIN child_rules  child  ON child.sub    = s.sub   AND child.msg  = :msg
+JOIN      parent_rules parent ON parent.super = s.super AND parent.msg = :msg
+```
+
+Tabular can express this in two ways: in one table with fall-through, or in two tables with
+an override clause. Both need entry to run per column.
+
+### Entry and exit run per column (decided, owner 2026-10-19)
+
+Today entry and exit run their whole list when any hash state column changes. With two
+columns, a change to one re-runs the other's rows. In the craft bench, `confirm → result`
+changes only `modal`, but `page_leave` emits `(hide-page experiment)` and `page_enter` emits
+`(show-page experiment)`, so the page is hidden and shown again in the same step. In an HFSM,
+`walk → run` would re-run `move`'s entry.
+
+**Rule.** An entry or exit clause runs only when a hash column it keys on as `state.<col>`
+changed. This is inferred from its `where:` and needs no declaration. A clause that keys on no
+state column runs when any hash column changed, as every clause does today. "Changed" keeps its
+meaning: next differs from current at the end of the step list, so A → B → A changes nothing.
+
+### Hierarchy in one table: fall-through on the substate key
+
+Part 3 moves fall-through onto a declaration any hash key column can make. Put it on the
+substate key:
+
+```yaml
+state:
+  - {name: super, type: hash, members: [move, rest]}
+  - {name: sub,   type: hash, members: [walk, run, sit, sleep]}
+step:
+  - from:  behaviour
+    where: {super: state.super, sub: state.sub, kind: input.kind}   # sub and kind: fallthrough
+```
+
+```csv
+super, sub,  kind,  next_super, next_sub
+move,  ,     hit,   rest,       sit       # the superstate's rule: every move substate
+move,  run,  hit,   move,       walk      # run overrides it
+```
+
+A `walk` that is hit finds no `(move, walk, hit)` run, retries with a blank `sub`, and answers
+from the superstate's row. A `run` answers from its own row.
+
+- **Retry order (decided): the substate gives way first.** The fall-through columns give way in
+  key order. Treat them as bits, with the first fall-through column in key order as the lowest
+  bit, and try each combination of blanks in counting order:
+
+  | Try | Key |
+  |---|---|
+  | exact | `(move, walk, hit)` |
+  | 1 | `(move, blank, hit)` |
+  | 2 | `(move, walk, blank)` |
+  | 3 | `(move, blank, blank)` |
+
+  So the author lists key columns from the one that should give way first to the one that
+  should hold out longest. Here the substate gives way before the message does.
+- **Child runs are total (decided).** A fall-through happens only when there is no run at all,
+  as today. A run that exists answers for every input in its domain. So an override replaces
+  the superstate's rule for that key completely, and the totality proof per run stands.
+- **Which substates belong to which superstate** is not expressed by the members lists: a
+  `(rest, walk)` state would be legal. The fix is ordinary key-domain machinery. `sub`'s domain
+  comes from a table of (super, sub) pairs, so `Prepare` reports or refuses mismatched pairs.
+- A third level is a third state column with its own fall-through.
+
+### Hierarchy in two tables: an override clause
+
+**Why it is wanted beyond hierarchy.** Two owners' rows with equal flags may not overlap in
+one key run (owner, 2026-10-18). So a package cannot override another package's rows in the
+same table: it needs a table of its own, and a clause that lets that table win where it has a
+row. That is the same outer join.
+
+**Rule.** A clause may declare `overrides: <earlier clause>`:
+
+- **Its table need not be total.** A miss is NULL: the clause writes nothing, emits nothing, is
+  not reported and is not a hold.
+- **A hit replaces the overridden clause's answer:** its sets and its emit, not as well as.
+  That is the coalesce. Commands follow the same rule as state.
+- **It must directly follow the clause it overrides, in the same list, and set a subset of that
+  clause's columns.** A later clause that reads the overridden clause as a source reads the
+  coalesced answer.
+- **The machine stays total.** Totality is a property of the whole machine, not of each table:
+  every override names a clause that is itself total, so for every reachable key and input
+  something answers. `Prepare` refuses an override of a clause that is itself an override, or
+  of one that may hold for want of a run.
+
+```yaml
+step:
+  - from:  grazer_brain          # the base package's table, total
+    where: {mode: state.mode}
+    given: {energy: input.energy}
+    set:   {mode: next}
+    emit:  command
+  - from:  grazer_brain_mod      # a mod's table, rows only where it changes something
+    overrides: 0
+    where: {mode: state.mode}
+    given: {energy: input.energy}
+    set:   {mode: next}
+    emit:  command
+```
+
+**Contract edits.** Step order item 5 (Entry): entry and exit run per column, as above. The
+clause definition gains `overrides`. The key-domain section gains the fall-through retry order.
+
+**Tests.**
+- In the craft bench, a modal-only change runs no page entry or exit row.
+- In an HFSM, `walk → run` runs `run`'s entry and not `move`'s.
+- Fall-through gives the superstate's row for `walk` and the override for `run`.
+- Retry order with two fall-through columns.
+- A `(rest, walk)` pair is reported from the pair-table domain.
+- An override clause: a miss leaves the base clause's sets and emit; a hit replaces both; a
+  dependent reads the coalesced answer.
+- An override that does not directly follow its clause, sets a column its clause doesn't, or
+  overrides an override is refused.
+
 ## Integration (the host side)
 
 How the program uses Tabular, end to end. Everything here is the host's; Tabular's part is
@@ -310,11 +434,7 @@ These need an owner ruling before Part 3 is finished.
 2. **What a state change does during `:lock`.** Proposed above: the runner defers the re-plan
    until `:unlock`. Alternatives are dropping the change (the state and the animation then
    disagree) or queueing every change in order.
-3. **Entry per machine or per column.** Entry runs the whole list when any hash column
-   changes. In a two-layer UI (page and modal), a modal-only change re-runs the page's entry
-   rows. The options are entry clauses that run only when their own column changes, or one
-   machine per layer.
-4. **Flag ranking against authored priority.** On Back, the bench closes the sort panel first,
+3. **Flag ranking against authored priority.** On Back, the bench closes the sort panel first,
    then backs out of the basket, then leaves. With `sort_open` and `can_back` both set, check
    that the flag ranking (full match, then `R & F`, then `R`) gives that order. If it doesn't,
    the host sets `can_back` only while sort is closed.
