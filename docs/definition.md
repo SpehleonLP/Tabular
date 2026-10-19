@@ -561,17 +561,56 @@ reload that keeps the names and places keeps the sites; the host varies the seed
 and step. The picked row of every clause stays readable through `Answer`, which is where an
 `emit` clause's command comes from.
 
-The interpreted picks are the oracle: randomized parity tests step the spec's grazer (keys from
-a state and a message input, a ranked flags input, scripted rows), the sketch's grazer (two
-band inputs, a script condition) and an or → best → weighted chain through thousands of
-inputs, including cuts, the range's top, values outside it, NaN and over-wide flags, and
-compare every clause's answer with `PickBest`, `PickOr` and `PickWeighted` on the same version.
-Further parity cases make each term of the shared flag rank the deciding one, and walk signed
-two-key int tuples where key 0 ties and key 1 decides. What parity tests is Step's own code:
-the tuple search, the laid-out groups, cells and lists. It does not test the helpers Step
-shares with the picks (the clamp, the input checks, the condition test, the OR, the draw, the
-flag rank), since both sides run the same code; those rest on the Pick suites, so the
-checklist's parity item stays `[~]`.
+**Parity (slice 7): the interpreted picks are the oracle** for every list a machine runs.
+Randomized tests compare every clause's answer, and the state it leaves, with `PickBest`, `PickOr`
+and `PickWeighted` on the version the binding holds, through cuts, the range's ends and beyond,
+NaN, over-wide flags and scripts that fail:
+
+- the step list: the spec grazer (keys from a state and a message input, a message type that
+  falls through, a ranked flags input, scripted rows), the sketch's grazer (two bands, a
+  script), an or → best → weighted chain, each term of the flag rank made the deciding one, and
+  signed two-key int tuples where key 0 ties and key 1 decides (`StepParity`);
+- edges: random walks over one and two inputs, a ranked edge row that does not hold, and a
+  pivoted or table with an edge column (`EdgeParity`);
+- the other lists, on a machine whose lists hold every clause kind (`ListParity`): creation's
+  create (a weighted draw) and entry lists; a step's exit, reading the state left, with a band,
+  a script and an emit, and its entry chain (or → best keyed by its answer → weighted); and
+  `Rebind`'s old exit, against the old version and to the old sink, and new entry, against the
+  new versions on the migrated state, over hundreds of reloads that change the rows both read.
+
+What parity tests is `Step`'s own code: the tuple search, the laid-out groups, cells and lists,
+the list order and what each list reads (current or next, earlier answers, the migrated state).
+It cannot test the helpers both sides share, since both run the same code: the clamp, the input
+checks, the condition call, the flag rank and which groups it ranks, the OR, the draw, the
+crossing and the message fall-through. Those rest on the pick and machine suites: each was
+mutated (14 mutations, 2026-10-19) and each turned at least one test outside the parity suites
+red (for example the clamp's top `PickBest.ARangedInputIsClampedAndNanIsRefused`, the draw's
+weights `PickWeighted.RowsLandInProportionToTheirWeights`, the full-match term
+`PickBest.AFullMatchBeatsALargerPartialOne`, the R term `PickBest.RanksLikeAnimationsLookupBest`,
+the OR `PickOr.OverlappingBandsOrTogether`, the crossing
+`EdgePick.PickBestHoldsAnEdgeOnlyWhenTheInputCrossedIntoItsBand`, the fall-through
+`MachineMessage.PickBestFallsThroughToTheBlankRunToo`).
+
+**Provenance (P16, built 2026-10-19; debug builds).** With `TABULAR_PROVENANCE` set (the engine
+sets it to 1 in the Debug config and 0 in the release family, in a header it generates,
+`generated/tabular_build_config.h`, that only `tabular/instance.h` includes; a build that
+defines it itself keeps its own, and one with neither has it off), each
+instance keeps a ring of its last `kProvenanceDepth` (16) clause runs, and `instance::Provenance()`
+returns them oldest first. An entry (`provenance_entry`) names the run it belongs to (0 for
+creation, then one more per `Step` or `Rebind`, and which of the three), the list, the clause
+and its table, the clause's answer (outcome, row, OR bits, refused input), whether a message
+type fell through to the blank run, and up to `kProvenanceValues` (8) values the clause read:
+its keys, the message type as read; its table inputs, as read before the clamp; and, for a table
+with edges, the previous value each input crossed from. A wider clause keeps the first eight
+and says it was cut. A clause held by a source read nothing whole and keeps no values; one
+refused on an input keeps its keys and inputs. A list that did not run records nothing. The
+ring is sized at creation and kept across `Rebind`, so recording allocates nothing (tested, with
+the step's allocation tests also running with it on) and a reload shows the old exit's picks
+then the new entry's. Without `TABULAR_PROVENANCE`, the ring and `Provenance()` do not exist:
+release instances carry no bytes for them, and no caller can read an empty ring as "no picks".
+Every unit must be compiled with one setting; when it is on, the instance type carries an ABI
+tag (and on MSVC each object records the setting through `#pragma detect_mismatch`), so a unit
+compiled the other way fails to link rather than reading another layout.
 
 **Picking (owner, 2026-10-12).**
 
@@ -776,16 +815,92 @@ command starts the function as the new code names it, to the new sink.
 
 ## Budgets
 
-Each cost has a number and a benchmark that fails when the number is broken. The numbers come
-from measurement before code that depends on them lands.
+Each cost has a number and a benchmark that fails when the number is broken (P17, built
+2026-10-19). The numbers are measured; each budget is the measurement with a margin, so the
+gate catches a regression. Whether a number is small enough for the runtime budget (~400 MHz,
+~150 MB for the slice, about 20× that load for the game) is a separate judgement: see the last paragraph of this section.
 
 | Cost | Paid | Budget |
 |---|---|---|
-| build a definition from text | per section, on load and reload | TBD |
-| bind | per definition × object type (shared by every instance) | TBD |
-| create an instance | per object | TBD |
-| step | per instance per tick | TBD per row evaluated |
-| relation insert, retract, query | per change or query | TBD |
+| build a definition from text | per section, on load and reload | 1.8 µs per CSV row loaded (YAML, CSV and `Prepare`); 1200 µs for the spec grazer whole; 260,000 bytes for the 9,000-row brain's prepared machine |
+| bind | per definition × object type (shared by every instance) | 150 µs and 47,000 bytes for the 30-clause brain; 1.8 µs and 1,300 bytes for the grazer |
+| create an instance | per object | 0.9 µs; 1,400 bytes (brain), 820 bytes (grazer), release build |
+| step | per instance per tick | 250 ns per row evaluated; 550 ns per grazer step |
+| relation insert, retract, query | per change or query | plain mutable table of 10,000 rows: insert 25 µs, retract (an owner's 10 rows) 420 µs, query 280 ns; mutable best table of 200 rows: insert 110 µs, retract (an owner's 50 rows) 45 µs, pick 380 ns |
+
+**The gate** is `scripts/test-tabular-budgets.sh` in the superproject. It builds Tabular and
+`Spehleon/Tabular/bench/` standalone at `-O2 -mavx2 -mfma` with asserts live (as shipped) and
+`TABULAR_PROVENANCE=0`, since the engine's `Build/` is Debug (`-O0`); runs one benchmark per row
+below; and exits 1 when a measurement is over its budget, measured nothing, or the benchmark
+table below names other benchmarks than the gate runs or another budget than it holds (`--scale
+S`, 0 < S ≤ 1, tightens every budget to show it failing). The budgets are absolute times taken
+on the one machine below, so the gate is a regression check for that machine, not a portable
+one. Run it on a quiet machine: it is not part of `test-e2e-all.sh` or a CTest shard, since a
+timing taken beside other work is noise. The Debug suite runs the same benchmarks small
+(`TabularBudget`), only to keep them building and measuring, and holds the benchmark table to
+`bench/budgets.cpp` both ways.
+
+**How measured** (2026-10-19): AMD Ryzen 5 1600 (6 cores, 3.2 GHz base), Ubuntu 24.04, glibc
+2.39, g++ 13.3, the machine otherwise idle. A time is the fastest of 7 repeats (noise only adds
+time), each repeat many operations; three to five runs of the gate gave the range shown. A timing holds
+only the operation it names: a build repeat frees the previous repeat's workload before its
+clock starts, and an insert repeat's rows are retracted (to put the table back for the next) on
+a clock of their own, which is the retract row. Memory is
+glibc's heap in use (`mallinfo2`) before and after making many objects, malloc's overhead
+included, plus `sizeof(instance)` (288 bytes) for an instance; Windows' heap differs only in its
+overhead. **Margin:** times 2×, except the grazer's whole build, which varies most (0.2 ms of
+allocation-bound parsing; its runs here have reached 536 µs), held to about 2.2× that slowest
+run; bytes 1.25×; rounded up.
+
+**Workloads.** The *grazer* is the spec's (§4, as the step tests run it): one step clause over a
+21-row best table with a message key that falls through, a ranked flags input, a band and two
+script conditions, and an entry clause that emits. The *brain* is synthetic and larger: a hash
+state of 30 members and 30 chained step clauses, each over its own 300-row best table keyed on
+the state and writing it, half of them with a ranked flags input of two groups. No row has a
+script and every input point lies in one row of its cell, so each clause tries exactly one row:
+a *row evaluated* is a clause run, and a scripted row adds its host condition's own cost. Steps
+run 1,000 instances × 50 ticks, inputs varying per instance and tick from a table.
+
+| Benchmark | Measured | Budget |
+|---|---|---|
+| build a definition: grazer | 194 to 258 us | 1200 us |
+| build a definition: per row | 0.85 to 0.89 us | 1.8 us |
+| build a definition: brain machine | 204,200 bytes | 260000 bytes |
+| bind: grazer | 0.89 to 0.91 us | 1.8 us |
+| bind: brain | 71 to 73 us | 150 us |
+| bind: grazer binding | 1,010 bytes | 1300 bytes |
+| bind: brain binding | 37,100 bytes | 47000 bytes |
+| create an instance: grazer | 0.43 to 0.45 us | 0.9 us |
+| create an instance: brain | 0.40 to 0.42 us | 0.9 us |
+| create an instance: grazer instance | 656 bytes | 820 bytes |
+| create an instance: brain instance | 1,100 bytes | 1400 bytes |
+| step: per row evaluated | 124 to 126 ns | 250 ns |
+| step: grazer | 251 to 275 ns | 550 ns |
+| relation insert: mutable | 11.3 to 12.3 us | 25 us |
+| relation retract: mutable | 202 to 206 us | 420 us |
+| relation query: mutable | 125 to 140 ns | 280 ns |
+| relation insert: best | 49.9 to 50.4 us | 110 us |
+| relation retract: best | 21.8 to 22.1 us | 45 us |
+| relation query: best | 184 to 189 ns | 380 ns |
+
+The relation rows are the first version's shapes: a plain mutable table like `spawn_points`
+(100 owners' rows over 500 int keys, one `FindOrdered` per query) and a mutable best table like
+the display owners (50 displays × 4 owners' ranked rows, one `PickBest` per query). Each costs
+in proportion to the table, not the change: an insert into an ordered plain table moves the rows
+after it, a retract rebuilds the key indexes (a retract is a reload, not a per-tick operation),
+and a best table's change builds and proves a new version.
+
+**What the step costs, and compiling it (spec R8).** 125 ns per row evaluated is about 400 cycles here, so about
+1 µs at 400 MHz; a grazer step is about 0.7 µs there. A profile of the gate's steps (`perf`, mostly the
+brain's) splits a step's time into the two searches the layout needs, the binary search to the
+key tuple (25%) and to the cell (23%); the clause's own code around them (`RunList` with the
+pick inlined: source reads, the rank loop, the sets, 33%); and the input checks and clamp (7%),
+on a working set of 30 tables. Compiling the step to machine code could shrink only the third
+around the searches, not the searches themselves, so it is not the lever these numbers point
+at; a cheaper search to the tuple (a state member's index in place of a binary search) would be. The
+question stays open for the owner: the budgets above are regression gates set from measurement, and whether
+1 µs per row at 400 MHz is enough needs a load target (machines × rows per tick) that this file
+does not state.
 
 ## First version (owner, 2026-10-15)
 

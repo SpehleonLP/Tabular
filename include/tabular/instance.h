@@ -7,6 +7,7 @@
 
 #include "tabular/relation.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -163,6 +164,127 @@ struct clause_answer
 	uint32_t       input   = UINT32_MAX;   // Failed on an input: the table input the pick refused
 };
 
+// Provenance (P16), a debug-build aid: each instance keeps its last
+// kProvenanceDepth picks. The engine's build generates
+// <generated/tabular_build_config.h> (1 in the Debug config, 0 in the release
+// family), read only here so the switch reaches the units that use instances
+// and no other command line; a build that defines TABULAR_PROVENANCE itself
+// (the budget gate sets 0) keeps its own, and one with neither (a standalone
+// build) gets none. In a build without it, the ring and Provenance() do not
+// exist, so release instances carry no bytes for them and no caller can read
+// an empty ring as "no picks". Every translation unit must agree: the instance
+// type carries an ABI tag when provenance is on (and MSVC records the setting
+// in each object), so a unit compiled the other way fails to link instead of
+// reading another layout.
+#ifndef TABULAR_PROVENANCE
+#if __has_include(<generated/tabular_build_config.h>)
+#include <generated/tabular_build_config.h>
+#else
+#define TABULAR_PROVENANCE 0
+#endif
+#endif
+
+#if TABULAR_PROVENANCE && defined(__GNUC__)
+#define TABULAR_PROVENANCE_ABI [[gnu::abi_tag("tabular_provenance")]]
+#else
+#define TABULAR_PROVENANCE_ABI
+#endif
+
+#if defined(_MSC_VER)
+#if TABULAR_PROVENANCE
+#pragma detect_mismatch("tabular_provenance", "1")
+#else
+#pragma detect_mismatch("tabular_provenance", "0")
+#endif
+#endif
+
+#if TABULAR_PROVENANCE
+
+inline constexpr size_t kProvenanceDepth  = 16;
+// The values one entry keeps: enough for every clause the worked machines and
+// the budget brain have (two keys, two inputs and their previous values); a
+// wider clause keeps the first ones and says it was cut (Truncated).
+inline constexpr size_t kProvenanceValues = 8;
+
+// Which run of the instance a pick belongs to.
+enum class provenance_run : uint8_t
+{
+	Create,
+	Step,
+	Rebind,   // the old binding's exit, then the new binding's entry
+};
+
+// One clause's pick, as the instance ran it. values holds what the clause read,
+// in order: its keys, then its table inputs, then, for a table with edges, the
+// previous value each table input crossed from (a non-edge input's is its own
+// value). A clause held by a source (SourceHeld) read nothing whole, so it
+// keeps no values; one refused on an input keeps keys and inputs, and no
+// previous values, which were never taken.
+struct provenance_entry
+{
+	uint64_t       pass  = 0;                       // 0 for creation, then one more per Step or Rebind
+	provenance_run run   = provenance_run::Create;
+	trigger        list  = {};
+	// A message type with no run answered from the blank run (R3); keys still
+	// hold the type, as read.
+	bool           fellThrough   = false;
+	uint8_t        keyCount      = 0;
+	uint8_t        inputCount    = 0;
+	uint8_t        previousCount = 0;
+	uint32_t       clause = 0;                      // its place in list
+	uint32_t       table  = 0;
+	clause_answer  answer;
+	std::array<cell, kProvenanceValues> values{};
+
+	bool Truncated() const { return size_t(keyCount) + inputCount + previousCount > kProvenanceValues; }
+	std::span<cell const> Keys() const { return Slice(0, keyCount); }
+	std::span<cell const> Inputs() const { return Slice(keyCount, inputCount); }
+	std::span<cell const> Previous() const { return Slice(size_t(keyCount) + inputCount, previousCount); }
+
+private:
+	std::span<cell const> Slice(size_t first, size_t count) const
+	{
+		size_t const begin = first < kProvenanceValues ? first : kProvenanceValues;
+		size_t const end   = first + count < kProvenanceValues ? first + count : kProvenanceValues;
+		return std::span<cell const>(values.data() + begin, end - begin);
+	}
+};
+
+// The ring read oldest first: entry 0 is the oldest pick kept, size() - 1 the
+// last. A view into the instance, valid until it next runs.
+class provenance_view
+{
+public:
+	provenance_view(std::span<provenance_entry const> ring, size_t first, size_t count)
+		: _ring(ring), _first(first), _count(count) {}
+
+	size_t size() const { return _count; }
+	bool   empty() const { return _count == 0; }
+	provenance_entry const& operator[](size_t i) const { return _ring[(_first + i) % _ring.size()]; }
+
+	class iterator
+	{
+	public:
+		iterator(provenance_view const* view, size_t at) : _view(view), _at(at) {}
+		provenance_entry const& operator*() const { return (*_view)[_at]; }
+		iterator& operator++() { ++_at; return *this; }
+		bool operator==(iterator const& other) const { return _at == other._at; }
+
+	private:
+		provenance_view const* _view;
+		size_t                 _at;
+	};
+	iterator begin() const { return iterator(this, 0); }
+	iterator end() const { return iterator(this, _count); }
+
+private:
+	std::span<provenance_entry const> _ring;
+	size_t                            _first = 0;
+	size_t                            _count = 0;
+};
+
+#endif
+
 struct instance_access;
 
 // One object's run of a bound machine: the current state vector, the next one
@@ -171,7 +293,7 @@ struct instance_access;
 // sized when the instance is created, so a step allocates nothing (a report's
 // first occurrence builds its error). Move-only: a copy would be a second
 // object that shares the first's history.
-class instance
+class TABULAR_PROVENANCE_ABI instance
 {
 public:
 	instance(instance&&) noexcept;
@@ -199,6 +321,15 @@ public:
 	// the machine did not absorb to the object's script (R3).
 	bool Absorbed() const { return _absorbed; }
 
+#if TABULAR_PROVENANCE
+	// The last kProvenanceDepth clauses that ran, oldest first, across
+	// creation, steps and rebinds (a rebind keeps the history: its entries name
+	// the old machine's clauses, then the new one's). A clause whose list did
+	// not run is not recorded. The ring is sized at creation, so recording
+	// allocates nothing.
+	provenance_view Provenance() const;
+#endif
+
 private:
 	friend struct instance_access;
 	instance() = default;
@@ -220,6 +351,13 @@ private:
 	std::vector<cell>          _givenBefore; // scratch: one clause's table inputs' previous values, for its edges
 	std::vector<float>         _axes;        // scratch: one best clause's clamped band inputs
 	bool                       _absorbed = false;
+#if TABULAR_PROVENANCE
+	std::vector<provenance_entry> _provenance;           // the ring, kProvenanceDepth entries
+	size_t                        _provenanceNext  = 0;  // where the next pick goes
+	size_t                        _provenanceCount = 0;
+	uint64_t                      _pass            = 0;
+	provenance_run                _run             = provenance_run::Create;
+#endif
 };
 
 // A new instance of binding with the given id, its state at each column's

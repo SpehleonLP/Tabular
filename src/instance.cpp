@@ -140,6 +140,13 @@ struct instance_access
 	static std::vector<cell>&          Given(instance& i) { return i._given; }
 	static std::vector<float>&         Axes(instance& i) { return i._axes; }
 	static bool&                       Absorbed(instance& i) { return i._absorbed; }
+#if TABULAR_PROVENANCE
+	static std::vector<provenance_entry>& Ring(instance& i) { return i._provenance; }
+	static size_t&                        RingNext(instance& i) { return i._provenanceNext; }
+	static size_t&                        RingCount(instance& i) { return i._provenanceCount; }
+	static uint64_t&                      Pass(instance& i) { return i._pass; }
+	static provenance_run&                Run(instance& i) { return i._run; }
+#endif
 };
 
 Binding::Binding(std::unique_ptr<Data>&& data) : _data(std::move(data)) {}
@@ -705,6 +712,73 @@ list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state,
 		instance_access::Absorbed(subject), subject.id(), self, seed, list};
 }
 
+#if TABULAR_PROVENANCE
+// Writes what clause index of run read and answered into the next slot of the
+// ring, overwriting the oldest once it is full. Reads the scratch buffers the
+// clause left: its keys (with the message type put back where it fell
+// through to the blank run), its inputs and, with edges, their previous
+// values. Copies into the ring sized at creation, so it allocates nothing.
+void Record(instance& subject, list_run const& run, size_t index, clause_answer const& answer)
+{
+	resolved_clause const& rc  = run.machine.def.lists[run.list][index];
+	table_def const&       def = version_access::Def(*run.machine.lists[run.list][index].version);
+	std::vector<provenance_entry>& ring = instance_access::Ring(subject);
+	size_t& next = instance_access::RingNext(subject);
+	provenance_entry& entry = ring[next];
+	next = (next + 1) % ring.size();
+	instance_access::RingCount(subject) = std::min(instance_access::RingCount(subject) + 1, ring.size());
+
+	entry        = provenance_entry{};
+	entry.pass   = instance_access::Pass(subject);
+	entry.run    = instance_access::Run(subject);
+	entry.list   = static_cast<trigger>(run.list);
+	entry.clause = static_cast<uint32_t>(index);
+	entry.table  = rc.table;
+	entry.answer = answer;
+	if (answer.outcome == clause_outcome::SourceHeld)
+	{
+		return;
+	}
+	size_t stored = 0;
+	auto keep = [&](cell value)
+	{
+		if (stored < kProvenanceValues)
+		{
+			entry.values[stored] = value;
+		}
+		++stored;
+	};
+	for (size_t k = 0; k < rc.keys.size(); ++k)
+	{
+		cell value = run.keys[k];
+		// A clause keyed on the message always reads the type from the
+		// message input, and only the fall-through leaves 0 where it was not.
+		if (k == rc.messageKey && value.i == 0 && rc.keys[k].kind == source_kind::Input
+			&& run.inputs[rc.keys[k].index].i != 0)
+		{
+			value             = run.inputs[rc.keys[k].index];
+			entry.fellThrough = true;
+		}
+		keep(value);
+	}
+	for (size_t g = 0; g < rc.inputs.size(); ++g)
+	{
+		keep(run.given[g]);
+	}
+	entry.keyCount   = static_cast<uint8_t>(rc.keys.size());
+	entry.inputCount = static_cast<uint8_t>(rc.inputs.size());
+	// A clause refused on an input stopped before taking previous values.
+	if (def.edges && answer.input == UINT32_MAX)
+	{
+		for (size_t g = 0; g < rc.inputs.size(); ++g)
+		{
+			keep(run.givenBefore[g]);
+		}
+		entry.previousCount = static_cast<uint8_t>(rc.inputs.size());
+	}
+}
+#endif
+
 // Runs a list in order; each clause sees what the ones before it wrote. state
 // is the vector its State sources read.
 void RunList(instance& subject, trigger list, std::vector<cell> const& state, void const* self, uint64_t seed)
@@ -713,6 +787,9 @@ void RunList(instance& subject, trigger list, std::vector<cell> const& state, vo
 	for (size_t i = 0; i < run.answers.size(); ++i)
 	{
 		run.answers[i] = RunClause(run, i);
+#if TABULAR_PROVENANCE
+		Record(subject, run, i, run.answers[i]);
+#endif
 	}
 }
 
@@ -927,6 +1004,15 @@ Binding const& instance::binding() const
 	return *_binding;
 }
 
+#if TABULAR_PROVENANCE
+provenance_view instance::Provenance() const
+{
+	assert(_binding && "a moved-from instance is used: caller misuse");
+	size_t const first = _provenance.empty() ? 0 : (_provenanceNext + _provenance.size() - _provenanceCount) % _provenance.size();
+	return provenance_view(std::span<provenance_entry const>(_provenance.data(), _provenance.size()), first, _provenanceCount);
+}
+#endif
+
 clause_answer instance::Answer(trigger list, size_t clause) const
 {
 	assert(_binding && "a moved-from instance is used: caller misuse");
@@ -948,6 +1034,10 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	}
 	instance_access::Next(out) = current;
 	SizeFor(out, data);
+#if TABULAR_PROVENANCE
+	// Sized here only, so a rebind keeps the history it would otherwise lose.
+	instance_access::Ring(out).assign(kProvenanceDepth, provenance_entry{});
+#endif
 
 	// Creation enters the initial state; nothing is left, so no exit runs. The
 	// values read are their own previous values, so creation crosses no edge.
@@ -969,6 +1059,10 @@ void Step(instance& subject, void const* self, uint64_t seed, message const& msg
 	std::vector<cell>&          current = instance_access::Current(subject);
 	std::vector<cell>&          next    = instance_access::Next(subject);
 	instance_access::Absorbed(subject)  = false;
+#if TABULAR_PROVENANCE
+	++instance_access::Pass(subject);
+	instance_access::Run(subject) = provenance_run::Step;
+#endif
 	ReadInputs(subject, self, msg);
 	// Unwritten columns hold because next starts as current.
 	std::copy(current.begin(), current.end(), next.begin());
@@ -1008,6 +1102,10 @@ void Rebind(instance& subject, Binding const& binding, void const* self, uint64_
 	detail::machine_def const&       to    = machine_access::Of(fresh->machine()).def;
 	std::vector<cell>&               current = instance_access::Current(subject);
 	std::vector<cell>&               next    = instance_access::Next(subject);
+#if TABULAR_PROVENANCE
+	++instance_access::Pass(subject);
+	instance_access::Run(subject) = provenance_run::Rebind;
+#endif
 
 	// Leaving, under the old binding, as a step leaves a state: the abort comes
 	// from the code that started what the state runs (R6). The edge history is
