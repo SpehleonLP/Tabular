@@ -36,7 +36,8 @@ Surfaces that already compile to one internal form, or are proposed here:
 be a front end that writes rows the core already has? If so, it gets a front end and no core
 code. It reaches the core only when the internal form cannot express it. The proposed
 non-ranking flags condition is that case: no existing row kind filters on wire bits in row
-order without calling a script.
+order without calling a script. It is deferred, so this spec builds no core code from the
+principle.
 
 ## Part 1. CSV quoting
 
@@ -473,7 +474,8 @@ with flags, the bench's order would hold only if `sort_open` happened to be a hi
 `can_back`. Use flags when priority belongs to the input (the host decides which wire matters
 most), and conditions when it belongs to the table (the author's line order).
 
-**A gap, proposed:** a gambit over host wires costs a closure call per tried row, because
+**A gap, deferred (owner, 2026-10-19: script conditions are enough for gambits for now; maybe
+revisited):** a gambit over host wires costs a closure call per tried row, because
 conditions are scripts. A flags column declared as a plain condition (spelling to settle, e.g.
 `rank: false`) would make a row count only when its flags are all in the input, `R & F == R`,
 and leave the order to the rows. That gives first-match over wires with no script. The
