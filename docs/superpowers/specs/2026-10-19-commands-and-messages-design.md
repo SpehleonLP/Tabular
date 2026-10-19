@@ -18,6 +18,26 @@ Tabular, then hierarchy (entry per column, fall-through order, override clauses)
 on Part 1 reading cells correctly, and Part 4's one-table form uses Part 3's fall-through
 declaration.
 
+## Principle: many authoring surfaces, one internal table (owner, 2026-10-19)
+
+Tabular should have more ways to write a table than kinds of table inside. Authors write
+whatever reads most naturally, and each surface compiles to the same store, layout and picks.
+`definition.md` already says the builder API is the core and YAML and CSV are front ends that
+produce its commands. This extends that from file formats to authoring idioms.
+
+Surfaces that already compile to one internal form, or are proposed here:
+
+- rows CSV, pivoted CSV (flags as headers) and grid CSV, all loading into the same store;
+- a command written with parentheses, without them (wrapped), or spread across cells (Part 2);
+- an HFSM in one table with fall-through, or in two tables with an override clause (Part 4);
+- a gambit list (conditions in row order) next to a ranked table (flags by bit).
+
+**The test for a new feature is the authoring side of the premise/consequence method:** can it
+be a front end that writes rows the core already has? If so, it gets a front end and no core
+code. It reaches the core only when the internal form cannot express it. The proposed
+non-ranking flags condition is that case: no existing row kind filters on wire bits in row
+order without calling a script.
+
 ## Part 1. CSV quoting
 
 **Why.** Tables are authored in a spreadsheet editor, not a text editor. A spreadsheet's CSV
