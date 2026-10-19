@@ -133,6 +133,24 @@ owner with my recommendation. Merges still need the owner's approval.
   - **Holds cascade:** a clause reading a held clause holds. Inputs are read once per step, as
     one snapshot every clause shares.
 
+  Applied in slice 4 (coordinator, from the slice 4 review; the owner may overrule at code
+  review):
+  - **A message key is declared on the table** (`domain: message`) and bound both ways to the
+    machine's `message: {type, arguments}`. A blank cell there is hash 0, "no message", the
+    one place 0 is allowed. A type no run keys on falls through to the blank run; that is a
+    property of the table, so `PickBest` falls through too, through the one lookup helper.
+  - **0 does not leak.** A foreign-column domain read from a message key drops 0, and a
+    clause source carrying a message key into a key that is not one is refused.
+  - **Absorbed** means a run keyed on the type answered; a fall-through or a hold is not.
+  - **Commands go out after the swap,** in the order the lists ran: create then entry at
+    creation; step, exit, entry per step. Exit reads current and may not set a hash state.
+  - **A failure is reported once per (clause, row) per instance,** with the host's own error
+    from the one evaluation; a cascaded hold is not reported. Report memory covers scripted
+    rows only.
+  - **Arguments are positional slots shared by every type:** a missing one reads 0, as a step
+    with no message does. Extra arguments are reported once. Per-type arity is not declared;
+    the owner may want it.
+
 - **A version is a function of the owners' loads, not of load order** (follows from the
   idempotent-reload ruling, applied in slice 1). Among rows with equal order keys, rows sort by
   owner, then by their index in that owner's load. So `PickAll`, `PickWeighted` and the
@@ -315,7 +333,7 @@ tl::expected<std::optional<size_t>, ErrorContext> PickWeighted(relation_store co
 struct host_binding {
     std::function<tl::expected<input_getter, ErrorContext>(std::string_view name)> resolve;   // P8
     std::function<void(uint64_t instance, uint32_t table, std::string_view command)> sink;    // P12
-    std::function<void(uint32_t table, size_t row, ErrorContext const&)>         report;      // P15
+    std::function<void(uint64_t instance, uint32_t table, size_t row, ErrorContext const&)> report; // P15
 };
 tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const>, host_binding&&);
 instance CreateInstance(Binding const&, uint64_t id, uint64_t seed, void const* self);  // runs create + entry; cannot refuse
