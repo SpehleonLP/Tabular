@@ -18,8 +18,11 @@ if(PROJECT_IS_TOP_LEVEL)
 	set(CMAKE_CXX_EXTENSIONS ON)
 	cmake_path(GET CMAKE_CURRENT_SOURCE_DIR PARENT_PATH _spehleon)
 	cmake_path(GET _spehleon PARENT_PATH _engine)
+	# ${_engine}/include holds helgrind.hpp, which the engine's build and its .clangd
+	# force-include into every file; without it clangd cannot parse anything here.
 	include_directories(
 		${_spehleon}/lib
+		${_engine}/include
 		${_engine}/src
 		${_engine}/ThirdParty
 	)
