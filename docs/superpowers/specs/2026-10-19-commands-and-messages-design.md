@@ -63,13 +63,18 @@ that reason.
   `((emit sound) (play particle) (message target hit 3))`. **No suffix cells means `()`,** which
   is "do nothing". A row with an empty suffix is no longer refused.
 - **Every top-level item is a list whose head names what it does** (`(clip HeadDown)`,
-  `(message this calm)`, `(sound no__)`). A bare atom at the top level is refused. This
-  retires the animation bridge convention of telling messages from clips by quoting (see
-  Bridge tables).
+  `(message this calm)`, `(sound no__)`). This retires the animation bridge convention of
+  telling messages from clips by quoting (see Bridge tables).
+- **A cell written without parentheses is wrapped, not refused** (owner, 2026-10-19): its
+  meaning is clear, the author just didn't write it lispy. Outside an open parenthesis, a
+  suffix cell whose trimmed text does not start with `(` is one command, and Tabular wraps the
+  whole cell: `clip HeadUp` reads as `(clip HeadUp)`. So the joining rule above applies inside
+  parentheses, where a command may run across cells. A cell that starts with `(` holds one or
+  more s-expressions. *Open:* a cell holding a single word (`HeadDown`), which has no verb.
 - **The shape is checked at load and nothing more.** Lexically there are parentheses,
-  double-quoted strings (with `\"` and `\\` escapes) and atoms. Unbalanced parentheses, an
-  unterminated string or a top-level atom is refused, naming the line. Tabular still never
-  interprets a command, and compiling one stays with the host (R9).
+  double-quoted strings (with `\"` and `\\` escapes) and atoms. Unbalanced parentheses or an
+  unterminated string is refused, naming the line. Tabular still never interprets a command,
+  and compiling one stays with the host (R9).
 - **The wrapped list is what the store keeps.** It is built once at load, so a step never
   parses or builds text.
 
@@ -91,8 +96,8 @@ exactly… a row with no suffix text is refused" with the rule above. Emits (ste
 Update the interface in the As-built section.
 
 **Tests.** One command across two cells equals the same command in one cell; three commands
-give a three-item list; an empty suffix gives `()`; a top-level atom, an unbalanced paren and an
-unterminated string are each refused with a line; the step's result order matches step, exit,
+give a three-item list; an empty suffix gives `()`; `clip HeadUp` reads as `(clip HeadUp)`; an
+unbalanced paren and an unterminated string are each refused with a line; the step's result order matches step, exit,
 entry; the allocation-free step test still passes with results returned; the budget gate is
 re-measured.
 
@@ -110,7 +115,7 @@ command:
 ```csv
 from, phase, mode, to,    steps
 _,    _,     _,    eat,   (clip HeadDown)
-eat,  _,     _,    chew,  (clip HeadUp),   (message this "chewed")
+eat,  _,     _,    chew,  clip HeadUp,     (message this "chewed")
 idle, _,     _,    walk,  (clip idle_to_walk)
 ```
 
