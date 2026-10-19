@@ -127,6 +127,8 @@ host_binding HostGetters()
 		}
 		return input_getter{found->second, nullptr, nullptr};
 	};
+	// The grazers emit; these tests read what they emit through Answer.
+	host.sink = [](uint64_t, uint32_t, std::string_view) {};
 	return host;
 }
 
@@ -177,6 +179,11 @@ struct machine_fixture
 	machine_fixture(std::string_view yaml, std::vector<std::string_view> const& rows)
 		: document(Parse(yaml)), store(std::move(document.tables))
 	{
+		// A refused document already failed the test; a run on it would crash it.
+		if (document.machines().empty())
+		{
+			return;
+		}
 		for (uint32_t t = 0; t < rows.size(); ++t)
 		{
 			csv_rows load;
@@ -233,6 +240,12 @@ cell ValueOf(TableVersion const& version, size_t row, std::string_view column)
 	}
 	ADD_FAILURE() << "no column " << column;
 	return cell::Integer(0);
+}
+
+// A step's message of the named type, with no arguments.
+message Message(std::string_view type)
+{
+	return message{static_cast<uint32_t>(Hash(type)), {}};
 }
 
 // ---- The worked example: the grazer of the design sketch ------------------------
@@ -511,7 +524,7 @@ size_t CountedSteps(instance& subject, host_object const& host, int steps, Vary 
 	for (int i = 0; i < steps; ++i)
 	{
 		vary(i);
-		Step(subject, &host, uint64_t(i));
+		Step(subject, &host, uint64_t(i), message{static_cast<uint32_t>(host.message), {}});
 		for (watched_clause const& w : watched)
 		{
 			++seen[size_t(subject.Answer(w.list, w.clause).outcome)];
@@ -592,6 +605,7 @@ host_binding LoggedGetters(getter_log& log, std::string_view refuse = {})
 		}
 		return getter;
 	};
+	host.sink = HostGetters().sink;
 	return host;
 }
 
@@ -843,7 +857,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: rows}
+      - {name: message, type: hash, key: true, domain: message}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -864,6 +878,7 @@ machines:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}
       - {name: message, type: hash}
+    message: {type: message}
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -877,21 +892,21 @@ machines:
 
 constexpr std::string_view kSpecBrainRows = R"(# grazer_brain
 mode,  message, energy,   near, when,     next
-idle,  none,    0..0.3,   1,    ,         eat
-idle,  none,    0..1,     2,    cornered, panic
-idle,  none,    0..1,     0,    ,         walk
-walk,  none,    0.5..1,   2,    ,         eat
-walk,  none,    0..0.5,   3,    ,         idle
-walk,  none,    0.2..0.8, 1,    panicky,  panic
-walk,  none,    0..1,     0,    ,         idle
-eat,   none,    0..0.5,   0,    cornered, panic
-eat,   none,    0..1,     0,    ,         idle
-eat,   none,    0..1,     6,    ,         walk
-eat,   none,    0..1,     9,    ,         panic
+idle,      ,    0..0.3,   1,    ,         eat
+idle,      ,    0..1,     2,    cornered, panic
+idle,      ,    0..1,     0,    ,         walk
+walk,      ,    0.5..1,   2,    ,         eat
+walk,      ,    0..0.5,   3,    ,         idle
+walk,      ,    0.2..0.8, 1,    panicky,  panic
+walk,      ,    0..1,     0,    ,         idle
+eat,       ,    0..0.5,   0,    cornered, panic
+eat,       ,    0..1,     0,    ,         idle
+eat,       ,    0..1,     6,    ,         walk
+eat,       ,    0..1,     9,    ,         panic
 idle,  scared,  0..1,     0,    ,         panic
 walk,  scared,  0..1,     0,    ,         panic
 eat,   scared,  0..1,     0,    ,         panic
-panic, none,    0..1,     0,    ,         panic
+panic,     ,    0..1,     0,    ,         panic
 panic, calm,    0..1,     0,    ,         idle
 panic, scared,  0..1,     0,    ,         panic
 idle,  calm,    0..1,     0,    ,         idle
@@ -915,26 +930,28 @@ machine_fixture SpecGrazer()
 
 }
 
-TEST(MachineStep, AMessageNoRowKeysOnHoldsTheBrain)
+TEST(MachineStep, AMessageNoRowKeysOnFallsThroughToTheBlankRun)
 {
 	machine_fixture f = SpecGrazer();
 	ASSERT_TRUE(f.binding);
+	TableVersion const& brain = f.Version(trigger::Step, 0);
 	host_object host;
-	host.message = Hash("none");
 	instance grazer = f.Create(host);
-	host.message = Hash("scared");
-	Step(grazer, &host, 1);
+	Step(grazer, &host, 1, Message("scared"));
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
-	host.message = Hash("sneeze");   // no run: outside the domain Prepare proved
-	Step(grazer, &host, 2);
-	EXPECT_EQ(grazer.Answer(trigger::Step, 0).outcome, clause_outcome::NoRun);
-	EXPECT_EQ(grazer.State(0).i, Hash("panic")) << "the brain held";
-	host.message = 0;   // ruling R3's "no message" is slice 4; today it is one more key with no run
-	Step(grazer, &host, 3);
-	EXPECT_EQ(grazer.Answer(trigger::Step, 0).outcome, clause_outcome::NoRun);
-	host.message = Hash("calm");
-	Step(grazer, &host, 4);
+	EXPECT_TRUE(grazer.Absorbed()) << "idle has a scared run";
+	Step(grazer, &host, 2, Message("sneeze"));   // no run keys on sneeze
+	clause_answer const fell = grazer.Answer(trigger::Step, 0);
+	ASSERT_EQ(fell.outcome, clause_outcome::Answered) << "panic's blank run answered";
+	EXPECT_EQ(ValueOf(brain, fell.row, "message").i, 0);
+	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
+	EXPECT_FALSE(grazer.Absorbed()) << "it fell through: the host routes sneeze to the script";
+	Step(grazer, &host, 3);   // no message: type 0, the blank run directly
+	EXPECT_EQ(grazer.Answer(trigger::Step, 0).row, fell.row);
+	EXPECT_FALSE(grazer.Absorbed());
+	Step(grazer, &host, 4, Message("calm"));
 	EXPECT_EQ(grazer.State(0).i, Hash("idle"));
+	EXPECT_TRUE(grazer.Absorbed());
 }
 
 TEST(MachineStep, TheFlagsRankTheGroupsAsPickBestRanksRows)
@@ -942,7 +959,6 @@ TEST(MachineStep, TheFlagsRankTheGroupsAsPickBestRanksRows)
 	machine_fixture f = SpecGrazer();
 	ASSERT_TRUE(f.binding);
 	host_object host;
-	host.message = Hash("none");
 	host.energy  = 0.1;
 	instance grazer = f.Create(host);
 	host.food_near = 3;   // idle has groups 1 and 2: both full matches, 2 & 3 is larger, so cornered() first
@@ -1191,16 +1207,16 @@ TEST(StepParity, TheSpecGrazerMatchesPickBestStepByStep)
 	TableVersion const& brain = f.Version(trigger::Step, 0);
 	TableVersion const& enter = f.Version(trigger::Entry, 0);
 	std::mt19937_64 rng(0x7ab1a);
-	int64_t const   messages[] = {Hash("none"), Hash("scared"), Hash("calm"), Hash("sneeze"), 0};
+	int64_t const   messages[] = {0, Hash("scared"), Hash("calm"), Hash("sneeze"), 0};
 	// 5 against eat's groups 6 and 9 matches neither fully, and the larger R & F
 	// (6's 4) outranks the larger R (9).
 	int64_t const   flags[]    = {0, 1, 2, 3, 4, 5, 6, 13, 0xFFFFFFFF, int64_t(1) << 32};
 	host_object host;
-	host.message = Hash("none");
 	instance grazer = f.Create(host);
 	int answered = 0;
 	int held     = 0;
 	int entered  = 0;
+	int fell     = 0;
 	for (int i = 0; i < 4000; ++i)
 	{
 		host.message   = messages[rng() % std::size(messages)];
@@ -1209,16 +1225,26 @@ TEST(StepParity, TheSpecGrazerMatchesPickBestStepByStep)
 		host.cornered  = rng() % 2 == 0;
 		host.broken    = rng() % 25 == 0;
 		cell const before = grazer.State(0);
-		std::vector<cell> const keys   = {before, cell::Integer(host.message)};
+		// R3's fall-through is the table's: PickBest retries a type with no run
+		// on the blank run itself. Whether the type has a run of its own is
+		// read off the version, for Absorbed.
+		std::vector<cell> const keys = {before, cell::Integer(host.message)};
+		auto const run = brain.FindOrdered(keys);
+		ASSERT_TRUE(run.has_value()) << RefusalOf(run);
+		bool const absorbs = host.message != 0 && run->first != run->last;
+		bool const falls   = host.message != 0 && run->first == run->last;
 		std::vector<cell> const inputs = {cell::Real(host.energy), cell::Integer(host.food_near)};
 		auto const oracle = PickBest(brain, pick_query{keys, inputs, &host});
-		Step(grazer, &host, uint64_t(i));
+		Step(grazer, &host, uint64_t(i), message{static_cast<uint32_t>(host.message), {}});
 		auto where = [&]() { return "step " + std::to_string(i) + " "; };
 		clause_answer const got = grazer.Answer(trigger::Step, 0);
 		ExpectSameAnswer(oracle, got, where);
 		cell const wanted = oracle && *oracle ? ValueOf(brain, **oracle, "next") : before;
 		EXPECT_EQ(grazer.State(0).i, wanted.i) << where();
 		(got.outcome == clause_outcome::Answered ? answered : held) += 1;
+		// Both sides fall through, or neither would answer a type with no run.
+		fell += falls && got.outcome == clause_outcome::Answered ? 1 : 0;
+		EXPECT_EQ(grazer.Absorbed(), absorbs && got.outcome == clause_outcome::Answered) << where();
 		if (wanted.i != before.i)
 		{
 			++entered;
@@ -1237,6 +1263,7 @@ TEST(StepParity, TheSpecGrazerMatchesPickBestStepByStep)
 	EXPECT_GT(answered, 1000);
 	EXPECT_GT(held, 500);
 	EXPECT_GT(entered, 300);
+	EXPECT_GT(fell, 300) << "sneeze, which no run keys on, answered from the blank run";
 }
 
 TEST(StepParity, TheWorkedGrazerMatchesPickBestStepByStep)
@@ -1611,14 +1638,13 @@ TEST(MachineStep, AStepThatHoldsOrDrawsAllocatesNothing)
 	{
 		GTEST_SKIP() << kNoCounting;
 	}
-	// A message no row keys on, and scripted rows that raise.
+	// A message no row keys on, falling through, and scripted rows that raise.
 	machine_fixture spec = SpecGrazer();
 	ASSERT_TRUE(spec.binding);
 	host_object host;
 	host.terse      = true;
-	host.message    = Hash("none");
 	instance grazer = spec.Create(host);
-	int64_t const messages[] = {Hash("none"), Hash("sneeze"), Hash("scared"), Hash("calm")};
+	int64_t const messages[] = {0, Hash("sneeze"), Hash("scared"), Hash("calm")};
 	auto varyMessage = [&](int i)
 	{
 		host.message   = messages[i % 4];
@@ -1630,7 +1656,8 @@ TEST(MachineStep, AStepThatHoldsOrDrawsAllocatesNothing)
 	watched_clause const brain[] = {{trigger::Step, 0}};
 	outcome_counts       seen{};
 	EXPECT_EQ(CountedSteps(grazer, host, 40, varyMessage, brain, seen), 0u);
-	EXPECT_EQ(seen[size_t(clause_outcome::NoRun)], 10) << "every sneeze";
+	EXPECT_EQ(seen[size_t(clause_outcome::NoRun)], 0) << "every sneeze falls through to the blank run";
+	EXPECT_GT(seen[size_t(clause_outcome::Failed)], 0) << "the scripted rows raised";
 
 	// The phase chain: an or clause whose scripted row raises, a best clause
 	// keyed by its answer, and a weighted draw.

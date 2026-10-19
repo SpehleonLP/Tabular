@@ -352,7 +352,8 @@ void ColumnValues(table_rows const& rows, uint32_t column, std::vector<int64_t>&
 	out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
-void DeclaredDomain(domain_def const& declared, table_rows const* foreign, uint32_t k, key_domains& domains)
+void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, table_rows const* foreign, uint32_t k,
+	key_domains& domains)
 {
 	std::vector<int64_t>& values = domains.values[k];
 	values.clear();
@@ -367,6 +368,18 @@ void DeclaredDomain(domain_def const& declared, table_rows const* foreign, uint3
 		break;
 	case domain_kind::Column:
 		ColumnValues(*foreign, declared.column, values);
+		if (IsMessageKey(*foreignDef, declared.column))
+		{
+			auto blank = std::lower_bound(values.begin(), values.end(), int64_t(0));
+			if (blank != values.end() && *blank == 0)
+			{
+				values.erase(blank);
+			}
+		}
+		break;
+	case domain_kind::Message:
+		values.assign(1, 0);
+		domains.messageKey = k;
 		break;
 	case domain_kind::None:
 		break;   // the schema refuses a best table's key with no domain
@@ -450,6 +463,53 @@ void ResolveDomain(table_rows const& rows, key_domains& domains)
 	// In key order only when the columns over their rows lead the keys, and
 	// the walk needs key order.
 	SortTuples(domains.tuples, keys, count, false);
+	if (domains.messageKey == UINT32_MAX)
+	{
+		return;
+	}
+
+	// A message key: so far every tuple has the blank. A run keyed on a type is
+	// in the domain when its blank twin is, so it is checked because it is
+	// there, and a type no run names falls through to that twin.
+	size_t const         m = domains.messageKey;
+	std::vector<int64_t> tuple(keys);
+	std::vector<int64_t> twin(keys);
+	size_t               added = 0;
+	for (size_t r = 0; r < rows.RowCount(); ++r)
+	{
+		for (size_t k = 0; k < keys; ++k)
+		{
+			tuple[k] = rows.cells[r * rows.valueCount + rows.orderSlots[k]].i;
+		}
+		if (tuple[m] == 0)
+		{
+			continue;
+		}
+		twin    = tuple;
+		twin[m] = 0;
+		// Binary search over the first count tuples, the sorted blank ones.
+		int64_t const* base = domains.tuples.data();
+		size_t         lo   = 0;
+		size_t         hi   = count;
+		while (lo < hi)
+		{
+			size_t const mid = lo + (hi - lo) / 2;
+			if (TupleLess(base + mid * keys, twin.data(), keys))
+			{
+				lo = mid + 1;
+			}
+			else
+			{
+				hi = mid;
+			}
+		}
+		if (lo < count && std::equal(twin.begin(), twin.end(), base + lo * keys))
+		{
+			domains.tuples.insert(domains.tuples.end(), tuple.begin(), tuple.end());
+			++added;
+		}
+	}
+	domains.count = SortTuples(domains.tuples, keys, count + added, true);
 }
 
 tl::expected<void, ErrorContext> CheckBest(check_subject const& subject, key_domains const& domains,

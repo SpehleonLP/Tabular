@@ -111,11 +111,19 @@ struct clause_yaml
 	std::string emit;
 };
 
+// Which inputs a step's message carries: its type, then its arguments.
+struct message_yaml
+{
+	std::string              type;
+	std::vector<std::string> arguments;
+};
+
 struct machine_yaml
 {
 	std::string              name;
 	std::vector<state_yaml>  state;
 	std::vector<input_yaml>  inputs;
+	message_yaml             message;
 	std::vector<clause_yaml> create;
 	std::vector<clause_yaml> entry;
 	std::vector<clause_yaml> step;
@@ -227,12 +235,21 @@ YamlField const kClauseFields[] = {
 };
 YamlSet const kClauseSet{kClauseFields, nullptr, "clause"};
 
+YamlField const kMessageArgument{"", FieldType::String, 0};
+YamlField const kMessageFields[] = {
+	{"type",      FieldType::String,   offsetof(message_yaml, type), true},
+	{"arguments", FieldType::Sequence, offsetof(message_yaml, arguments), false,
+	 0, nullptr, &kMessageArgument, nullptr, MakeContainer<std::vector<std::string>>()},
+};
+YamlSet const kMessageSet{kMessageFields, nullptr, "message"};
+
 YamlField const kMachineFields[] = {
 	{"name",   FieldType::String,   offsetof(machine_yaml, name), true},
 	{"state",  FieldType::Sequence, offsetof(machine_yaml, state), false,
 	 0, &kStateSet, nullptr, nullptr, MakeContainer<std::vector<state_yaml>>()},
 	{"inputs", FieldType::Sequence, offsetof(machine_yaml, inputs), false,
 	 0, &kInputSet, nullptr, nullptr, MakeContainer<std::vector<input_yaml>>()},
+	{"message", FieldType::Nested, offsetof(machine_yaml, message), false, 0, &kMessageSet},
 	{"create", FieldType::Sequence, offsetof(machine_yaml, create), false,
 	 0, &kClauseSet, nullptr, nullptr, MakeContainer<std::vector<clause_yaml>>()},
 	{"entry",  FieldType::Sequence, offsetof(machine_yaml, entry), false,
@@ -259,9 +276,13 @@ YamlSet const kDocumentSet{kDocumentFields, nullptr, "table definitions"};
 tl::expected<key_domain, ErrorContext> ReadDomain(LF::Yaml::Node const& node, column_yaml const& column,
 	domain_yaml& mapped, std::vector<cell>& members)
 {
-	char const* const kShapes = "; a domain is rows, {members: [..]} or {table: T, column: C}";
+	char const* const kShapes = "; a domain is rows, message, {members: [..]} or {table: T, column: C}";
 	if (node.is_scalar())
 	{
+		if (node.as_scalar().value == "message")
+		{
+			return key_domain::Message();
+		}
 		if (node.as_scalar().value != "rows")
 		{
 			return tl::make_unexpected(ErrorContext("column '", column.name, "' has domain '", node.as_scalar().value,
@@ -508,6 +529,7 @@ struct machine_storage
 	std::vector<std::vector<cell>>                                 members;   // per state column
 	std::vector<add_state>                                         state;
 	std::vector<add_input>                                         inputs;
+	std::vector<std::string_view>                                  arguments;   // the message's
 	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> where;   // per clause
 	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> given;
 	std::array<std::vector<std::vector<set_state>>, kTriggerCount>   sets;
@@ -768,8 +790,17 @@ tl::expected<void, ErrorContext> ReadMachine(machine_yaml const& in, LF::Yaml::N
 				store.sets[list][c], clause.emit});
 		}
 	}
+	for (std::string const& argument : in.message.arguments)
+	{
+		store.arguments.push_back(argument);
+	}
+	// Presence, not emptiness: `type: ""` is a mistake, not "no message".
+	if (node.get("message") != nullptr && in.message.type.empty())
+	{
+		return tl::make_unexpected(ErrorContext("the message's type names no input").with("machine '", in.name, "'"));
+	}
 	out = create_machine{in.name, store.state, store.inputs, store.clauses[0], store.clauses[1], store.clauses[2],
-		store.clauses[3]};
+		store.clauses[3], message_inputs{in.message.type, store.arguments}};
 	return {};
 }
 

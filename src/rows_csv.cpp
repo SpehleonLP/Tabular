@@ -157,6 +157,16 @@ tl::expected<cell, ErrorContext> ReadCell(column_def const& column, std::string_
 	return value;
 }
 
+tl::expected<cell, ErrorContext> ReadCell(table_def const& def, uint32_t column, std::string_view text,
+	hash_names& names, uint32_t line)
+{
+	if (text.empty() && IsMessageKey(def, column))
+	{
+		return cell::Integer(0);
+	}
+	return ReadCell(def.columns[column], text, names, line);
+}
+
 }
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command)
@@ -305,7 +315,7 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 				}
 				continue;
 			}
-			auto value = detail::ReadCell(column, text, names, line);
+			auto value = detail::ReadCell(def, columnOf[h], text, names, line);
 			if (!value)
 			{
 				return tl::make_unexpected(std::move(value.error()).with(label(line)));

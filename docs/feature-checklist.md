@@ -79,15 +79,15 @@ Whatever the loader checks, an author can know by reading the table [def promise
 - [x] Script conditions (anything with a wire, anything complicated) reach the host only through the loader's `condition(string_view)` function (§2), with no symbol table; native conditions (`a..b` bands, flag sets) are read by Tabular and never go through it [def Host interface, owner 2026-10-16]
 - [ ] Compile refuses any snippet it cannot prove halts; read-only snippets call only read-only functions; functions that take a script callback are refused [def Host interface; guard Rulings]
 - [x] Input resolution for every name Tabular does not own (wires are the host's) [def Host interface; cat §2.3] (`host_binding::resolve`, called once per machine input at `Bind`, returns an `input_getter` read with one indirect call per step; no symbol table)
-- [ ] Sinks for emitted commands and messages [def Host interface]
-- [~] A failing condition (raise, null path) holds the table for the step, reported once per (table, row) [arc §2.11; sr §6.3] (the hold is built: a condition that cannot answer, a NaN ranged input, an over-wide flag set or a getter that cannot answer leaves the clause unwritten, and clauses reading it hold too; the once-per-(table, row) report is slice 4, read from `instance::Answer`)
+- [x] Sinks for emitted commands and messages [def Host interface] (`host_binding::sink(instance, table, command)`, required by `Bind` when the machine emits; every answering `emit` clause hands it a view of its row's command after the step's swap, step then exit then entry; a message to another object or to self is a command, `(message ...)`, so the one sink carries both)
+- [x] A failing condition (raise, null path) holds the table for the step, reported once per (table, row) [arc §2.11; sr §6.3] (a condition that cannot answer, a NaN ranged input, an over-wide flag set, a key with no run or a getter that cannot answer leaves the clause unwritten, and clauses reading it hold too; `host_binding::report(instance, table, row, error)` hears each once per instance: a condition per (clause, scripted row), a bad input per (clause, input), a missing run per clause, a getter per input, extra message arguments once; a condition is asked once per evaluation and the report carries the host's own error from that asking; a cascaded hold is not reported, and a repeat allocates nothing)
 
 ## 6. Machines
 
 - [~] Definition (immutable, per bundle section) → Binding (per definition × object type: closures, resolved inputs, state layout) → Instance (per object: state vector, edge history) [def Lifetimes; cat §2.2] (built: `create_machine`, YAML `machines:`, `CheckMachine`, `Prepare` returning an immutable `Machine` that holds the versions it read and can say it is stale, `Bind` returning a shared `Binding` of one getter per input, and the snake_case `instance` holding the current and next state vectors; edge history waits for edges, slice 5)
 - [~] State vector declared in the definition, owned by the table, not mirrored in script; script reads it late-bound by name [sr §4.1; memory: no script mirror] (declared: hash columns with members and an initial member, int and double columns with an initial value; an instance holds it and `instance::State(column)` reads it by index; reading it by name from script is the host adapter's)
 - [x] Values write the *next* state vector, swapped in at the end of the step; next state always names a member, never computed from a state [def A row] (a step copies current to next, clauses write next, next becomes current; a written hash is a member by `Prepare`'s check)
-- [x] Transition tables and entry tables [def Structure] (ordinary clauses under `step` and `entry`; `Step` runs the step list, then the entry list once when a hash state column changed (an entry clause may not set one); `CreateInstance` runs create, then entry)
+- [x] Transition tables and entry tables [def Structure] (ordinary clauses under `step`, `exit` and `entry`; `Step` runs the step list, then, when a hash state column changed, the exit list keyed on the state being left (current) and the entry list on the one entered (next), entry's writes last (neither may set a hash state column); `CreateInstance` runs create, then entry, and no exit)
 - [ ] Bridges: a suffix command describing the steps between two states (?) [def Structure, Undecided; cat §2.1]
 - [ ] State-function table: a state maps to an ordinary host script function, which may suspend; the machine holds the state until it returns [def State functions]
 - [ ] Function-chain table: the chain of functions between two functions [def State functions]
@@ -99,9 +99,9 @@ Whatever the loader checks, an author can know by reading the table [def promise
 
 ## 7. Commands, messages, randomness
 
-- [~] Commands: the command column stores the s-expression text; enqueueing to a sink on pick is not built [def A row Suffix]
+- [x] Commands: the command column stores the s-expression text, handed to the host's sink when an `emit` clause answers [def A row Suffix]
 - [ ] Decide whether a consumer compiles its s-expression at bind, so a step enqueues a prebuilt record (?) [def Undecided]
-- [ ] A table absorbs a message, one at a time, in arrival order; which step is still open (?) [def Undecided]
+- [x] A table absorbs a message, one at a time, in arrival order [def Machines, Messages] (`Step` takes one `message{type, arguments}`, absorbed in that step; arrival order is the host's queue; a table keys on the type through a `domain: message` key whose blank cell is no message, a type with no run falls through to the blank run in `PickBest` and `Step` alike, the blank never leaks into a non-message key (a foreign-column domain from a message key drops it; a non-message key reading an earlier clause's message key is refused), extra arguments are reported once, and `instance::Absorbed()` tells the host whether to route the message to script)
 - [ ] A delayed message arriving after its state ended and was re-entered (?) [def Undecided]
 - [x] Deterministic randomness: counter-based draw from the host's seed, salted per draw site, no stored generator [def promise 4; cat §2.5] (`Draw`)
 - [ ] `random()` in a table snippet and in ordinary script use the same deterministic generator; `random(...)` inside a command (?) [def Undecided]
@@ -126,10 +126,10 @@ from are built; a test for one is a test of those. `[x]` when everything it foll
 - [x] No tie is ever ambiguous ← flags match breaks ties by row order (§3) [def Flag matching]
 - [x] Band gaps and overlaps are caught ← a gap fails the totality check (§4); an overlap is a shadowed row (§4) [c3 §5.12]; a gap is a totality refusal, a full overlap a dead row, a partial overlap priority within one owner; between owners, equal-flag overlaps are refused
 - [x] Tables run in DAG order within a step, so a phase → lookup → bridge chain settles in one step ← tables that feed each other form a checked DAG (§4) [def A row]; from clause order plus in-step reads of next and of earlier clauses' answers, with no settling loop
-- [~] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]; creation, entry and step run; a rows change is seen as `Machine::Stale`, and the re-`Prepare` plus `Rebind` it triggers is slice 6
+- [~] Triggers: at instance creation and on entering a state, every step, and when rows change ← entry and transition tables (§6) + reporting that rows changed (§1) [def Triggers]; creation, entry, exit and step run; a rows change is seen as `Machine::Stale`, and the re-`Prepare` plus `Rebind` it triggers is slice 6
 - [ ] Edges are machine state ← the Instance holds edge history (§6) + edge is a native condition kind (§3) [def Structure; cat §2.6]
 - [x] A seed per instance and step ← counter-based draws from the host's seed (§7) [def Host interface, promise 4]; `Step` takes the seed and a weighted clause draws at `DrawSite(machine, list, clause)`
-- [ ] Delays are a message to self with `:delay` ← no clock in Tabular (Rejected) + sinks for messages (§5) [def What it is not]
+- [x] Delays are a message to self with `:delay` ← no clock in Tabular (Rejected) + sinks for messages (§5) [def What it is not]; the grazer's panic entry emits `(message this "calm" :delay random(0.4, 1.0))` and the calm message, when the host delivers it, moves the brain
 
 ## Rejected
 

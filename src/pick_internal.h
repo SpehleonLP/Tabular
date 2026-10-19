@@ -8,6 +8,7 @@
 
 #include "tabular/pick.h"
 
+#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,10 @@ struct bad_input
 	bool     nan   = false;
 };
 bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs);
+
+// What a pick says of the input bad names (bad.index is an input), in the
+// interpreted picks' refusal and a machine step's report alike.
+ErrorContext BadInputError(table_def const& def, bad_input bad, std::span<cell const> inputs);
 
 // How well the flags R of a row or flag group match the input flags F, as a
 // best pick ranks them; larger is better: a full match (every flag of R in F),
@@ -68,20 +73,55 @@ enum class row_test : uint8_t
 };
 
 // Whether the row's script conditions hold for this_in; a row with none holds.
-// On Failed, a non-null error_out (empty on the way in) receives the host's
-// error with the table and row named. A null error_out is the step's path:
-// the host's error is dropped and nothing is built or added, so the test
-// allocates nothing Tabular's (a host message past small-string size
-// allocates on the host side). The interpreted picks pass one; slice 4's
-// report will too.
-row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext* error_out);
+// On Failed, error (empty on the way in) holds the host's error as the host
+// wrote it: nothing is added, so the test allocates nothing Tabular's (a host
+// message past small-string size allocates on the host side). Each condition
+// is asked once; whoever reports the failure names the table and row (the
+// interpreted picks always, a step the first time it reports that row).
+row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext& error);
 
 // The OR of an or table's output over its rows [first, last) that hold (every
 // band for its clamped input, then the script condition); 0 when none does.
-// None when a script condition could not answer, error_out as ScriptHolds.
-// The query's inputs must have passed FirstBadInput.
+// None when a script condition could not answer: error as ScriptHolds, and
+// failed_row set to that row. The query's inputs must have passed
+// FirstBadInput.
 std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size_t last, pick_query const& query,
-	ErrorContext* error_out);
+	ErrorContext& error, size_t& failed_row);
+
+// The index among def's keys of its message key (domain: message), or
+// UINT32_MAX when it has none.
+uint32_t MessageKeyOf(table_def const& def);
+
+// R3's fall-through, a property of the table and so of every lookup of its
+// runs, interpreted or prepared: find(keys); when that misses (missed says so)
+// and the message key carries a type, find once more with the same keys and 0
+// (no message) in the message key's slot, the blank run. The retry's keys are
+// written to scratch, which may be keys' own storage: then a retry that hits
+// leaves the blank there (which is how a step tells a fall-through from an
+// absorbed message), and one that misses puts the type back, so a report
+// names the key as it came. scratch is as wide as keys.
+template<typename Find, typename Missed>
+auto FindFallingThrough(std::span<cell const> keys, std::span<cell> scratch, uint32_t messageKey, Find const& find,
+	Missed const& missed)
+{
+	auto found = find(keys);
+	if (messageKey == UINT32_MAX || keys[messageKey].i == 0 || !missed(found))
+	{
+		return found;
+	}
+	cell const type = keys[messageKey];
+	if (scratch.data() != keys.data())
+	{
+		std::copy(keys.begin(), keys.end(), scratch.begin());
+	}
+	scratch[messageKey] = cell::Integer(0);
+	found = find(std::span<cell const>(scratch));
+	if (missed(found))
+	{
+		scratch[messageKey] = type;
+	}
+	return found;
+}
 
 // The row of the weighted table's rows [first, last) the point
 // DrawUnit(Draw(seed, site)) * total falls in, the run laid end to end by

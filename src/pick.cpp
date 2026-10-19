@@ -5,8 +5,11 @@
 #include "tabular/draw.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <span>
 #include <utility>
+#include <vector>
 
 namespace tabular
 {
@@ -47,26 +50,34 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 			" inputs; the table declares ", def.inputs.size()));
 	}
 	detail::bad_input const bad = detail::FirstBadInput(def, query.inputs);
-	if (bad.index != UINT32_MAX && bad.nan)
-	{
-		return tl::make_unexpected(ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
-			"' is NaN; a ranged input is clamped into its range, which has no place for it"));
-	}
 	if (bad.index != UINT32_MAX)
 	{
-		return tl::make_unexpected(ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
-			"' is a flag set, a 32-bit value widened without sign; got ", query.inputs[bad.index].i));
+		return tl::make_unexpected(detail::BadInputError(def, bad, query.inputs));
 	}
 	if (def.key_count == 0)
 	{
 		return row_range{0, version.RowCount()};
 	}
-	return version.FindOrdered(query.keys);
+	uint32_t const messageKey = detail::MessageKeyOf(def);
+	// The retry's keys, on the stack for any table of up to kInlineKeys keys:
+	// a pick allocates nothing for the fall-through, as a step does not.
+	constexpr size_t           kInlineKeys = 16;
+	std::array<cell, kInlineKeys> inlineKeys;
+	std::vector<cell>          wideKeys;
+	std::span<cell>            scratch(inlineKeys.data(), std::min(query.keys.size(), kInlineKeys));
+	if (messageKey != UINT32_MAX && query.keys.size() > kInlineKeys)
+	{
+		wideKeys.resize(query.keys.size());
+		scratch = wideKeys;
+	}
+	return detail::FindFallingThrough(query.keys, scratch, messageKey,
+		[&](std::span<cell const> keys) { return version.FindOrdered(keys); },
+		[](tl::expected<row_range, ErrorContext> const& run) { return run && run->first == run->last; });
 }
 
 // Bands first, so a script runs only for a row whose native conditions hold.
-// Floats, as animation's phase bands compare. error_out as ScriptHolds.
-detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query const& query, ErrorContext* error_out)
+// Floats, as animation's phase bands compare. error as ScriptHolds.
+detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query const& query, ErrorContext& error)
 {
 	table_def const&  def  = version_access::Def(version);
 	table_rows const& rows = version_access::Rows(version);
@@ -83,7 +94,14 @@ detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query co
 			return detail::row_test::Misses;
 		}
 	}
-	return detail::ScriptHolds(version, row, query.this_in, error_out);
+	return detail::ScriptHolds(version, row, query.this_in, error);
+}
+
+// A row's failure, as the interpreted picks refuse with it: the host's error,
+// naming the table and row.
+ErrorContext RowError(TableVersion const& version, size_t row, ErrorContext&& error)
+{
+	return std::move(error).with("table '", version_access::Def(version).name, "' row ", row);
 }
 
 // The interpreted picks' test of a row: a failure is an error naming the
@@ -91,10 +109,10 @@ detail::row_test RowHolds(TableVersion const& version, size_t row, pick_query co
 tl::expected<bool, ErrorContext> CheckRow(TableVersion const& version, size_t row, pick_query const& query)
 {
 	ErrorContext           error;
-	detail::row_test const test = RowHolds(version, row, query, &error);
+	detail::row_test const test = RowHolds(version, row, query, error);
 	if (test == detail::row_test::Failed)
 	{
-		return tl::make_unexpected(std::move(error));
+		return tl::make_unexpected(RowError(version, row, std::move(error)));
 	}
 	return test == detail::row_test::Holds;
 }
@@ -132,7 +150,18 @@ bad_input FirstBadInput(table_def const& def, std::span<cell const> inputs)
 	return {};
 }
 
-row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext* error_out)
+ErrorContext BadInputError(table_def const& def, bad_input bad, std::span<cell const> inputs)
+{
+	if (bad.nan)
+	{
+		return ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
+			"' is NaN; a ranged input is clamped into its range, which has no place for it");
+	}
+	return ErrorContext("input '", def.inputs[bad.index].name, "' of '", def.name,
+		"' is a flag set, a 32-bit value widened without sign; got ", inputs[bad.index].i);
+}
+
+row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_in, ErrorContext& error)
 {
 	table_def const&  def  = version_access::Def(version);
 	table_rows const& rows = version_access::Rows(version);
@@ -142,16 +171,10 @@ row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_i
 		{
 			continue;
 		}
-		ErrorContext  dropped;
-		ErrorContext& error = error_out ? *error_out : dropped;
-		bool const    holds = CallCondition(rows, row, c, this_in, error);
+		bool const holds = CallCondition(rows, row, c, this_in, error);
 		// An error may arrive as context alone, from a closure wrapping another's.
 		if (!error.empty())
 		{
-			if (error_out)
-			{
-				error_out->context.push_back(cc(std::string("table '"), def.name, "' row ", row));
-			}
 			return row_test::Failed;
 		}
 		if (!holds)
@@ -163,7 +186,7 @@ row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_i
 }
 
 std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size_t last, pick_query const& query,
-	ErrorContext* error_out)
+	ErrorContext& error, size_t& failed_row)
 {
 	table_def const&  def  = version_access::Def(version);
 	table_rows const& rows = version_access::Rows(version);
@@ -171,9 +194,10 @@ std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size
 	uint32_t          bits = 0;
 	for (size_t r = first; r < last; ++r)
 	{
-		row_test const test = RowHolds(version, r, query, error_out);
+		row_test const test = RowHolds(version, r, query, error);
 		if (test == row_test::Failed)
 		{
+			failed_row = r;
 			return std::nullopt;
 		}
 		if (test == row_test::Holds)
@@ -182,6 +206,20 @@ std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size
 		}
 	}
 	return bits;
+}
+
+uint32_t MessageKeyOf(table_def const& def)
+{
+	// Domains are one per key column, in column order, as a picked table's
+	// keys are.
+	for (uint32_t k = 0; k < def.domains.size(); ++k)
+	{
+		if (def.domains[k].kind == domain_kind::Message)
+		{
+			return k;
+		}
+	}
+	return UINT32_MAX;
 }
 
 size_t DrawRow(TableVersion const& version, size_t first, size_t last, uint64_t seed, uint64_t site)
@@ -345,10 +383,11 @@ tl::expected<uint32_t, ErrorContext> PickOr(TableVersion const& version, pick_qu
 		return tl::make_unexpected(std::move(run.error()));
 	}
 	ErrorContext error;
-	auto         bits = detail::OrOfRows(version, run->first, run->last, query, &error);
+	size_t       failed = SIZE_MAX;
+	auto         bits   = detail::OrOfRows(version, run->first, run->last, query, error, failed);
 	if (!bits)
 	{
-		return tl::make_unexpected(std::move(error));
+		return tl::make_unexpected(RowError(version, failed, std::move(error)));
 	}
 	return *bits;
 }

@@ -213,11 +213,22 @@ the column's `domain:`:
 - a foreign column (`domain: {table: display, column: display}`): the distinct values that
   column holds in the other table's current rows, read-only or mutable. A missing table or
   column, or a column of another type than the key, is refused. Tables whose domains come from
-  other tables form a DAG; a cycle, a table naming itself included, is refused naming it.
+  other tables form a DAG; a cycle, a table naming itself included, is refused naming it. A
+  foreign column that is the other table's message key gives its types without its 0: the
+  blank is no message, not a type the dependent key could name (and a hash 0 is refused in its
+  CSV), so the dependent is total over the real types alone.
 - `rows` (`domain: rows`): the key's own table's rows name its values.
-- A machine clause's output is the fourth kind. It is not declared on the table: a machine's
+- `message` (`domain: message`): the key is the type of the message a step is given (see
+  Machines, Messages), on a hash key, at most one per table. It contributes the blank, 0 (no
+  message), so every tuple of the other keys demands a blank run; a run keyed on a type is in
+  the domain when its blank twin is (so it is checked because it is there), and an orphan when
+  its other keys are outside theirs. A blank CSV cell in a message key is that 0, in a rows file
+  or a pivoted one; every other blank value cell is still refused. The fall-through is the
+  table's: every lookup of its runs, `PickBest`'s as much as a machine step's, retries a type
+  with no run once with 0 in the message key, and only a miss of both finds no run.
+- A machine clause's output is the fifth kind. It is not declared on the table: a machine's
   `Prepare` closes a clause's key by its source (see Machines), and the table keeps one of the
-  three kinds above for its own loads.
+  four kinds above for its own loads.
 
 A key's domain is a set of key tuples. The key columns declared `rows` together contribute
 the distinct joint sub-tuples the table's rows hold in them, never a product of each column's
@@ -295,7 +306,13 @@ clause reading, any column but its output, and any `emit` (several rows may hold
 clause setting a hash state column (entry runs once per step, after the step list, so a state
 an entry write moved to would get no entry of its own and its R6 state function would never
 start: a transition belongs in the step list; int and double writes are data and stay
-allowed); a hash
+allowed), and an `exit` clause setting one (exit runs once the step list has chosen a state,
+keyed on the one being left, so its write would overrule that choice); a message whose type is
+not a declared hash input, an argument that is not a declared input or is the type or repeated,
+or arguments with no type; a key that reads the message type on a key the table does not
+declare `domain: message`, a message key bound to anything but the message type, and a key that
+is not a message key reading an earlier clause's message-key column (`clause.N.<column>`: that
+clause can answer from its blank run with 0, no message, which only a message key holds); a hash
 state with no members, a duplicate member, or an initial value that is not a member. Both the
 YAML front end and the definition build name a clause the same way: `machine 'grazer' step
 clause 0 (table 'grazer_brain')`. In YAML, members
@@ -370,8 +387,11 @@ id, and the instance keeps no pointer that a moved host object would leave dangl
 the binding is dropped. `Bind` refuses, naming the machine and the input, when `resolve` is
 missing (a machine with no inputs needs none), refuses an input, or returns a getter with no
 `read`; it adopts every getter `resolve` returns, so a refusal releases those already
-returned. The sink (P12) and report (P15) will be further members of `host_binding`. A
-binding keeps its `Machine`, and so the versions it was proved against: a store change never
+returned. Message inputs (below) are filled by `Step`, not by a getter, and are never
+resolved. `host_binding::sink(instance, table, command)` takes every emitted command (P12);
+`Bind` refuses a machine with an emitting clause when it is missing, naming the clause.
+`host_binding::report(instance, table, row, error)` takes a failure once (P15); it is optional,
+and without it holds still hold, silently. A binding keeps its `Machine`, and so the versions it was proved against: a store change never
 reaches a running binding. The host asks `binding.machine().Stale(store)` (an instance gives
 its `binding()`), and a stale machine is prepared again and its instances rebound (slice 6).
 
@@ -380,20 +400,25 @@ holds its binding, its id, the current state vector, the next one, and what each
 answered (`Answer(list, clause)`: `Answered` with the row picked, or for an or clause its OR;
 `NoRun`, `Failed` or `SourceHeld` when it held; `NotRun` when its list did not run). Every
 buffer is sized at creation, so **a step allocates nothing**, holds included: a step builds
-no `ErrorContext` of its own and adds no context to a getter's or a condition's failure, which
-it drops (the interpreted picks, and slice 4's report, are the callers that name the table and
-row). Tests count the global `operator new` calls of steps that answer, raise in a script
-condition, see NaN, lose a getter, find no run, and run an or → best → weighted chain: zero.
+no error of its own and adds no context to a getter's or a condition's failure, except at the
+first occurrence of a failure the instance reports (below), whose report carries the host's
+error from the step's one asking. The interpreted picks, and the report, are the callers that
+name the table and row. Tests count the global `operator new` calls of steps that answer,
+raise in a script condition, see NaN, lose a getter, find no run, run an or → best → weighted
+chain, emit to a sink, take a message (absorbed or falling through), run exit, and repeat a
+reported failure (a raise, a NaN, a key with no run and a lost getter, each with `report`
+set): zero, after a first round in which each report builds its error once.
 A host's own failure message longer than the small-string size allocates on the host's side,
 when the host writes it; Tabular adds nothing. `CreateInstance(binding, id, seed, self)`
 returns the instance (it cannot be refused: a clause that cannot answer holds, as in a step),
 with every state column at its initial value, after running the `create` list and the
 `entry` list as a step runs a list (creation enters the initial state).
 
-**`Step(instance, self, seed)`** runs the prepared query:
+**`Step(instance, self, seed, message)`** runs the prepared query:
 
 1. Every input is read once, so every clause of the step sees one value of it. A getter that
-   fills `error_out` leaves its input without a value this step.
+   fills `error_out` leaves its input without a value this step. The message's type and
+   arguments are inputs too, read from the `message` passed (default: none).
 2. Next is set to a copy of current. **A column no clause writes holds** because of this copy,
    and a clause that holds writes nothing; neither needs a path of its own.
 3. The `step` clauses run in order. Each reads its sources: a state column from **next**, as
@@ -417,22 +442,61 @@ with every state column at its initial value, after running the `create` list an
    flag set wider than 32 bits), when its key tuple has no run (`NoRun`: an input-bound key's
    value outside the domain `Prepare` proved), or when a script condition cannot answer
    (`Failed`). Inputs are checked before the run is found, as a pick checks its query first.
-   Slice 4 reports a failing pick once per (table, row) from these answers (P15).
+   A clause keyed on a message type with no run of its own retries once with the blank, 0
+   (the fall-through); only a miss of both is `NoRun`.
 5. **Entry.** "Entered" means a hash state column of next differs from current at the end of
    the step list, so A → B → A within one step enters nothing. Then the `entry` list runs once
    against next, its writes landing on top of the step list's (so across lists, step writes,
    then entry writes). An entry clause may not set a hash state column (the definition build
    refuses it), so entry never enters again. Int and double state columns are data the machine
-   keeps, not states: a change to one enters nothing, and entry may write them. Slice 4's exit
-   list (R6) will run here, before entry, on the same test.
+   keeps, not states: a change to one enters nothing, and entry may write them.
+   **Exit** (R6) runs on the same test, before entry: its clauses read state from **current**,
+   the state being left, and write next, so where exit and entry write one column entry's
+   write lands last. When nothing was entered both lists answer `NotRun`. Creation runs no
+   exit: nothing is left.
 6. Next becomes current (the two vectors are swapped).
+7. **Emits.** Every clause of the step, exit and entry lists (in that order, each in clause
+   order) that answered and has an `emit` hands its row's command to the sink, a view into the
+   version the binding holds. It happens after the swap, so a sink that reads the instance
+   sees the step's state as current. A held clause emits nothing. Creation emits the create
+   list, then entry.
+
+**Reports (P15).** A failure reaches `report` once per instance: a getter failure once per
+input (`table` is `kNoTable`, `row` `kNoRow`, the error the getter's, naming the machine and
+input); a message carrying more arguments than the machine declares once (`kNoTable`,
+`kNoRow`, naming the machine and both counts); a bad table input (NaN, an over-wide flag set)
+once per (clause, input); a key with no run once per clause, naming the key as it came (a
+message type, not the blank it retried); a script condition that cannot answer once per
+(clause, row), `row` being the failing row. A hold caused by another hold (`SourceHeld`) is not
+reported: its cause was. The error names the clause as the definition build does. A condition
+is asked **once** per evaluation: the step passes its own `ErrorContext` down to the row's
+test, and the report carries the host's error from that one asking, with the table, row and
+clause added only when it is the first report. The memory is a bit set in the instance, sized
+at creation: one bit per machine input, one for extra arguments, and per clause one for no
+run, one per table input and one per row that has a script condition (`Bind` ranks those rows
+per clause; only they can fail, so a large table of unscripted rows costs nothing, and a
+weighted table, which has no conditions, no row bits). Only a first occurrence builds an
+error, so a repeat allocates nothing.
+
+**Messages (R3).** A machine takes one message per step: `message: {type: <hash input>,
+arguments: [<input>, ...]}` in YAML, `create_machine::message` in the builder. The type and
+the arguments are machine inputs filled from `Step`'s `message{type, arguments}`, not from
+getters. Arguments are positional slots every message type shares; a type's own arity is not
+declared. An argument not passed reads 0, the value every argument has on a step with no
+message, and is no failure. More arguments than the machine declares still step (a step cannot
+be refused), the extra ones unread, and the instance reports it once. 0 is no message. A
+table keys on it through a `domain: message` key, and a clause must bind that key to the type,
+both ways. A type with no run falls through to the blank run, as in `PickBest`. `instance::Absorbed()` says the
+last step's message was answered by a run keyed on its type, so the host can route a message
+nothing absorbed to script; a fall-through, or a clause that held, absorbs nothing. Passing a
+message allocates nothing: the arguments are a span the host owns for the call.
 
 A weighted clause's draw site is `DrawSite(machine name, list, clause)`: the machine name's
 CityHash32 in the high word, then the list and the clause's position. Two weighted clauses in
 one step, or two machines on one object stepped with one seed, draw different numbers, and a
 reload that keeps the names and places keeps the sites; the host varies the seed per instance
-and step. The picked row of every clause stays readable through `Answer`, which is where slice
-4 takes an `emit` clause's suffix for the sink.
+and step. The picked row of every clause stays readable through `Answer`, which is where an
+`emit` clause's command comes from.
 
 The interpreted picks are the oracle: randomized parity tests step the spec's grazer (keys from
 a state and a message input, a ranked flags input, scripted rows), the sketch's grazer (two
@@ -545,7 +609,9 @@ The host supplies:
   function passed to it. That is the script engine's problem, not Tabular's.
 - **Input resolution** for every name a table reads that Tabular does not own (built: a
   machine's inputs, through `host_binding::resolve` once per input at `Bind`; see Machines).
-- **Sinks** for emitted commands and messages.
+- **A sink** for emitted commands (`host_binding::sink`, required when the machine emits) and,
+  optionally, **a report** for failures (`host_binding::report`); see Machines.
+- **The message** a step is given, if any (`Step`'s `message`).
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
 - **Running state functions:** start a named function for an instance, report when it returns,
   and abort it.
@@ -688,8 +754,6 @@ These are open, not missing. Each is decided by editing this file.
 - The snapshot rule: wires read other entities' **committed** state as of
   the start of the step (needed for parallel steps; census §8 strain 5).
 - A delayed message that arrives after its state has already ended and been re-entered.
-- How a table absorbs a message, and in which step. (Settled: it can, one at a time, in
-  arrival order.)
 - The display relations: one relation with several queries, or several relations.
 - How a host-compiled snippet sees wires. Leaning (owner): free wire names become parameters,
   and the wirer's closure captures and forces them. See the shape note §3.

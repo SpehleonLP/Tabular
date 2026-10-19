@@ -35,12 +35,24 @@ struct key_domains
 {
 	std::vector<uint8_t>              overRows;   // per key column
 	std::vector<std::vector<int64_t>> values;     // per key column not over its rows: sorted, distinct
+	// The message key, if any: its values are {0}, the blank, and ResolveDomain
+	// adds every run the rows name whose other keys are in the domain.
+	uint32_t                          messageKey = UINT32_MAX;
 	// The domain: the distinct sub-tuples the rows name in the columns over
-	// their rows, crossed with every other column's values. count tuples of one
-	// value per key, end to end, sorted as Publish sorts rows (each key a
-	// signed int64, key 0 most significant) and distinct.
+	// their rows, crossed with every other column's values (and the message
+	// key's runs added). count tuples of one value per key, end to end, sorted
+	// as Publish sorts rows (each key a signed int64, key 0 most significant)
+	// and distinct.
 	size_t               count = 0;
 	std::vector<int64_t> tuples;
+
+	// keys columns, none yet over its rows or a message key.
+	void Reset(size_t keys)
+	{
+		overRows.assign(keys, 0);
+		values.assign(keys, {});
+		messageKey = UINT32_MAX;
+	}
 };
 
 // Fills domains' tuples from its per-column sources and rows, the version the
@@ -52,11 +64,14 @@ void ResolveDomain(table_rows const& rows, key_domains& domains);
 void ColumnValues(table_rows const& rows, uint32_t column, std::vector<int64_t>& out);
 
 // Key column k of domains as declared: its members, the values of another
-// table's column (foreign, that table's rows as the caller reads them; read
-// only for a Column domain), or over its own rows. Load and a machine's
-// Prepare both start a key from here; Prepare then overrides the keys its
-// sources close.
-void DeclaredDomain(domain_def const& declared, table_rows const* foreign, uint32_t k, key_domains& domains);
+// table's column (foreignDef and foreign, that table and its rows as the
+// caller reads them; read only for a Column domain), over its own rows, or a
+// message key. A column that is the other table's message key gives its
+// types without its 0: that is no message, not a type the dependent key
+// names. Load and a machine's Prepare both start a key from here; Prepare
+// then overrides the keys its sources close.
+void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, table_rows const* foreign, uint32_t k,
+	key_domains& domains);
 
 // A best table's layout axes: per axis, the input it reads, one per ranged
 // input a band reads, in input order.

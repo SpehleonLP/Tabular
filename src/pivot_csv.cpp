@@ -217,8 +217,7 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 		std::vector<cell> keys;
 		for (uint32_t k = 0; k < def.key_count; ++k)
 		{
-			column_def const& keyColumn = def.columns[def.order[k]];
-			auto key = ReadCell(keyColumn, file.cell(k, r), hashed, line);
+			auto key = ReadCell(def, def.order[k], file.cell(k, r), hashed, line);
 			if (!key)
 			{
 				return tl::make_unexpected(std::move(key.error()).with(label(line)));

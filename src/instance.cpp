@@ -5,6 +5,7 @@
 #include "pick_internal.h"
 #include "relation_internal.h"
 
+#include "Support/strings.h"
 #include "cityhash/src/city.h"
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <cassert>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 
 namespace tabular
@@ -29,6 +31,23 @@ void ReleaseGetters(std::span<input_getter const> getters)
 			g.release(g.data);
 		}
 	}
+}
+
+// Whether any condition cell of row holds a script: only such a row can fail
+// to answer, so only it has a report bit.
+bool RowIsScripted(TableVersion const& version, uint32_t row)
+{
+	table_def const&  def  = version_access::Def(version);
+	table_rows const& rows = version_access::Rows(version);
+	for (uint32_t c = 0; c < def.columns.size(); ++c)
+	{
+		if (def.columns[c].type == column_type::Condition
+			&& rows.conditions[size_t(row) * rows.conditionCount + rows.slot[c]]->get().function != nullptr)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 // The getters resolve has returned while Bind runs: released with it on a
@@ -56,11 +75,29 @@ struct staged_getters
 struct Binding::Data
 {
 	counted_ptr<Machine const>                         machine;
-	immutable_array<input_getter>                      getters;   // per machine input
+	// Per machine input; an input the message carries has none (no read).
+	immutable_array<input_getter>                      getters;
+	std::function<void(uint64_t, uint32_t, std::string_view)>             sink;
+	std::function<void(uint64_t, uint32_t, size_t, ErrorContext const&)>  report;
 	// Per list: where its clauses' answers start in an instance's answers,
 	// then one end; and per clause, its weighted draw site.
 	std::array<uint32_t, kTriggerCount + 1>            answerStart{};
 	std::array<immutable_array<uint64_t>, kTriggerCount> sites;
+	// An instance's report-once bits: one per machine input (its getter
+	// failed), one for a message carrying more arguments than the machine
+	// declares (the bit right after the inputs'), then per clause, from its
+	// start: no run, one per table input (refused), one per version row that
+	// has a script condition (it could not answer). Only a scripted row can
+	// fail, so a clause costs 1 + its table inputs + its scripted rows: a
+	// 1000-row table with 3 scripted rows and 2 inputs takes 6 bits, not 1003;
+	// a weighted table has no conditions and takes none for rows.
+	std::array<immutable_array<uint32_t>, kTriggerCount> reportStart;
+	// Per list, per clause, where its rows' ranks start in rowRank; rowRank is
+	// each clause's version rows in order, a scripted row's rank among the
+	// clause's scripted rows, UINT32_MAX for a row with no script condition.
+	std::array<immutable_array<uint32_t>, kTriggerCount> rankStart;
+	std::array<immutable_array<uint32_t>, kTriggerCount> rowRank;
+	size_t                                             reportBits = 0;
 	// The widest any clause needs: keys, table inputs, layout axes.
 	size_t                                             maxKeys   = 0;
 	size_t                                             maxInputs = 0;
@@ -94,9 +131,11 @@ struct instance_access
 	static std::vector<cell>&          Inputs(instance& i) { return i._inputs; }
 	static std::vector<uint8_t>&       InputRead(instance& i) { return i._inputRead; }
 	static std::vector<clause_answer>& Answers(instance& i) { return i._answers; }
+	static std::vector<uint64_t>&      Reported(instance& i) { return i._reported; }
 	static std::vector<cell>&          Keys(instance& i) { return i._keys; }
 	static std::vector<cell>&          Given(instance& i) { return i._given; }
 	static std::vector<float>&         Axes(instance& i) { return i._axes; }
+	static bool&                       Absorbed(instance& i) { return i._absorbed; }
 };
 
 Binding::Binding(std::unique_ptr<Data>&& data) : _data(std::move(data)) {}
@@ -132,7 +171,8 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	detail::machine_def const&  def      = prepared.def;
 	auto data     = std::make_unique<binding_access::Data>();
 	data->machine = machine;
-	if (!def.inputs.empty() && !host.resolve)
+	bool const needsResolve = std::find(def.carried.begin(), def.carried.end(), detail::kFromGetter) != def.carried.end();
+	if (needsResolve && !host.resolve)
 	{
 		return tl::make_unexpected(ErrorContext("machine '", def.name,
 			"' has inputs, and the host binding has no resolve to supply them"));
@@ -141,8 +181,14 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	// releases it with the rest when staged is dropped.
 	staged_getters staged;
 	staged.getters.reserve(def.inputs.size());
-	for (input_def const& in : def.inputs)
+	for (size_t i = 0; i < def.inputs.size(); ++i)
 	{
+		input_def const& in = def.inputs[i];
+		if (def.carried[i] != detail::kFromGetter)
+		{
+			staged.getters.push_back(input_getter{});
+			continue;
+		}
 		auto getter = host.resolve(in.name);
 		if (!getter)
 		{
@@ -156,24 +202,64 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 		}
 	}
 
+	// A command nobody receives is a state function never started, so a
+	// machine that emits needs the sink; one that emits nothing does not.
+	if (!host.sink)
+	{
+		for (size_t list = 0; list < kTriggerCount; ++list)
+		{
+			for (size_t i = 0; i < def.lists[list].size(); ++i)
+			{
+				if (def.lists[list][i].emit != UINT32_MAX)
+				{
+					return tl::make_unexpected(ErrorContext("the clause emits, and the host binding has no sink to take it")
+						.with(detail::ClausePlace(def.name, list, i,
+							version_access::Def(*prepared.lists[list][i].version).name)));
+				}
+			}
+		}
+	}
+
 	uint32_t              answers = 0;
+	size_t                bits    = def.inputs.size() + 1;   // the getters, then extra arguments
 	std::vector<uint64_t> sites;
+	std::vector<uint32_t> starts;
+	std::vector<uint32_t> rankStarts;
+	std::vector<uint32_t> ranks;
 	for (size_t list = 0; list < kTriggerCount; ++list)
 	{
 		data->answerStart[list] = answers;
 		std::vector<detail::resolved_clause> const& clauses = def.lists[list];
 		sites.clear();
+		starts.clear();
+		rankStarts.clear();
+		ranks.clear();
 		for (uint32_t i = 0; i < clauses.size(); ++i)
 		{
+			detail::prepared_clause const& pc = prepared.lists[list][i];
 			sites.push_back(DrawSite(def.name, static_cast<trigger>(list), i));
+			starts.push_back(static_cast<uint32_t>(bits));
+			rankStarts.push_back(static_cast<uint32_t>(ranks.size()));
+			uint32_t scripted = 0;
+			for (uint32_t r = 0; r < pc.version->RowCount(); ++r)
+			{
+				ranks.push_back(RowIsScripted(*pc.version, r) ? scripted++ : UINT32_MAX);
+			}
+			bits += 1 + clauses[i].inputs.size() + scripted;
 			data->maxKeys   = std::max(data->maxKeys, clauses[i].keys.size());
 			data->maxInputs = std::max(data->maxInputs, clauses[i].inputs.size());
-			data->maxAxes   = std::max(data->maxAxes, prepared.lists[list][i].runs.layout.dims);
+			data->maxAxes   = std::max(data->maxAxes, pc.runs.layout.dims);
 		}
-		data->sites[list] = immutable_array<uint64_t>::FromArray(sites.data(), sites.size());
+		data->sites[list]       = immutable_array<uint64_t>::FromArray(sites.data(), sites.size());
+		data->reportStart[list] = immutable_array<uint32_t>::FromArray(starts.data(), starts.size());
+		data->rankStart[list]   = immutable_array<uint32_t>::FromArray(rankStarts.data(), rankStarts.size());
+		data->rowRank[list]     = immutable_array<uint32_t>::FromArray(ranks.data(), ranks.size());
 		answers += static_cast<uint32_t>(clauses.size());
 	}
 	data->answerStart[kTriggerCount] = answers;
+	data->reportBits                 = bits;
+	data->sink                       = std::move(host.sink);
+	data->report                     = std::move(host.report);
 	data->getters                    = staged.Adopt();
 	return binding_access::Make(std::move(data));
 }
@@ -189,15 +275,19 @@ using detail::resolved_source;
 // out by CreateInstance so nothing here allocates.
 struct list_run
 {
-	binding_access::Data const&               binding;
+	binding_access::Data const&        binding;
 	machine_access::Data const&        machine;
 	std::vector<cell>&                 next;
+	std::vector<cell> const&           state;     // what a State source reads: next, or current for exit
 	std::vector<cell> const&           inputs;
 	std::vector<uint8_t> const&        inputRead;
 	std::span<clause_answer>           answers;   // this list's
+	std::vector<uint64_t>&             reported;
 	std::vector<cell>&                 keys;
 	std::vector<cell>&                 given;
 	std::vector<float>&                axes;
+	bool&                              absorbed;
+	uint64_t                           id;
 	void const*                        self;
 	uint64_t                           seed;
 	size_t                             list;
@@ -230,7 +320,7 @@ bool ReadSources(list_run const& run, std::span<resolved_source const> sources, 
 		switch (from.kind)
 		{
 		case source_kind::State:
-			out[s] = run.next[from.index];
+			out[s] = run.state[from.index];
 			break;
 		case source_kind::Input:
 			if (!run.inputRead[from.index])
@@ -294,8 +384,8 @@ size_t FindTuple(prepared_clause const& clause, std::span<cell const> keys)
 }
 
 // What a best clause's laid-out pick found: Answered with its row, NoRun when
-// every row tried is scripted and none holds, Failed when a script condition
-// could not answer.
+// every row tried is scripted and none holds, Failed with the row whose script
+// condition could not answer.
 struct laid_pick
 {
 	clause_outcome outcome = clause_outcome::NoRun;
@@ -305,7 +395,7 @@ struct laid_pick
 // The first row of group g's list for the input point that holds. The point's
 // cell is found per axis by binary search over the group's cuts.
 laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout, size_t g,
-	std::span<float const> point, void const* self)
+	std::span<float const> point, void const* self, ErrorContext& error)
 {
 	size_t const dims = layout.dims;
 	size_t       cell = 0;
@@ -325,10 +415,10 @@ laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout
 	for (uint32_t k = layout.listStart[cell]; k < layout.listStart[cell + 1]; ++k)
 	{
 		uint32_t const   row  = layout.lists[k];
-		detail::row_test test = detail::ScriptHolds(version, row, self, nullptr);
+		detail::row_test test = detail::ScriptHolds(version, row, self, error);
 		if (test == detail::row_test::Failed)
 		{
-			return laid_pick{clause_outcome::Failed};
+			return laid_pick{clause_outcome::Failed, row};
 		}
 		if (test == detail::row_test::Holds)
 		{
@@ -345,7 +435,7 @@ laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout
 // rank alone orders them. An unranked table has one group, flags 0, so it is
 // the last-tried group and nothing else.
 laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell const> given, std::vector<float>& axes,
-	void const* self)
+	void const* self, ErrorContext& error)
 {
 	TableVersion const&        version = *clause.version;
 	table_def const&           def     = version_access::Def(version);
@@ -382,7 +472,7 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 		{
 			break;
 		}
-		laid_pick const picked = TryGroup(version, layout, best, point, self);
+		laid_pick const picked = TryGroup(version, layout, best, point, self, error);
 		if (picked.outcome != clause_outcome::NoRun)
 		{
 			return picked;
@@ -394,11 +484,61 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 	{
 		return laid_pick{};
 	}
-	return TryGroup(version, layout, fallback, point, self);
+	return TryGroup(version, layout, fallback, point, self, error);
+}
+
+// The report-once memory: whether failure bit has been reported by this
+// instance, marking it if not. Only the first occurrence reaches the host, so
+// only it builds an error.
+bool FirstReport(std::vector<uint64_t>& reported, size_t bit)
+{
+	uint64_t&      word = reported[bit / 64];
+	uint64_t const mask = uint64_t(1) << (bit % 64);
+	if ((word & mask) != 0)
+	{
+		return false;
+	}
+	word |= mask;
+	return true;
+}
+
+// The one place a clause's hold reaches the host: once per bit, the error
+// built only then, naming the clause after what failed.
+template<typename Build>
+void ReportHold(list_run const& run, size_t index, size_t bit, size_t row, Build const& build)
+{
+	if (!FirstReport(run.reported, bit) || !run.binding.report)
+	{
+		return;
+	}
+	resolved_clause const& rc    = run.machine.def.lists[run.list][index];
+	std::string_view const table = version_access::Def(*run.machine.lists[run.list][index].version).name;
+	run.binding.report(run.id, rc.table, row,
+		build().with(detail::ClausePlace(run.machine.def.name, run.list, index, table)));
+}
+
+std::string KeyText(std::span<cell const> keys)
+{
+	std::string text;
+	for (cell const& k : keys)
+	{
+		text = cc(text, text.empty() ? "" : ", ", k.i);
+	}
+	return text;
+}
+
+// The report of a row whose script condition could not answer: the host's
+// error from the step's one asking, naming the table and row. Built only the
+// first time the row is reported.
+ErrorContext ConditionError(TableVersion const& version, size_t row, ErrorContext&& error)
+{
+	return std::move(error).with("table '", version_access::Def(version).name, "' row ", row);
 }
 
 // Runs one clause: its sources, its run, its pick, then its sets into next.
-// A clause that cannot answer writes nothing and says why in its answer.
+// A clause that cannot answer writes nothing, says why in its answer, and
+// reports it once (a source held by an earlier hold or a failed getter was
+// reported where that hold began).
 clause_answer RunClause(list_run const& run, size_t index)
 {
 	resolved_clause const& rc = run.machine.def.lists[run.list][index];
@@ -407,6 +547,16 @@ clause_answer RunClause(list_run const& run, size_t index)
 	table_def const&       def     = version_access::Def(version);
 	std::span<cell const>  keys(run.keys.data(), rc.keys.size());
 	std::span<cell const>  given(run.given.data(), rc.inputs.size());
+	size_t const           bits = run.binding.reportStart[run.list][index];
+	// A scripted row's report bit, past the no-run and table-input bits.
+	auto rowBit = [&](size_t row)
+	{
+		uint32_t const rank = run.binding.rowRank[run.list][run.binding.rankStart[run.list][index] + row];
+		assert(rank != UINT32_MAX && "only a scripted row fails to answer");
+		return bits + 1 + rc.inputs.size() + rank;
+	};
+	// The host's error, from the one asking of the failing row's condition.
+	ErrorContext           error;
 
 	clause_answer answer;
 	if (!ReadSources(run, rc.keys, run.keys) || !ReadSources(run, rc.inputs, run.given))
@@ -415,15 +565,26 @@ clause_answer RunClause(list_run const& run, size_t index)
 		return answer;
 	}
 	// Inputs before the run, as a pick checks its query before finding its run.
-	if (detail::FirstBadInput(def, given).index != UINT32_MAX)
+	detail::bad_input const bad = detail::FirstBadInput(def, given);
+	if (bad.index != UINT32_MAX)
 	{
 		answer.outcome = clause_outcome::Failed;
+		answer.input   = bad.index;
+		ReportHold(run, index, bits + 1 + bad.index, kNoRow, [&]() { return detail::BadInputError(def, bad, given); });
 		return answer;
 	}
-	size_t const tuple = FindTuple(pc, keys);
+	// A message type with no run falls through to the blank run, as every
+	// lookup of the table does; the retry writes run.keys itself.
+	size_t const tuple = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()), rc.messageKey,
+		[&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; });
 	if (tuple == SIZE_MAX)
 	{
 		answer.outcome = clause_outcome::NoRun;
+		ReportHold(run, index, bits, kNoRow, [&]()
+		{
+			return ErrorContext("table '", def.name, "' key (", KeyText(keys),
+				") has no run; the value is outside the domain Prepare proved the clause over");
+		});
 		return answer;
 	}
 
@@ -431,12 +592,25 @@ clause_answer RunClause(list_run const& run, size_t index)
 	{
 	case pick_policy::Best:
 	{
-		laid_pick const picked = PickLaid(pc, tuple, given, run.axes, run.self);
-		// NoRun is not reached for a proved run (its default group's every list
-		// ends in a row with no script); a hold keeps a broken proof from writing.
+		laid_pick const picked = PickLaid(pc, tuple, given, run.axes, run.self, error);
+		if (picked.outcome == clause_outcome::Failed)
+		{
+			answer.outcome = clause_outcome::Failed;
+			answer.row     = picked.row;
+			ReportHold(run, index, rowBit(picked.row), picked.row,
+				[&]() { return ConditionError(version, picked.row, std::move(error)); });
+			return answer;
+		}
+		// Not reached for a proved run (its default group's every list ends in
+		// a row with no script); a hold keeps a broken proof from writing.
 		if (picked.outcome != clause_outcome::Answered)
 		{
 			answer.outcome = picked.outcome;
+			ReportHold(run, index, bits, kNoRow, [&]()
+			{
+				return ErrorContext("table '", def.name, "' key (", KeyText(keys),
+					") picked no row, which its proof should have ruled out");
+			});
 			return answer;
 		}
 		answer.row = picked.row;
@@ -445,14 +619,18 @@ clause_answer RunClause(list_run const& run, size_t index)
 	case pick_policy::Or:
 	{
 		detail::row_span const rows = pc.rowRuns[tuple];
-		auto bits = detail::OrOfRows(version, rows.first, size_t(rows.first) + rows.count,
-			pick_query{keys, given, run.self}, nullptr);
-		if (!bits)
+		size_t                 failed = SIZE_MAX;
+		auto ored = detail::OrOfRows(version, rows.first, size_t(rows.first) + rows.count,
+			pick_query{keys, given, run.self}, error, failed);
+		if (!ored)
 		{
 			answer.outcome = clause_outcome::Failed;
+			answer.row     = static_cast<uint32_t>(failed);
+			ReportHold(run, index, rowBit(failed), failed,
+				[&]() { return ConditionError(version, failed, std::move(error)); });
 			return answer;
 		}
-		answer.bits = *bits;
+		answer.bits = *ored;
 		break;
 	}
 	case pick_policy::Weighted:
@@ -474,24 +652,32 @@ clause_answer RunClause(list_run const& run, size_t index)
 	{
 		run.next[state] = AnswerValue(pc, answer, column);
 	}
+	// A clause that fell through left its message key blank, so only a run
+	// keyed on the type itself absorbs the message.
+	if (rc.messageKey != UINT32_MAX && run.keys[rc.messageKey].i != 0)
+	{
+		run.absorbed = true;
+	}
 	return answer;
 }
 
-list_run RunOver(instance& subject, size_t list, void const* self, uint64_t seed)
+list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state, void const* self, uint64_t seed)
 {
 	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
 	std::vector<clause_answer>& answers = instance_access::Answers(subject);
 	std::span<clause_answer> const own(answers.data() + binding.answerStart[list],
 		binding.answerStart[list + 1] - binding.answerStart[list]);
-	return list_run{binding, machine_access::Of(*binding.machine), instance_access::Next(subject),
-		instance_access::Inputs(subject), instance_access::InputRead(subject), own, instance_access::Keys(subject),
-		instance_access::Given(subject), instance_access::Axes(subject), self, seed, list};
+	return list_run{binding, machine_access::Of(*binding.machine), instance_access::Next(subject), state,
+		instance_access::Inputs(subject), instance_access::InputRead(subject), own, instance_access::Reported(subject),
+		instance_access::Keys(subject), instance_access::Given(subject), instance_access::Axes(subject),
+		instance_access::Absorbed(subject), subject.id(), self, seed, list};
 }
 
-// Runs a list in order; each clause sees what the ones before it wrote.
-void RunList(instance& subject, trigger list, void const* self, uint64_t seed)
+// Runs a list in order; each clause sees what the ones before it wrote. state
+// is the vector its State sources read.
+void RunList(instance& subject, trigger list, std::vector<cell> const& state, void const* self, uint64_t seed)
 {
-	list_run const run = RunOver(subject, size_t(list), self, seed);
+	list_run const run = RunOver(subject, size_t(list), state, self, seed);
 	for (size_t i = 0; i < run.answers.size(); ++i)
 	{
 		run.answers[i] = RunClause(run, i);
@@ -506,18 +692,51 @@ void MarkNotRun(instance& subject, trigger list)
 		clause_answer{});
 }
 
-// Every input once per step, so every clause of the step reads one value of it.
-void ReadInputs(instance& subject, void const* self)
+// Every input once per step, so every clause of the step reads one value of
+// it: a getter's, or the message's. A getter that fails is reported once; the
+// clauses reading it then hold without reporting again.
+void ReadInputs(instance& subject, void const* self, message const& msg)
 {
 	binding_access::Data const&  binding = binding_access::Of(*instance_access::BindingOf(subject));
+	detail::machine_def const&   def     = machine_access::Of(*binding.machine).def;
 	std::vector<cell>&    inputs  = instance_access::Inputs(subject);
 	std::vector<uint8_t>& read    = instance_access::InputRead(subject);
+	// Arguments are positional slots every message type shares, and a type's
+	// own arity is not declared: a missing one reads 0, as on a step with no
+	// message, and is no failure. More than the machine declares is a sender
+	// that disagrees with the declaration: the step still runs (it cannot be
+	// refused), and the instance says so once.
+	if (msg.arguments.size() > def.messageArguments && FirstReport(instance_access::Reported(subject), def.inputs.size())
+		&& binding.report)
+	{
+		binding.report(subject.id(), kNoTable, kNoRow,
+			ErrorContext("a message carries ", msg.arguments.size(), " arguments, and the machine declares ",
+				def.messageArguments, "; the extra ones are not read").with("machine '", def.name, "' message"));
+	}
 	for (size_t i = 0; i < binding.getters.size(); ++i)
 	{
+		uint32_t const carried = def.carried[i];
+		if (carried == detail::kMessageType)
+		{
+			inputs[i] = cell::Integer(msg.type);
+			read[i]   = 1;
+			continue;
+		}
+		if (carried != detail::kFromGetter)
+		{
+			inputs[i] = carried < msg.arguments.size() ? msg.arguments[carried] : cell::Integer(0);
+			read[i]   = 1;
+			continue;
+		}
 		input_getter const& g = binding.getters[i];
 		ErrorContext        error;
 		inputs[i] = g.read(g.data, self, &error);
 		read[i]   = error.empty() ? 1 : 0;
+		if (!read[i] && FirstReport(instance_access::Reported(subject), i) && binding.report)
+		{
+			binding.report(subject.id(), kNoTable, kNoRow,
+				std::move(error).with("machine '", def.name, "' input '", def.inputs[i].name, "'"));
+		}
 	}
 }
 
@@ -534,6 +753,32 @@ bool Entered(machine_access::Data const& machine, std::vector<cell> const& curre
 		}
 	}
 	return false;
+}
+
+// Hands the sink the command of each clause of list that answered and emits,
+// in clause order: a view into the version the binding holds, so nothing is
+// copied.
+void Emit(instance& subject, trigger list)
+{
+	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
+	if (!binding.sink)
+	{
+		return;
+	}
+	machine_access::Data const&       machine = machine_access::Of(*binding.machine);
+	std::vector<clause_answer> const& answers = instance_access::Answers(subject);
+	std::vector<resolved_clause> const& clauses = machine.def.lists[size_t(list)];
+	for (size_t i = 0; i < clauses.size(); ++i)
+	{
+		clause_answer const& answer = answers[binding.answerStart[size_t(list)] + i];
+		if (clauses[i].emit == UINT32_MAX || answer.outcome != clause_outcome::Answered)
+		{
+			continue;
+		}
+		table_rows const& rows = version_access::Rows(*machine.lists[size_t(list)][i].version);
+		std::string const& command = rows.commands[size_t(answer.row) * rows.commandCount + rows.slot[clauses[i].emit]];
+		binding.sink(subject.id(), clauses[i].table, command);
+	}
 }
 
 }
@@ -557,7 +802,7 @@ clause_answer instance::Answer(trigger list, size_t clause) const
 
 instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void const* self)
 {
-	binding_access::Data const&        data    = binding_access::Of(binding);
+	binding_access::Data const& data    = binding_access::Of(binding);
 	machine_access::Data const& machine = machine_access::Of(*data.machine);
 	instance                    out     = instance_access::Make();
 	instance_access::BindingOf(out)     = CountedWrap(&binding);
@@ -571,39 +816,53 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	instance_access::Inputs(out).assign(data.getters.size(), cell::Integer(0));
 	instance_access::InputRead(out).assign(data.getters.size(), 0);
 	instance_access::Answers(out).assign(data.answerStart[kTriggerCount], clause_answer{});
+	instance_access::Reported(out).assign((data.reportBits + 63) / 64, 0);
 	instance_access::Keys(out).assign(data.maxKeys, cell::Integer(0));
 	instance_access::Given(out).assign(data.maxInputs, cell::Integer(0));
 	instance_access::Axes(out).assign(data.maxAxes, 0.f);
 
-	ReadInputs(out, self);
-	RunList(out, trigger::Create, self, seed);
-	RunList(out, trigger::Entry, self, seed);
+	// Creation enters the initial state; nothing is left, so no exit runs.
+	ReadInputs(out, self, message{});
+	std::vector<cell> const& next = instance_access::Next(out);
+	RunList(out, trigger::Create, next, self, seed);
+	RunList(out, trigger::Entry, next, self, seed);
 	std::swap(instance_access::Current(out), instance_access::Next(out));
+	Emit(out, trigger::Create);
+	Emit(out, trigger::Entry);
 	return out;
 }
 
-void Step(instance& subject, void const* self, uint64_t seed)
+void Step(instance& subject, void const* self, uint64_t seed, message const& msg)
 {
 	// A moved-from instance has no binding, and stepping one is caller misuse.
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is stepped: caller misuse");
 	machine_access::Data const& machine = machine_access::Of(*binding_access::Of(subject.binding()).machine);
 	std::vector<cell>&          current = instance_access::Current(subject);
 	std::vector<cell>&          next    = instance_access::Next(subject);
-	ReadInputs(subject, self);
+	instance_access::Absorbed(subject)  = false;
+	ReadInputs(subject, self, msg);
 	// Unwritten columns hold because next starts as current.
 	std::copy(current.begin(), current.end(), next.begin());
-	RunList(subject, trigger::Step, self, seed);
-	// The exit list (slice 4, R6) will run here, before entry, on the same test.
+	RunList(subject, trigger::Step, next, self, seed);
+	// Exit and entry run on one test; exit reads the state being left (current),
+	// entry the state entered (next), and entry's writes land last.
 	if (Entered(machine, current, next))
 	{
-		RunList(subject, trigger::Entry, self, seed);
+		RunList(subject, trigger::Exit, current, self, seed);
+		RunList(subject, trigger::Entry, next, self, seed);
 	}
 	else
 	{
+		MarkNotRun(subject, trigger::Exit);
 		MarkNotRun(subject, trigger::Entry);
 	}
 	// Swapping two vectors moves their buffers, so nothing is allocated.
 	std::swap(current, next);
+	// After the swap, so a sink sees the step's state current; in the order the
+	// lists ran.
+	Emit(subject, trigger::Step);
+	Emit(subject, trigger::Exit);
+	Emit(subject, trigger::Entry);
 }
 
 }

@@ -31,6 +31,23 @@ inline char const* TypeName(column_type type)
 	return "unknown type";
 }
 
+// Whether column of def is its message key (domain: message): its 0 is no
+// message, not a type.
+inline bool IsMessageKey(table_def const& def, uint32_t column)
+{
+	if (!def.columns[column].key || def.domains.empty())
+	{
+		return false;
+	}
+	// Domains are one per key column, in column order.
+	uint32_t k = 0;
+	for (uint32_t c = 0; c < column; ++c)
+	{
+		k += def.columns[c].key ? 1 : 0;
+	}
+	return def.domains[k].kind == domain_kind::Message;
+}
+
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
 // carried as int64_t, widened without sign. Anything outside [0, 2^32) is
 // either not one of them or a sign-extended copy, which would be a different

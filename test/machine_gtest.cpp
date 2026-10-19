@@ -48,8 +48,9 @@ int64_t Hash(std::string_view text)
 // The spec's tables, with what today's front ends need and the spec's sketch
 // leaves out: the inputs a band and a ranking flags column read, each key's
 // domain, the order a pick's keys lead, and no `writes:` (a clause's set says
-// which state column a value writes). A blank message key is ruling R3
-// (slice 4), so "no message" is written `none` here.
+// which state column a value writes). The message key declares its domain
+// `message` (R3): a blank cell is "no message", and a type no row keys on
+// falls through to the blank run.
 constexpr std::string_view kGrazerTables = R"(
 tables:
   - name: grazer_brain
@@ -60,7 +61,7 @@ tables:
       - {name: food_near, type: flags}
     columns:
       - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, domain: rows}
+      - {name: message, type: hash, key: true, domain: message}
       - {name: energy,  type: band, input: energy}
       - {name: near,    type: flags, input: food_near}
       - {name: when,    type: condition}
@@ -93,7 +94,8 @@ machines:
     inputs:
       - {name: energy, type: double, range: 0..1}
       - {name: food_near, type: flags}      # host wire: bit 0 set when food is in reach
-      - {name: message, type: hash}
+      - {name: message, type: hash}         # 0 on a step with no message (ruling R3)
+    message: {type: message}
     step:
       - from:  grazer_brain
         where: {mode: state.mode, message: input.message}
@@ -105,24 +107,19 @@ machines:
         emit:  command
 )";
 
-// The spec's rows, with its `...` filled in so the brain answers every
-// (mode, message) pair its rows name: a machine input's key keeps the table's
-// declared domain, and `rows` crosses with the state's members.
+// The spec's rows, as written: a message no row of a mode keys on falls
+// through to that mode's blank run, so nothing fills in the other pairs.
 constexpr std::string_view kBrainRows = R"(# grazer_brain
 mode,  message, energy,  near, when,        next
-idle,  none,    0..0.3,  1,    ,            eat
-idle,  none,    0..1,    0,    ,            walk
-walk,  none,    0..1,    0,    ,            idle
-eat,   none,    0..1,    0,    ,            idle
+idle,      ,    0..0.3,  1,    ,            eat
+idle,      ,    0..1,    0,    ,            walk
+walk,      ,    0..1,    0,    ,            idle
+eat,       ,    0..1,    0,    ,            idle
 idle,  scared,  0..1,    0,    ,            panic
 walk,  scared,  0..1,    0,    ,            panic
 eat,   scared,  0..1,    0,    ,            panic
-panic, none,    0..1,    0,    ,            panic
+panic,     ,    0..1,    0,    ,            panic
 panic, calm,    0..1,    0,    ,            idle
-panic, scared,  0..1,    0,    ,            panic
-idle,  calm,    0..1,    0,    ,            idle
-walk,  calm,    0..1,    0,    ,            walk
-eat,   calm,    0..1,    0,    ,            eat
 )";
 
 constexpr std::string_view kEnterRows = R"(# grazer_enter
@@ -177,7 +174,18 @@ struct grazer_fixture
 		EXPECT_EQ(RefusalOf(LoadCsv(store, csv_rows{Enter, 1, enter, "grazer_enter.csv"})), "(accepted)");
 	}
 
-	create_machine const& Definition() const { return document.machines()[0]; }
+	// A refused document already failed the test; an empty definition is
+	// refused by Prepare instead of read past the end of no machines.
+	create_machine const& Definition() const
+	{
+		static create_machine const none;
+		if (document.machines().empty())
+		{
+			ADD_FAILURE() << "the document has no machine";
+			return none;
+		}
+		return document.machines()[0];
+	}
 };
 
 schema_document Parsed(std::string_view tables, std::string_view machines)
@@ -208,7 +216,8 @@ TEST(GrazerMachine, TheSpecsBrainLoadsAndPrepares)
 	auto const& data = Inside(*machine);
 	ASSERT_EQ(data.lists[size_t(trigger::Step)].size(), 1u);
 	ASSERT_EQ(data.lists[size_t(trigger::Entry)].size(), 1u);
-	EXPECT_EQ(data.lists[size_t(trigger::Step)][0].tupleCount, 12u) << "four members by the three messages the rows name";
+	EXPECT_EQ(data.lists[size_t(trigger::Step)][0].tupleCount, 8u)
+		<< "each member's blank run, and the four runs keyed on a message whose mode is a member";
 	EXPECT_EQ(data.lists[size_t(trigger::Entry)][0].tupleCount, 4u) << "one run per member";
 }
 
@@ -238,19 +247,22 @@ TEST(GrazerMachine, TheRunDirectoryNamesVersionRowsOfEachTuplesRun)
 			}
 		}
 	}
-	EXPECT_GE(listedRows, 13u) << "every brain row is in some list";
+	EXPECT_GE(listedRows, 9u) << "every brain row is in some list";
 }
 
-TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByPrepare)
+TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByTheLoad)
 {
-	std::string const brain = Without(kBrainRows, "panic, none,    0..1,    0,    ,            panic\n");
-	grazer_fixture    f(Parsed(kGrazerTables, kGrazerMachine), brain, kEnterRows);
-	auto machine = Prepare(f.Definition(), f.store);
-	std::string const error = RefusalOf(machine);
-	EXPECT_TRUE(Mentions(error, "machine 'grazer' step clause 0 (table 'grazer_brain')")) << error;
-	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("panic") + ", " + H("none")
-		+ "): energy 0 has no row with no flags and no script condition; no row has this key, and the key is in the clause's domain"))
-		<< error;
+	// The spec's reading (§4): panic's calm row puts panic in mode's rows
+	// domain, and a message key demands the blank run of every tuple of the
+	// other keys, so the load refuses before any machine is prepared.
+	auto doc = Document(kGrazerTables, kGrazerMachine);
+	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
+	relation_store store(std::move(doc->tables));
+	std::string const brain = Without(kBrainRows, "panic,     ,    0..1,    0,    ,            panic\n");
+	std::string const error = RefusalOf(LoadCsv(store, csv_rows{Brain, 1, brain, "grazer_brain.csv"}));
+	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("panic")
+		+ ", 0): energy 0 has no row with no flags and no script condition; no row has this key, and the key is in the "
+		"table's domain")) << error;
 }
 
 TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByTheLoadWhenTheTableClosesMode)
@@ -262,9 +274,9 @@ TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByTheLoadWhenTheTableClo
 	auto doc = Document(tables, kGrazerMachine);
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
-	std::string const brain = Without(kBrainRows, "panic, none,    0..1,    0,    ,            panic\n");
+	std::string const brain = Without(kBrainRows, "panic,     ,    0..1,    0,    ,            panic\n");
 	std::string const error = RefusalOf(LoadCsv(store, csv_rows{Brain, 1, brain, "grazer_brain.csv"}));
-	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("panic") + ", " + H("none")
+	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("panic") + ", " + std::string("0")
 		+ "): energy 0 has no row with no flags and no script condition; no row has this key, and the key is in the table's domain"))
 		<< error;
 }
@@ -310,8 +322,8 @@ TEST(GrazerMachine, AClauseNamingItselfIsRefusedAtDefinitionBuild)
 
 TEST(GrazerMachine, ANextStateThatIsNotAMemberIsRefused)
 {
-	std::string const brain = Replace(kBrainRows, "walk,  calm,    0..1,    0,    ,            walk",
-		"walk,  calm,    0..1,    0,    ,            sleep");
+	std::string const brain = Replace(kBrainRows, "panic, calm,    0..1,    0,    ,            idle",
+		"panic, calm,    0..1,    0,    ,            sleep");
 	grazer_fixture    f(Parsed(kGrazerTables, kGrazerMachine), brain, kEnterRows);
 	std::string const error = RefusalOf(Prepare(f.Definition(), f.store));
 	EXPECT_TRUE(Mentions(error, "machine 'grazer' step clause 0 (table 'grazer_brain')")) << error;
@@ -335,15 +347,16 @@ TEST(GrazerMachine, TwoClausesWritingOneColumnAreOrderedByPosition)
 
 TEST(GrazerMachine, ALiteralKeyIsOneValue)
 {
-	std::string const machines = Replace(kGrazerMachine, "message: input.message}", "message: {literal: scared}}");
+	// A message key reads only the message type, so the literal closes mode.
+	std::string const machines = Replace(kGrazerMachine, "where: {mode: state.mode,", "where: {mode: {literal: idle},");
 	grazer_fixture f(Parsed(kGrazerTables, machines), kBrainRows, kEnterRows);
 	auto machine = Prepare(f.Definition(), f.store);
 	ASSERT_TRUE(machine.has_value()) << RefusalOf(machine);
 	detail::prepared_clause const& step = Inside(*machine).lists[size_t(trigger::Step)][0];
-	ASSERT_EQ(step.tupleCount, 4u);
+	ASSERT_EQ(step.tupleCount, 2u) << "idle's blank run and its scared run";
 	for (size_t t = 0; t < step.tupleCount; ++t)
 	{
-		EXPECT_EQ(step.tuples[t * 2 + 1], Hash("scared"));
+		EXPECT_EQ(step.tuples[t * 2], Hash("idle"));
 	}
 }
 
@@ -678,7 +691,7 @@ TEST(MachineDefinition, CommandStructsAreCheckedWithoutYaml)
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
 	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, sets, {}}};
-	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
+	create_machine    m{"grazer", state, inputs, {}, {}, step, {}, message_inputs{"message", {}}};
 	EXPECT_TRUE(Mentions(RefusalOf(CheckMachine(m, doc->tables)), "set writes state column 'mode' twice"));
 
 	add_clause const once[] = {{"grazer_brain", where, given, std::span<set_state const>(sets, 1), {}}};
@@ -711,7 +724,7 @@ TEST(GrazerMachine, PrepareReportsRunsOutsideTheClausesDomainAsOrphans)
 {
 	// A typo in a rows-declared key: the load cannot tell it from a value, and the
 	// machine never reaches it.
-	std::string const brain = std::string(kBrainRows) + "pnaic, none,    0..1,    0,    ,            idle\n";
+	std::string const brain = std::string(kBrainRows) + "pnaic,     ,    0..1,    0,    ,            idle\n";
 	grazer_fixture    f(Parsed(kGrazerTables, kGrazerMachine), brain, kEnterRows);
 	std::vector<run_note> report = {run_note{Kinds, run_status::NotTotal, {}}};
 	auto machine = Prepare(f.Definition(), f.store, &report);
@@ -721,14 +734,17 @@ TEST(GrazerMachine, PrepareReportsRunsOutsideTheClausesDomainAsOrphans)
 	EXPECT_EQ(report[0].status, run_status::Orphan);
 	ASSERT_EQ(report[0].key.size(), 2u);
 	EXPECT_EQ(report[0].key[0].i, Hash("pnaic"));
-	EXPECT_EQ(report[0].key[1].i, Hash("none"));
+	EXPECT_EQ(report[0].key[1].i, 0);
 }
 
 TEST(GrazerMachine, ARefusedPrepareLeavesTheReportEmpty)
 {
-	// The entry clause notes its orphan before the step clause is refused.
-	std::string const brain = Without(kBrainRows, "panic, none,    0..1,    0,    ,            panic\n");
-	grazer_fixture    f(Parsed(kGrazerTables, kGrazerMachine), brain, std::string(kEnterRows) + "pnaic, (anim run)\n");
+	// The entry clause notes its orphan before the step clause is refused for
+	// a member the brain has no run for.
+	std::string const machines = Replace(kGrazerMachine, "members: [idle, walk, eat, panic]",
+		"members: [idle, walk, eat, panic, sleep]");
+	grazer_fixture f(Parsed(kGrazerTables, machines), kBrainRows,
+		std::string(kEnterRows) + "sleep, (anim sleep)\npnaic, (anim run)\n");
 	std::vector<run_note> report;
 	auto machine = Prepare(f.Definition(), f.store, &report);
 	ASSERT_FALSE(machine.has_value());
@@ -742,14 +758,14 @@ TEST(GrazerMachine, AClauseReachingARunTheLoadNeverProvedIsRefused)
 	// message has only a flagged row.
 	std::string const tables = Replace(kGrazerTables, "{name: mode,    type: hash, key: true, domain: rows}",
 		"{name: mode,    type: hash, key: true, domain: {members: [idle, walk, panic]}}");
-	std::string const brain = Replace(kBrainRows, "eat,   none,    0..1,    0,    ,            idle",
-		"eat,   none,    0..1,    1,    ,            idle");
+	std::string const brain = Replace(kBrainRows, "eat,       ,    0..1,    0,    ,            idle",
+		"eat,       ,    0..1,    1,    ,            idle");
 	grazer_fixture    f(Parsed(tables, kGrazerMachine), brain, kEnterRows);
 	std::string const error = RefusalOf(Prepare(f.Definition(), f.store));
 	EXPECT_TRUE(Mentions(error, "machine 'grazer' step clause 0 (table 'grazer_brain')")) << error;
-	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("eat") + ", " + H("none")
+	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + H("eat") + ", " + std::string("0")
 		+ "): energy 0 has no row with no flags and no script condition; its first row is owner 1's row with key ("
-		+ H("eat") + ", " + H("none") + "), flags 1, energy 0..1")) << error;
+		+ H("eat") + ", " + std::string("0") + "), flags 1, energy 0..1")) << error;
 }
 
 TEST(MachinePrepare, AnEarlierClauseAnswersOnlyFromRowsItsDomainReaches)
@@ -829,7 +845,7 @@ std::string EnergyLiteralRefusal(schema const& tables, double lit)
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
 	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, {}, {}}};
-	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
+	create_machine    m{"grazer", state, inputs, {}, {}, step, {}, message_inputs{"message", {}}};
 	return RefusalOf(CheckMachine(m, tables));
 }
 

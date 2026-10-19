@@ -24,7 +24,7 @@ namespace tabular
 // supplies it, not the caller.
 enum class source_kind : uint8_t
 {
-	State,     // a state column: the next vector as the step has written it so far
+	State,     // a state column: the next vector as the step has written it so far; in an exit clause, current (the state being left)
 	Input,     // one of the machine's inputs
 	Clause,    // a value column of the row an earlier clause of the same list picked
 	Literal,   // a constant
@@ -89,6 +89,15 @@ enum class trigger : uint8_t
 };
 inline constexpr size_t kTriggerCount = 4;
 
+// Which machine inputs a step's message carries instead of a getter (R3): a
+// message is one step, its type a hash input and its arguments inputs. Step
+// is handed the message; a step with none has type 0 and every argument 0.
+struct message_inputs
+{
+	std::string_view                  type;        // a hash input; empty: the machine takes no message
+	std::span<std::string_view const> arguments;   // inputs, in the order a message carries its arguments
+};
+
 struct create_machine
 {
 	std::string_view            name;
@@ -100,6 +109,7 @@ struct create_machine
 	std::span<add_clause const> entry;
 	std::span<add_clause const> step;
 	std::span<add_clause const> exit;
+	message_inputs              message;
 };
 
 // Whether definition is well formed against the schema: every name it uses
@@ -108,7 +118,10 @@ struct create_machine
 // name only earlier clauses, a literal for a ranged input is finite and in its
 // range, sets read value columns of the state column's type, emit names a
 // command column, an or clause is read only through its output and emits
-// nothing, and each hash state's initial value is a member. No rows are read.
+// nothing, an entry or exit clause sets no hash state column, each hash
+// state's initial value is a member, the message's type is a hash input and
+// its arguments other distinct inputs, and a key is bound to the message type
+// exactly when its table declares it a message key. No rows are read.
 // Prepare checks this first.
 tl::expected<void, ErrorContext> CheckMachine(create_machine const& definition, schema const& tables);
 
@@ -146,9 +159,11 @@ private:
 // Proves the machine and lays it out. For each clause, its key domain is read
 // from its sources: a hash state column is closed by its members, an earlier
 // best or weighted clause by the values its rows can answer, a literal is one
-// value; any other source (a machine input, an int or double state column, an
-// or clause's flags) closes nothing, and the key keeps the table's declared
-// domain (an or or a weighted table declares none: its rows). On a best table
+// value; any other source (a machine input, the message type included, an int
+// or double state column, an or clause's flags) closes nothing, and the key
+// keeps the table's declared domain (an or or a weighted table declares none:
+// its rows; a message key the blank run per tuple of the other keys, plus the
+// runs keyed on a type). On a best table
 // every tuple of that domain must have a run that is total over the table's
 // inputs, with no dead row and no two owners' rows overlapping, which is the
 // check a load makes, over this domain instead of the table's; on a weighted

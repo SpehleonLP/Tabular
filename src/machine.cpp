@@ -145,6 +145,63 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 	return out;
 }
 
+// Which inputs the step's message carries (R3): the type, a hash input, and
+// the arguments, other inputs, each once. Every other input has a getter.
+tl::expected<void, ErrorContext> ResolveMessage(create_machine const& m, machine_def& def)
+{
+	def.carried.assign(def.inputs.size(), detail::kFromGetter);
+	auto inputNamed = [&](std::string_view name) -> uint32_t
+	{
+		for (uint32_t i = 0; i < def.inputs.size(); ++i)
+		{
+			if (def.inputs[i].name == name)
+			{
+				return i;
+			}
+		}
+		return UINT32_MAX;
+	};
+	if (m.message.type.empty())
+	{
+		if (!m.message.arguments.empty())
+		{
+			return tl::make_unexpected(ErrorContext("the message names arguments and no type; a message is its type first"));
+		}
+		return {};
+	}
+	uint32_t const type = inputNamed(m.message.type);
+	if (type == UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("the message's type is input '", m.message.type,
+			"', which the machine does not declare"));
+	}
+	if (def.inputs[type].type != column_type::Hash)
+	{
+		return tl::make_unexpected(ErrorContext("the message's type is input '", m.message.type, "', a ",
+			TypeName(def.inputs[type].type), "; a message's type is a hash"));
+	}
+	def.messageType   = type;
+	def.carried[type] = detail::kMessageType;
+	for (uint32_t a = 0; a < m.message.arguments.size(); ++a)
+	{
+		std::string_view const name  = m.message.arguments[a];
+		uint32_t const         input = inputNamed(name);
+		if (input == UINT32_MAX)
+		{
+			return tl::make_unexpected(ErrorContext("message argument ", a, " is input '", name,
+				"', which the machine does not declare"));
+		}
+		if (def.carried[input] != detail::kFromGetter)
+		{
+			return tl::make_unexpected(ErrorContext("message argument ", a, " is input '", name, "', which the message ",
+				input == type ? "already carries as its type" : "already carries as an argument"));
+		}
+		def.carried[input] = a;
+	}
+	def.messageArguments = static_cast<uint32_t>(m.message.arguments.size());
+	return {};
+}
+
 // what names the target in messages: "key 'mode'", "input 'energy'";
 // targetInput is the table input a given binds, null for a key.
 tl::expected<resolved_source, ErrorContext> ResolveSource(source const& from, column_type targetType,
@@ -314,6 +371,41 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		{
 			return tl::make_unexpected(std::move(resolved.error()));
 		}
+		// The fall-through to the blank run is the message key's: the table says
+		// which key is one (and lets its CSV leave it blank), the machine says
+		// which input is the type, and the two must meet, or a type would retry
+		// a key with no blank run, or a message key would never see the type.
+		bool const readsType  = resolved->kind == source_kind::Input && resolved->index == def.messageType;
+		bool const messageKey = !t.domains.empty() && t.domains[at].kind == domain_kind::Message;
+		if (readsType && !messageKey)
+		{
+			return tl::make_unexpected(ErrorContext("key '", b.target, "' reads the message type, and table '", t.name,
+				"' does not declare it a message key (domain: message)"));
+		}
+		if (messageKey && !readsType)
+		{
+			return tl::make_unexpected(ErrorContext("key '", b.target, "' of table '", t.name,
+				"' is a message key; it reads the machine's message type"));
+		}
+		if (messageKey)
+		{
+			out.messageKey = static_cast<uint32_t>(at);
+		}
+		// An earlier clause keyed on a message can answer from its blank run,
+		// whose message key holds 0, no message: a value only a message key
+		// holds, so an ordinary key reading it would look up a run no row can
+		// name (a hash 0 is refused) instead of a type.
+		if (resolved->kind == source_kind::Clause)
+		{
+			table_def const& source = tables.tables()[earlier[resolved->index].table];
+			if (IsMessageKey(source, resolved->column))
+			{
+				return tl::make_unexpected(ErrorContext("key '", b.target, "' reads column '",
+					source.columns[resolved->column].name, "' of clause ", resolved->index, ", the message key of table '",
+					source.name, "'; that clause can answer from its blank run, with 0 (no message), which only a message "
+					"key holds"));
+			}
+		}
 		out.keys[at] = *resolved;
 	}
 	for (size_t k = 0; k < keyColumns.size(); ++k)
@@ -468,6 +560,11 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 		return tl::make_unexpected(std::move(inputs.error()).with(where()));
 	}
 	def.inputs = std::move(*inputs);
+	auto message = ResolveMessage(definition, def);
+	if (!message)
+	{
+		return tl::make_unexpected(std::move(message.error()).with(where()));
+	}
 	auto state = ResolveState(definition);
 	if (!state)
 	{
@@ -487,15 +584,29 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 			// A state is entered when a hash column of next differs from current
 			// at the end of the step, and entry runs once, after the step list: a
 			// hash an entry clause wrote would be a transition that never gets an
-			// entry of its own (R6's state function would never start). Int and
-			// double columns are data, and entry may write them.
+			// entry of its own (R6's state function would never start). Exit runs
+			// on that same test, keyed on the state being left: a hash it wrote
+			// would overrule the step list's transition with a choice made from
+			// the old state. Int and double columns are data, and both may write
+			// them.
 			for (auto const& [column, state] : clause->sets)
 			{
-				if (list == size_t(trigger::Entry) && def.state[state].type == column_type::Hash)
+				if (def.state[state].type != column_type::Hash)
+				{
+					continue;
+				}
+				if (list == size_t(trigger::Entry))
 				{
 					return tl::make_unexpected(ErrorContext("an entry clause sets hash state column '", def.state[state].name,
 						"': entry runs once per step, after the step list, so a state it moved to would get no entry of "
 						"its own; a transition belongs in the step list")
+						.with(ClausePlace(def.name, list, i, clauses[i].table)));
+				}
+				if (list == size_t(trigger::Exit))
+				{
+					return tl::make_unexpected(ErrorContext("an exit clause sets hash state column '", def.state[state].name,
+						"': exit runs when the step list has chosen a state, keyed on the one being left, so its write "
+						"would overrule that choice; a transition belongs in the step list")
 						.with(ClausePlace(def.name, list, i, clauses[i].table)));
 				}
 			}
@@ -577,8 +688,7 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 {
 	table_def const& t    = store.definition().tables()[clause.table];
 	size_t const     keys = clause.keys.size();
-	out.overRows.assign(keys, 0);
-	out.values.assign(keys, {});
+	out.Reset(keys);
 	for (uint32_t k = 0; k < keys; ++k)
 	{
 		resolved_source const& from   = clause.keys[k];
@@ -638,7 +748,8 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 			foreign = *version;
 			watch.Add(declared.table, *foreign);
 		}
-		detail::DeclaredDomain(declared, foreign ? &version_access::Rows(*foreign) : nullptr, k, out);
+		detail::DeclaredDomain(declared, foreign ? &version_access::Def(*foreign) : nullptr,
+			foreign ? &version_access::Rows(*foreign) : nullptr, k, out);
 	}
 	return {};
 }
