@@ -44,8 +44,30 @@ int64_t Hash(std::string_view text)
 // What the host fills for one step: the event's kind (0 for none).
 struct host_object
 {
-	int64_t kind = 0;
+	int64_t kind   = 0;
+	bool    mod_on = false;   // what the mod's condition tests
+	bool    broken = false;   // the mod's condition fails to answer
 };
+
+bool ModOn(void*, void const* self, ErrorContext* error_out)
+{
+	host_object const& host = *static_cast<host_object const*>(self);
+	if (host.broken)
+	{
+		*error_out = ErrorContext("the mod's script raised");
+		return false;
+	}
+	return host.mod_on;
+}
+
+tl::expected<closure, ErrorContext> Conditions(std::string_view text)
+{
+	if (text == "mod_on")
+	{
+		return closure{&ModOn, nullptr, nullptr};
+	}
+	return tl::make_unexpected(ErrorContext("no condition '", text, "'"));
+}
 
 cell ReadKind(void*, void const* self, ErrorContext*)
 {
@@ -85,7 +107,9 @@ struct machine_fixture
 		}
 		for (uint32_t t = 0; t < rows.size(); ++t)
 		{
-			EXPECT_EQ(RefusalOf(LoadCsv(store, csv_rows{t, 1, rows[t], "rows.csv"})), "(accepted)") << "table " << t;
+			csv_rows load{t, 1, rows[t], "rows.csv"};
+			load.condition = &Conditions;
+			EXPECT_EQ(RefusalOf(LoadCsv(store, load)), "(accepted)") << "table " << t;
 		}
 		auto prepared = Prepare(document.machines()[0], store);
 		if (!prepared)
@@ -879,4 +903,369 @@ TEST(ManySurfaces, HierarchicalStepsAllocateNothing)
 	AllocationCount count;
 	round(2);
 	EXPECT_EQ(count.Count(), 0u);
+}
+
+// ---- Review close-out: the two forms with entry and exit, and overrides in
+// every list ----------------------------------------------------------------------------
+
+namespace
+{
+
+// Entry and exit tables for the superstate and the substate, appended to both
+// forms of kOneTable / kTwoTables so a mode change's leaving and entering are
+// compared too.
+constexpr std::string_view kEntryExitTables = R"(  - name: super_enter
+    read_only: true
+    pick: best
+    columns:
+      - {name: super, type: hash, key: true, domain: rows}
+    order_by: {columns: [super]}
+    suffix: command
+  - name: sub_enter
+    read_only: true
+    pick: best
+    columns:
+      - {name: sub, type: hash, key: true, domain: rows}
+    order_by: {columns: [sub]}
+    suffix: command
+  - name: super_leave
+    read_only: true
+    pick: best
+    columns:
+      - {name: super, type: hash, key: true, domain: rows}
+    order_by: {columns: [super]}
+    suffix: command
+  - name: sub_leave
+    read_only: true
+    pick: best
+    columns:
+      - {name: sub, type: hash, key: true, domain: rows}
+    order_by: {columns: [sub]}
+    suffix: command
+machines:
+)";
+
+constexpr std::string_view kEntryExitLists = R"(    exit:
+      - from:  super_leave
+        where: {super: state.super}
+        emit:  command
+      - from:  sub_leave
+        where: {sub: state.sub}
+        emit:  command
+    entry:
+      - from:  super_enter
+        where: {super: state.super}
+        emit:  command
+      - from:  sub_enter
+        where: {sub: state.sub}
+        emit:  command
+)";
+
+constexpr std::string_view kSuperEnter = "super,command\nmove,enter-move\nrest,enter-rest\n";
+constexpr std::string_view kSubEnter   = "sub,command\nwalk,enter-walk\nrun,enter-run\nsit,enter-sit\nsleep,enter-sleep\n";
+constexpr std::string_view kSuperLeave = "super,command\nmove,leave-move\nrest,leave-rest\n";
+constexpr std::string_view kSubLeave   = "sub,command\nwalk,leave-walk\nrun,leave-run\nsit,leave-sit\nsleep,leave-sleep\n";
+
+std::string WithEntryAndExit(std::string_view yaml)
+{
+	return Replace(yaml, "machines:\n", kEntryExitTables) + std::string(kEntryExitLists);
+}
+
+}
+
+TEST(ManySurfaces, TheTwoFormsLeaveAndEnterTheSameAcrossModeChanges)
+{
+	machine_fixture one(WithEntryAndExit(kOneTable), {kOneTableRows, kSuperEnter, kSubEnter, kSuperLeave, kSubLeave});
+	machine_fixture two(WithEntryAndExit(kTwoTables), {kSuperRows, kSubRows, kSuperEnter, kSubEnter, kSuperLeave, kSubLeave});
+	ASSERT_TRUE(one.binding) << one.refusal;
+	ASSERT_TRUE(two.binding) << two.refusal;
+	host_object host;
+	instance a = CreateInstance(*one.binding, 1, 1, &host);
+	instance b = CreateInstance(*two.binding, 1, 1, &host);
+	EXPECT_EQ(Texts(a.Emitted()), Texts(b.Emitted()));
+	EXPECT_EQ(Texts(a.Emitted()), (std::vector<std::string>{"(enter-move)", "(enter-walk)"}));
+	std::string_view const events[] = {"", "fast", "dance", "hit", "hit", "wake", "hit", "", "nap", "wake", ""};
+	uint64_t seed = 2;
+	int superChanges = 0;
+	for (std::string_view kind : events)
+	{
+		std::vector<std::string> const fromOne = Dispatch(a, host, kind, seed);
+		std::vector<std::string> const fromTwo = Dispatch(b, host, kind, seed);
+		EXPECT_EQ(fromOne, fromTwo) << "step " << seed << " on '" << kind << "'";
+		EXPECT_EQ(a.State(0).i, b.State(0).i) << "step " << seed << " on '" << kind << "'";
+		EXPECT_EQ(a.State(1).i, b.State(1).i) << "step " << seed << " on '" << kind << "'";
+		for (std::string const& text : fromOne)
+		{
+			superChanges += text == "(leave-move)" || text == "(leave-rest)" ? 1 : 0;
+		}
+		++seed;
+	}
+	EXPECT_GE(superChanges, 3) << "the events cross between move and rest, so the superstate's exit is compared";
+	EXPECT_EQ(Texts(Close(a, &host, seed)), Texts(Close(b, &host, seed)));
+}
+
+namespace
+{
+
+// An exit list with an override: leaving walk while crouched has its own
+// command. The override keys on pose as well as mode, so the two run as one
+// group on both columns.
+constexpr std::string_view kCrouch = R"(
+tables:
+  - name: brain
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+      - {name: kind, type: hash, key: true, fallthrough: true}
+      - {name: next_mode, type: hash}
+      - {name: next_pose, type: hash}
+    order_by: {columns: [mode, kind]}
+  - name: leave
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+    order_by: {columns: [mode]}
+    suffix: command
+  - name: leave_mod
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+      - {name: pose, type: hash, key: true, domain: rows}
+    order_by: {columns: [mode, pose]}
+    suffix: command
+machines:
+  - name: walker
+    inputs:
+      - {name: kind, type: hash}
+    state:
+      - {name: mode, type: hash, members: [idle, walk], initial: idle}
+      - {name: pose, type: hash, members: [up, down], initial: up}
+    step:
+      - from:  brain
+        where: {mode: state.mode, kind: input.kind}
+        set:   {mode: next_mode, pose: next_pose}
+    exit:
+      - from:  leave
+        where: {mode: state.mode}
+        emit:  command
+      - from:  leave_mod
+        overrides: 0
+        where: {mode: state.mode, pose: state.pose}
+        emit:  command
+)";
+
+constexpr std::string_view kCrouchRows = R"(mode, kind, next_mode, next_pose
+idle, ,     idle,      up
+idle, go,   walk,      up
+idle, duck, idle,      down
+walk, ,     walk,      up
+walk, stop, idle,      up
+walk, duck, walk,      down
+)";
+
+constexpr std::string_view kLeaveRows    = "mode,command\nidle,leave idle\nwalk,leave walk\n";
+constexpr std::string_view kLeaveModRows = "mode,pose,command\nwalk,down,leave walk crouched\n";
+
+}
+
+TEST(OverrideClause, InAnExitListItRunsWithItsBaseOnTheUnionOfTheirColumns)
+{
+	machine_fixture f(kCrouch, {kCrouchRows, kLeaveRows, kLeaveModRows});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance walker = CreateInstance(*f.binding, 1, 1, &host);
+	EXPECT_EQ(Dispatch(walker, host, "duck", 2), (std::vector<std::string>{"((leave idle))"}))
+		<< "a pose-only change runs the group, the base with its override; (idle, up) is a miss";
+	EXPECT_EQ(walker.Answer(trigger::Exit, 1).outcome, clause_outcome::Missed);
+	EXPECT_EQ(Dispatch(walker, host, "go", 3), (std::vector<std::string>{"((leave idle))"}));
+	EXPECT_EQ(Dispatch(walker, host, "duck", 4), (std::vector<std::string>{"((leave walk))"}));
+	EXPECT_EQ(Dispatch(walker, host, "stop", 5), (std::vector<std::string>{"((leave walk crouched))"}))
+		<< "leaving (walk, down): the override's hit replaces the base's command";
+	EXPECT_EQ(walker.Answer(trigger::Exit, 1).outcome, clause_outcome::Answered);
+	EXPECT_EQ(Dispatch(walker, host, "", 6), (std::vector<std::string>{})) << "nothing changed: the group does not run";
+	EXPECT_EQ(walker.Answer(trigger::Exit, 0).outcome, clause_outcome::NotRun);
+	EXPECT_EQ(walker.Answer(trigger::Exit, 1).outcome, clause_outcome::NotRun);
+}
+
+TEST(OverrideClause, CloseRunsAnExitListsOverride)
+{
+	machine_fixture f(kCrouch, {kCrouchRows, kLeaveRows, kLeaveModRows});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance crouched = CreateInstance(*f.binding, 1, 1, &host);
+	Dispatch(crouched, host, "go", 2);
+	Dispatch(crouched, host, "duck", 3);
+	EXPECT_EQ(Texts(Close(crouched, &host, 4)), (std::vector<std::string>{"((leave walk crouched))"}));
+	EXPECT_EQ(crouched.Answer(trigger::Exit, 1).outcome, clause_outcome::Answered);
+
+	instance standing = CreateInstance(*f.binding, 2, 1, &host);
+	Dispatch(standing, host, "go", 2);
+	EXPECT_EQ(Texts(Close(standing, &host, 3)), (std::vector<std::string>{"((leave walk))"}));
+	EXPECT_EQ(standing.Answer(trigger::Exit, 1).outcome, clause_outcome::Missed);
+#if TABULAR_PROVENANCE
+	provenance_view const picks = standing.Provenance();
+	ASSERT_GE(picks.size(), 2u);
+	EXPECT_EQ(picks[picks.size() - 2].run, provenance_run::Close);
+	EXPECT_EQ(picks[picks.size() - 1].run, provenance_run::Close);
+	EXPECT_EQ(picks[picks.size() - 1].clause, 1u);
+	EXPECT_EQ(picks[picks.size() - 1].answer.outcome, clause_outcome::Missed);
+#endif
+}
+
+TEST(OverrideClause, AnOverrideThatFailsIsReportedAndItsBasesAnswerStands)
+{
+	// The mod's first row is a script condition, the second its fallback: the
+	// override answers either way, unless the script raises.
+	std::string const yaml = Replace(kModded, R"(  - name: brain_mod
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+)", R"(  - name: brain_mod
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+      - {name: when, type: condition}
+)");
+	machine_fixture f(yaml, {kBaseRows, "mode,when,next,command\nidle,mod_on,sleep,anim yawn\nidle,,walk,anim stroll\n",
+		kLabelRows});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	int reports = 0;
+	host_binding host = KindHost();
+	host.report = [&reports](uint64_t, uint32_t, size_t, ErrorContext const&) { ++reports; };
+	auto binding = Bind(f.machine, std::move(host));
+	ASSERT_TRUE(binding.has_value()) << RefusalOf(binding);
+
+	host_object object;
+	object.mod_on = true;
+	instance on = CreateInstance(**binding, 1, 1, &object);
+	EXPECT_EQ(Texts(Step(on, &object, 2)), (std::vector<std::string>{"((anim yawn))"}));
+	object.mod_on = false;
+	instance off = CreateInstance(**binding, 2, 1, &object);
+	EXPECT_EQ(Texts(Step(off, &object, 2)), (std::vector<std::string>{"((anim stroll))"}))
+		<< "a condition that holds false is not a miss: the mod's fallback row answers";
+	EXPECT_EQ(reports, 0);
+
+	object.broken = true;
+	instance broken = CreateInstance(**binding, 3, 1, &object);
+	EXPECT_EQ(Texts(Step(broken, &object, 2)), (std::vector<std::string>{"((anim walk))"}))
+		<< "the base's command, since the override did not answer";
+	EXPECT_EQ(broken.Answer(trigger::Step, 1).outcome, clause_outcome::Failed);
+	EXPECT_EQ(broken.Answer(trigger::Step, 0).outcome, clause_outcome::Answered);
+	EXPECT_EQ(broken.State(0).i, Hash("walk")) << "the base's sets are written whole";
+	EXPECT_EQ(broken.State(1).i, 1);
+	EXPECT_EQ(broken.State(2).i, 20) << "the dependent read the base's next";
+	EXPECT_EQ(reports, 1) << "a failed override is reported as any clause is";
+}
+
+TEST(OverrideClause, AHitWithNoEmitKeepsTheBasesCommand)
+{
+	// The column-subset rule: an override that sets mode but declares no emit
+	// replaces mode only, so the base's command goes out with the mod's state.
+	std::string const yaml = Replace(Replace(kModded, R"(      - {name: next, type: hash}
+    order_by: {columns: [mode]}
+    suffix: command
+  - name: label)", R"(      - {name: next, type: hash}
+    order_by: {columns: [mode]}
+  - name: label)"), "        set:   {mode: next}\n        emit:  command\n      - from:  label",
+		"        set:   {mode: next}\n      - from:  label");
+	machine_fixture f(yaml, {kBaseRows, "mode,next\nidle,sleep\n", kLabelRows});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance grazer = CreateInstance(*f.binding, 1, 1, &host);
+	EXPECT_EQ(Texts(Step(grazer, &host, 2)), (std::vector<std::string>{"((anim walk))"}));
+	EXPECT_EQ(grazer.State(0).i, Hash("sleep"));
+	EXPECT_EQ(grazer.State(1).i, 1);
+	EXPECT_EQ(grazer.State(2).i, 30);
+	EXPECT_EQ(grazer.Answer(trigger::Step, 1).outcome, clause_outcome::Answered);
+}
+
+TEST(OverrideClause, AnOverridesOwnFallThroughFeedsTheCoalescedAnswer)
+{
+	// kTwoTables' override falls through on kind; a reader of clause 0's
+	// next_sub reads what the override answered, retry included.
+	std::string const yaml = Replace(Replace(Replace(std::string(kTwoTables), "machines:\n", R"(  - name: sub_code
+    read_only: true
+    pick: best
+    columns:
+      - {name: sub,  type: hash, key: true, domain: rows}
+      - {name: code, type: int}
+    order_by: {columns: [sub]}
+machines:
+)"), "      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}\n",
+		"      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}\n"
+		"      - {name: code,  type: int, initial: 0}\n"), R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
+        set:   {super: next_super, sub: next_sub}
+        emit:  command
+)", R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
+        set:   {super: next_super, sub: next_sub}
+        emit:  command
+      - from:  sub_code
+        where: {sub: clause.0.next_sub}
+        set:   {code: code}
+)");
+	machine_fixture f(yaml, {kSuperRows, kSubRows, "sub,code\nwalk,1\nrun,2\nsit,3\nsleep,4\n"});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance creature = CreateInstance(*f.binding, 1, 1, &host);
+	Dispatch(creature, host, "fast", 2);
+	EXPECT_EQ(creature.Answer(trigger::Step, 1).outcome, clause_outcome::Missed);
+	EXPECT_EQ(creature.State(2).i, 2) << "(move, fast, walk) and (move, _, walk) miss: the base's run";
+	Dispatch(creature, host, "dance", 3);
+	EXPECT_TRUE(creature.Answer(trigger::Step, 1).fellThrough);
+	EXPECT_EQ(creature.State(1).i, Hash("run"));
+	EXPECT_EQ(creature.State(2).i, 2) << "(move, _, run) answered by retry; the base alone would say walk, 1";
+	Dispatch(creature, host, "hit", 4);
+	EXPECT_EQ(creature.State(1).i, Hash("walk"));
+	EXPECT_EQ(creature.State(2).i, 1) << "(move, hit, run): the override's stumble, not the base's sit";
+}
+
+TEST(Hierarchy, ANinthFallThroughKeyIsRefused)
+{
+	auto table = [](int keys)
+	{
+		std::string yaml = "tables:\n  - name: wide\n    read_only: true\n    pick: best\n    columns:\n";
+		std::string order;
+		for (int k = 1; k <= keys; ++k)
+		{
+			yaml += "      - {name: k" + std::to_string(k) + ", type: hash, key: true, fallthrough: true}\n";
+			order += (k == 1 ? "" : ", ") + std::string("k") + std::to_string(k);
+		}
+		return yaml + "      - {name: said, type: int}\n    order_by: {columns: [" + order + "]}\n";
+	};
+	EXPECT_TRUE(SchemaFromYaml(table(8), "wide.yaml").has_value()) << RefusalOf(SchemaFromYaml(table(8), "wide.yaml"));
+	std::string const refused = RefusalOf(SchemaFromYaml(table(9), "wide.yaml"));
+	EXPECT_TRUE(Mentions(refused, "is fall-through key 9")) << refused;
+	EXPECT_TRUE(Mentions(refused, "at most 8")) << refused;
+}
+
+TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
+{
+	// "Need not be total" is the machine's rule; a table's own load still
+	// checks it is total over its declared domain. A mod naming only idle
+	// over members [idle, walk, sleep] is refused at load, so a partial
+	// override declares domain: rows (its domain is the keys it has).
+	std::string const yaml = Replace(kModded, R"(  - name: brain_mod
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+)", R"(  - name: brain_mod
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: {members: [idle, walk, sleep]}}
+)");
+	auto doc = DocumentFromYaml(yaml, "machine.yaml");
+	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
+	relation_store store(std::move(doc->tables));
+	std::string const refused = RefusalOf(LoadCsv(store, csv_rows{1, 1, kModRows, "mod.csv"}));
+	EXPECT_TRUE(Mentions(refused, "table 'brain_mod' key")) << refused;
+	EXPECT_TRUE(Mentions(refused, "the key is in the table's domain")) << refused;
+	EXPECT_EQ(RefusalOf(LoadCsv(store, csv_rows{1, 1, "mode,next,command\nidle,sleep,()\nwalk,walk,()\nsleep,idle,()\n",
+		"mod.csv"})), "(accepted)") << "the same table, total over its members, loads";
 }

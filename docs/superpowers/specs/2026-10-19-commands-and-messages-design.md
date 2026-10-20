@@ -268,7 +268,8 @@ rebind's leaving half is the same code. Decided in building:
   refused). In the builder it stays a key domain, `key_domain::FallThrough()` (R3's `Message`
   kind renamed), so the domain machinery (blank twin, orphans, a foreign domain dropping the 0)
   carries over unchanged.
-- **At most one per table** still: the retry order for several is Part 4's.
+- **At most one per table** when Part 3 was built; Part 4 lifted it to eight, retried in key
+  order (Part 4, As built).
 - **Any hash source may feed it.** R3 bound a message key to the message type both ways; with no
   message concept that pairing is gone. A fall-through key stays open to `Prepare` whatever
   feeds it (a state column or literal does not close it), since a value with no run falls
@@ -409,7 +410,11 @@ order above, and override clauses are built; the pair-table domain is not (below
 `walk → run` entry and its fall-through, the two-key retry order (`PickBest` and `Step` share
 it), the override's miss, hit and coalesced dependent, its refusals, and
 `ManySurfaces.OneTableAndTwoTablesWithAnOverrideRunTheSame`, which runs one machine written in
-one table and in two through the same events and compares states and commands step by step.
+one table and in two through the same events and compares states and commands step by step
+(`TheTwoFormsLeaveAndEnterTheSameAcrossModeChanges` repeats it with entry and exit lists across
+superstate changes, and `Close`). Also covered: an override in an exit list and its group, under
+`Close` too; an override that fails (reported, the base's answer stands); an override's own
+fall-through feeding the coalesced reader; a ninth fall-through key refused.
 Decided in building:
 
 - **Entry and exit groups.** Clauses of one entry or exit list that read one another (a clause
@@ -442,6 +447,16 @@ Decided in building:
     values.
   - `Prepare` cuts an override's domain to the tuples its rows have a run for and proves each as
     any best or weighted clause's run is proved.
+  - "Need not be total" is the machine's rule, not an exemption from the table's own load
+    check: a partial override table declares its keys `domain: rows`, so its domain is the
+    keys it has. Declared over `members:`, it must have a run for every member, as any best
+    table must (`OverrideClause.ANonTotalOverrideTableNeedsARowsDomain`).
+  - A hit with no emit column keeps the base's command: the column-subset rule replaces only
+    what the override declares, so the base's command goes out with the override's state
+    (`OverrideClause.AHitWithNoEmitKeepsTheBasesCommand`). Whether a hit should instead
+    silence the base's emit is an owner question (Open questions).
+  - Provenance records the base as `Answered` with its own row, before the override's
+    replacement; the override's entry, the next one, shows what replaced it.
 - **Not built: substate membership (the pair-table domain).** The rule above says it is
   "ordinary key-domain machinery", but it is not: a foreign-column domain gives one column's
   values, and a (super, sub) pair is a joint domain over two keys, which nothing has; and on a
@@ -604,6 +619,11 @@ above; `:lock` is marked speculative.
   run keyed on a pair the table lacks becomes an orphan, reported by `Load` and `Prepare` (the
   blank stays allowed). It would make the pair table a domain source, with the dependent
   re-checks that brings.
+- **An override hit with no emit (for the owner).** Built: the column-subset rule, so the base's
+  command goes out with the override's state (Part 4, As built). The alternative is that any
+  hit silences the base's emit, so a mod that changes only state also drops the base's command
+  (an override wanting the base's command would then have to repeat it). Unchanged until
+  decided.
 - **Edges on a handler's payload inputs (for the owner).** An edge compares an input with its
   previous value, the last one read. For a handler's payload that is the previous *message's*
   value (or the neutral value a getter answered at `CreateInstance` or between dispatches), not

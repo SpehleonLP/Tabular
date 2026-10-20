@@ -592,7 +592,12 @@ compile to one internal table (owner, 2026-10-19).
   nothing, emits nothing, is not reported and is no hold (`clause_outcome::Missed`). A hit
   replaces the overridden clause's answer, its sets and its emit, not as well as: each column the
   override sets takes its value, each it does not keeps the overridden clause's, and its command
-  replaces that clause's in the results. The override runs only when the clause it overrides
+  replaces that clause's in the results; an override with no emit replaces only the columns it
+  sets, so the overridden clause's command goes out with the override's state. The override
+  table's own load still checks it total over its declared domain, so a partial override
+  declares its keys `domain: rows` (its domain is the keys it has); one declaring `members:`
+  must have a run for every member. Provenance records the overridden clause as `Answered`
+  with its own row; the override's entry, next, shows the replacement. The override runs only when the clause it overrides
   answered (a hold stands: there is nothing to coalesce onto), and keys on the state that
   clause read, so the overridden clause's sets wait until the override has run. A later clause
   reading the overridden clause reads the coalesced answer: where the override hit, its row's

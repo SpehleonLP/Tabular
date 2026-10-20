@@ -156,8 +156,9 @@ enum class clause_outcome : uint8_t
 struct clause_answer
 {
 	clause_outcome outcome = clause_outcome::NotRun;
-	// Its fall-through key's value had no run, and it looked up the blank run
-	// instead (which answered, or is the NoRun).
+	// Its key tuple had no run, and a retry with fall-through keys blanked
+	// (in key order, the first the lowest bit) answered, or none did and this
+	// is the NoRun.
 	bool           fellThrough = false;
 	// Answered (best, weighted): the version row picked. Failed: the row whose
 	// script condition could not answer, or UINT32_MAX when an input was.
@@ -228,8 +229,8 @@ struct provenance_entry
 	uint64_t       pass  = 0;                       // 0 for creation, then one more per Step, Rebind or Close
 	provenance_run run   = provenance_run::Create;
 	trigger        list  = {};
-	// The fall-through key's value had no run and the blank run was looked up
-	// (answer.fellThrough); keys still hold the value, as read.
+	// The key tuple had no run and the fall-through retries were tried
+	// (answer.fellThrough); keys still hold the values as read.
 	bool           fellThrough   = false;
 	uint8_t        keyCount      = 0;
 	uint8_t        inputCount    = 0;
