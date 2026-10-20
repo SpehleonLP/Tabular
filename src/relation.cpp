@@ -631,22 +631,28 @@ tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_tabl
 		case domain_kind::Rows:
 			break;
 		case domain_kind::FallThrough:
+		{
 			if (in.type != column_type::Hash)
 			{
 				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name, "' is a ",
 					TypeName(in.type), "; a fall-through key is a hash"));
 			}
-			// The retry has one slot; an order for several is designed
-			// (commands-and-messages spec, Part 4) and not built.
-			for (domain_def const& earlier : out)
+			// Several give way in key order (commands-and-messages spec,
+			// Part 4); a miss may try every combination of blanks, so their
+			// number is capped.
+			size_t earlier = 0;
+			for (domain_def const& d : out)
 			{
-				if (earlier.kind == domain_kind::FallThrough)
-				{
-					return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
-						"' is a second fall-through key; a table has at most one"));
-				}
+				earlier += d.kind == domain_kind::FallThrough ? 1 : 0;
+			}
+			if (earlier == kMaxFallThroughKeys)
+			{
+				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
+					"' is fall-through key ", earlier + 1, "; a table has at most ", kMaxFallThroughKeys,
+					", since a lookup that misses may try every combination of blanks"));
 			}
 			break;
+		}
 		}
 		out.push_back(std::move(resolved));
 	}

@@ -85,19 +85,19 @@ tl::expected<row_range, ErrorContext> RunOf(TableVersion const& version, pick_qu
 	{
 		return row_range{0, version.RowCount()};
 	}
-	uint32_t const fallThroughKey = detail::FallThroughKeyOf(def);
+	fall_through_keys const fall = FallThroughKeysOf(def);
 	// The retry's keys, on the stack for any table of up to kInlineKeys keys:
 	// a pick allocates nothing for the fall-through, as a step does not.
 	constexpr size_t           kInlineKeys = 16;
 	std::array<cell, kInlineKeys> inlineKeys;
 	std::vector<cell>          wideKeys;
 	std::span<cell>            scratch(inlineKeys.data(), std::min(query.keys.size(), kInlineKeys));
-	if (fallThroughKey != UINT32_MAX && query.keys.size() > kInlineKeys)
+	if (fall.count != 0 && query.keys.size() > kInlineKeys)
 	{
 		wideKeys.resize(query.keys.size());
 		scratch = wideKeys;
 	}
-	return detail::FindFallingThrough(query.keys, scratch, fallThroughKey,
+	return detail::FindFallingThrough(query.keys, scratch, fall,
 		[&](std::span<cell const> keys) { return version.FindOrdered(keys); },
 		[](tl::expected<row_range, ErrorContext> const& run) { return run && run->first == run->last; });
 }
@@ -330,20 +330,6 @@ std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size
 		}
 	}
 	return bits;
-}
-
-uint32_t FallThroughKeyOf(table_def const& def)
-{
-	// Domains are one per key column, in column order, as a picked table's
-	// keys are.
-	for (uint32_t k = 0; k < def.domains.size(); ++k)
-	{
-		if (def.domains[k].kind == domain_kind::FallThrough)
-		{
-			return k;
-		}
-	}
-	return UINT32_MAX;
 }
 
 size_t DrawRow(TableVersion const& version, size_t first, size_t last, uint64_t seed, uint64_t site)

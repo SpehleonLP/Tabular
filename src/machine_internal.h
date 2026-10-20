@@ -6,6 +6,7 @@
 
 #include "tabular/machine.h"
 #include "layout.h"
+#include "table_layout.h"
 
 #include <array>
 #include <memory>
@@ -29,6 +30,10 @@ struct resolved_source
 	uint32_t    index   = UINT32_MAX;
 	uint32_t    column  = UINT32_MAX;
 	cell        literal = cell::Integer(0);
+	// Clause, when the clause read is overridden: the override's column of
+	// the same name, read instead when the override hit (the coalesced
+	// answer); UINT32_MAX when its table has none.
+	uint32_t    overrideColumn = UINT32_MAX;
 };
 
 struct resolved_clause
@@ -40,9 +45,20 @@ struct resolved_clause
 	// column wins, as a later clause's does.
 	std::vector<std::pair<uint32_t, uint32_t>> sets;
 	uint32_t                     emit  = UINT32_MAX;   // a Command column
-	// The table's fall-through key, the slot a step's run lookup retries with
-	// 0 (the blank run) when its value has no run; UINT32_MAX for none.
-	uint32_t                     fallThroughKey = UINT32_MAX;
+	// The clause this one overrides, the one before it; and the clause that
+	// overrides this one, the one after it. UINT32_MAX for none.
+	uint32_t                     overrides    = UINT32_MAX;
+	uint32_t                     overriddenBy = UINT32_MAX;
+	// Entry and exit only: the hash state columns whose change runs this
+	// clause on a step (Part 4: entry and exit run per column). A clause runs
+	// when a column it keys on as state.<col> changed; clauses of the list
+	// that read one another run as one, on the union of their columns; and a
+	// group that keys on no state column runs on any change, as every hash
+	// column is listed. Sorted, distinct.
+	std::vector<uint32_t>        enteredOn;
+	// The table's fall-through keys, the slots a step's run lookup retries with
+	// 0 (blank) when the keys as read have no run, in the order they give way.
+	fall_through_keys            fallThrough;
 };
 
 struct state_column

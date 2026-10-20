@@ -143,11 +143,12 @@ uint64_t DrawSite(std::string_view machine, trigger list, uint32_t clause);
 // What one clause did the last time its list ran.
 enum class clause_outcome : uint8_t
 {
-	NotRun,       // its list has not run: exit or entry on a step that entered no state
+	NotRun,       // its list has not run (exit or entry on a step that entered no state), it is an entry or exit clause none of whose columns changed, or it is an override whose clause did not answer
 	Answered,     // it picked: row (best, weighted) or bits (or), and its sets wrote next
 	NoRun,        // its key tuple has no run: a key value outside the domain Prepare proved (a fall-through key's value with none falls through to the blank run first)
 	Failed,       // the pick failed: a script condition could not answer, or a ranged input was NaN, or a flag set was wider than 32 bits
 	SourceHeld,   // a source had no value: an earlier clause that did not answer, or an input whose getter failed
+	Missed,       // an override found no run for its key tuple: NULL, so the clause it overrides answers alone; not a hold, never reported
 };
 
 // A clause that did not answer wrote nothing and emitted nothing: its table
@@ -405,14 +406,20 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // 3. Runs the step list in order, each clause reading state from next (so it
 //    sees what earlier clauses wrote this step) and an earlier clause's answer
 //    from this step, and writing its sets into next (a later write wins). A
-//    clause with a fall-through key finds the run for its value, or, when the
-//    value has none, the blank run (the same keys with 0 in that key).
+//    clause with fall-through keys finds the run for its keys, or, when they
+//    have none, retries with blanks (0) in them, in the order they give way
+//    (see FindFallingThrough). An override runs only when the clause it
+//    overrides answered, keys on the state that clause read (its sets wait
+//    for the override), and on a hit writes its own sets over that clause's
+//    and replaces its emit; a miss writes nothing and is no hold.
 // 4. If any hash state column of next differs from current, a state was
 //    entered (so A -> B -> A within one step enters nothing). Then the exit
 //    list runs, its state sources reading current (the state being left), and
 //    then the entry list, reading next; both write next, entry's writes last.
-//    Neither writes a hash state column (the definition build refuses it), so
-//    neither enters again.
+//    Of each, only the clauses entered on a column that changed run (Part 4:
+//    entry and exit run per column; the others answer NotRun). Neither writes
+//    a hash state column (the definition build refuses it), so neither enters
+//    again. Creation, a rebind and Close run their entry or exit lists whole.
 // 5. Next becomes current, and the step returns what the clauses that
 //    answered emitted: the step list's, then exit's, then entry's, each list
 //    in clause order (the same span as Emitted()).

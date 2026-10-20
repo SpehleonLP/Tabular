@@ -254,17 +254,26 @@ the column's `domain:`:
   refused in its CSV), so the dependent is total over the real values alone.
 - `rows` (`domain: rows`): the key's own table's rows name its values.
 - fall-through (`fallthrough: true` in place of `domain:`; `key_domain::FallThrough()` in the
-  builder; commands-and-messages spec Part 3, built 2026-10-19): an open key, on a hash key, at
-  most one per table (an order for several is designed in Part 4, not built). Any value may
-  come, and one no run keys on falls through to the blank run. It contributes the blank, 0, so
-  every tuple of the other keys demands a blank run; a run keyed on a value is in the domain
-  when its blank twin is (so it is checked because it is there), and an orphan when its other
-  keys are outside theirs. A blank CSV cell in a fall-through key is that 0, in a rows file or
-  a pivoted one; every other blank value cell is still refused. The fall-through is the
-  table's: every lookup of its runs, `PickBest`'s as much as a machine step's, retries a value
-  with no run once with 0 in that key, and only a miss of both finds no run. It replaces R3's
-  `domain: message`: a machine that branches on argument-free event types (the craft bench's
-  `select`, `back`) keys on one, fed by a hash input the host fills for one step.
+  builder; commands-and-messages spec Part 3, built 2026-10-19; several, Part 4, built
+  2026-10-19): an open key, on a hash key, at most eight per table. Any value may come, and keys
+  no run has fall through to blanks. Each contributes the blank, 0, so every tuple of the other
+  keys demands the run with every fall-through key blank; a run keyed on a value in any of them
+  is in the domain when that all-blank twin is (so it is checked because it is there), and an
+  orphan when its other keys are outside theirs. A blank CSV cell in a fall-through key is that
+  0, in a rows file or a pivoted one; every other blank value cell is still refused. The
+  fall-through is the table's: every lookup of its runs, `PickBest`'s as much as a machine
+  step's, retries keys with no run with blanks in the fall-through keys that hold a value.
+  **Retry order (owner, 2026-10-19):** they give way in key order, as bits in counting order
+  with the first fall-through key in key order the lowest bit, so with keys (super, sub, kind),
+  sub and kind falling through, a lookup tries (super, sub, kind), (super, _, kind),
+  (super, sub, _), (super, _, _): the author lists keys from the one that should give way first
+  to the one that should hold out longest. A combination that blanks a key already blank is
+  skipped (it repeats an earlier lookup); the first hit answers, and only a miss of all finds no
+  run. The cap of eight bounds a miss at 255 retries. Child runs are total, as every run is: a
+  fall-through happens only when there is no run at all. It replaces R3's `domain: message`: a
+  machine that branches on argument-free event types (the craft bench's `select`, `back`) keys
+  on one, fed by a hash input the host fills for one step, and a hierarchy puts one on its
+  substate key (see Hierarchy).
 - A machine clause's output is the fifth kind. It is not declared on the table: a machine's
   `Prepare` closes a clause's key by its source (see Machines), and the table keeps one of the
   four kinds above for its own loads.
@@ -324,7 +333,8 @@ refuses a document with machines rather than drop them). It holds:
 - four ordered **clause lists**, `create`, `entry`, `step` and `exit`. A clause reads one
   picked table that answers one value per column (a best, an or or a weighted table): `from` the table, `where` each key column = a source, `given` each table input = a
   source, then `set` state columns from the picked row's value columns and/or `emit` a command
-  column (the suffix included). Transition and entry tables are clauses, not table kinds.
+  column (the suffix included), and optionally `overrides` an earlier clause (see Hierarchy).
+  Transition and entry tables are clauses, not table kinds.
 
 A **source** is a state column (`state.mode`), a machine input (`input.energy`), a value column
 of the row an earlier clause of the same list picked (`clause.0.mood`), or a literal
@@ -351,8 +361,15 @@ start: a transition belongs in the step list; int and double writes are data and
 allowed), and an `exit` clause setting one (exit runs once the step list has chosen a state,
 keyed on the one being left, so its write would overrule that choice); a key that is not a
 fall-through key reading an earlier clause's fall-through column (`clause.N.<column>`: that
-clause can answer from its blank run with 0, which only a fall-through key holds); a hash
-state with no members, a duplicate member, or an initial value that is not a member. Both the
+clause can answer from its blank run with 0, which only a fall-through key holds); an override
+that does not directly follow the clause it overrides, sets a state column that clause does
+not, emits where it does not, reads or overrides an or table, overrides an override, or
+overrides a clause that may hold for want of a run (a key, other than a fall-through key, read
+from a source that closes nothing: a machine input, an int or double state column, an or
+clause); a clause reading an override directly (it reads the clause overridden, which gives the
+coalesced answer), or reading an overridden column whose override's same-named column has
+another type; a hash state with no members, a duplicate member, or an initial value that is not
+a member. Both the
 YAML front end and the definition build name a clause the same way: `machine 'grazer' step
 clause 0 (table 'grazer_brain')`. In YAML, members
 and literals are hashed as CSV cells are, so within one machine a name hashing to 0 or two names
@@ -366,7 +383,8 @@ gives the values it can hold:
 - a hash state column, the column's members;
 - an earlier best or weighted clause, the distinct values of the column read over the rows the
   earlier clause can answer from (the rows a best clause's layout reaches, every row of a
-  weighted clause's in-domain runs);
+  weighted clause's in-domain runs), and, when that clause is overridden, its override's
+  same-named column over the override's rows too (the coalesced answer, see Hierarchy);
 - a literal, its one value.
 
 Every other source closes nothing, and **one rule covers them all**: the key keeps the table's
@@ -483,16 +501,20 @@ with every state column at its initial value, after running the `create` list an
    clamp, the input checks, the flag rank, the OR and the draw are the interpreted picks' own
    code, so the
    compiled step and its oracle cannot drift apart there. The clause's `set`s then write next;
-   within a list a later write of a column wins (R4).
+   within a list a later write of a column wins (R4). An **override** (see Hierarchy) runs
+   only when the clause it overrides answered, and keys on the state that clause read: the
+   overridden clause's sets wait until its override has run, then write the columns the
+   override did not.
 4. **Holds.** A clause writes nothing this step, and its dependents that read it hold too,
    when a source has no value (`SourceHeld`: an input whose getter failed, an earlier clause
    that held), when an input is one a pick refuses (`Failed`: NaN for a ranged input (R12), a
    flag set wider than 32 bits), when its key tuple has no run (`NoRun`: an input-bound key's
    value outside the domain `Prepare` proved), or when a script condition cannot answer
    (`Failed`). Inputs are checked before the run is found, as a pick checks its query first.
-   A clause whose fall-through key's value has no run of its own retries once with the blank,
-   0; only a miss of both is `NoRun`. The answer says it fell through
-   (`clause_answer::fellThrough`).
+   A clause whose keys have no run of their own retries with blanks in its fall-through keys,
+   in their order; only a miss of all is `NoRun`. The answer says it fell through
+   (`clause_answer::fellThrough`). An override's miss is not a hold: it answers `Missed`, writes
+   and emits nothing, is not reported, and the clause it overrides answers alone.
 5. **Entry.** "Entered" means a hash state column of next differs from current at the end of
    the step list, so A → B → A within one step enters nothing. Then the `entry` list runs once
    against next, its writes landing on top of the step list's (so across lists, step writes,
@@ -503,12 +525,22 @@ with every state column at its initial value, after running the `create` list an
    **Exit** (R6) runs on the same test, before entry: its clauses read state from **current**,
    the state being left, and write next, so where exit and entry write one column entry's
    write lands last. When nothing was entered both lists answer `NotRun`. Creation runs no
-   exit: nothing is left.
+   exit: nothing is left. **Entry and exit run per column** (owner, 2026-10-19; built
+   2026-10-19, commands-and-messages spec Part 4): an entry or exit clause runs only when a
+   hash column it keys on as `state.<col>` changed, inferred from its `where` with no
+   declaration, and answers `NotRun` otherwise. So in the craft bench a change of `modal` alone
+   runs no page entry or exit, and in a hierarchy `walk → run` runs `run`'s entry and not
+   `move`'s. Clauses of one list that read one another (a clause source), and an override with
+   the clause it overrides, run as one group on the union of their columns, so a reader never
+   runs without its source; a group that keys on no state column runs on any change of state,
+   as every clause did before. Creation, `Rebind` and `Close` run their entry or exit lists
+   whole: everything is entered or left.
 6. Next becomes current (the two vectors are swapped).
 7. **Emits.** Every clause of the step, exit and entry lists (in that order, each in clause
    order) that answered and has an `emit` adds its row's command to the step's results, a view
    into the version the binding holds; the step returns them, with the step's state already
-   current. A held clause emits nothing. Creation's results are the create list's, then
+   current. A held clause emits nothing, and an overridden clause emits nothing when its
+   override hit and emits (the override's command replaces it). Creation's results are the create list's, then
    entry's.
 
 **Reports (P15).** A failure reaches `report` once per instance: a getter failure once per
@@ -541,6 +573,39 @@ rebuilt from collision messages. Routing a message to its handler, and to the ob
 when there is none, is the host's (see the host adapter list); the host knows whether it has a
 handler, so Tabular has no `Absorbed()`. R3's `message_inputs`, `Step`'s message, the positional
 argument slots and their report, and `domain: message` are removed.
+
+**Hierarchy (commands-and-messages spec Part 4, built 2026-10-19).** A hierarchical state
+machine is a left outer join with a coalesce: the substate's own transition wins, and where it
+has none its superstate's applies. Tabular writes it two ways, and both run the same (tested:
+`ManySurfaces.OneTableAndTwoTablesWithAnOverrideRunTheSame`), since many authoring surfaces
+compile to one internal table (owner, 2026-10-19).
+
+- **One table:** a fall-through on the substate key. With keys (super, sub, kind), sub and kind
+  falling through, a `walk` that is hit has no (move, walk, hit) run, retries (move, _, hit) and
+  answers from the superstate's row; a `run` with its own (move, run, hit) row answers from it.
+  The retry order is the fall-through keys' (Key domains). A third level is a third state
+  column with its own fall-through.
+- **Two tables: an override clause.** `overrides: <n>` (`add_clause::overrides`) names the
+  clause directly before it in the same list, by position. Its table need not be total: `Prepare`
+  cuts its domain to the tuples its rows have a run for and proves each of those runs as a best
+  or weighted clause's; a tuple with none is a miss at run time, NULL: the override writes
+  nothing, emits nothing, is not reported and is no hold (`clause_outcome::Missed`). A hit
+  replaces the overridden clause's answer, its sets and its emit, not as well as: each column the
+  override sets takes its value, each it does not keeps the overridden clause's, and its command
+  replaces that clause's in the results. The override runs only when the clause it overrides
+  answered (a hold stands: there is nothing to coalesce onto), and keys on the state that
+  clause read, so the overridden clause's sets wait until the override has run. A later clause
+  reading the overridden clause reads the coalesced answer: where the override hit, its row's
+  column of the same name, if its table has one; otherwise the overridden clause's. `Prepare`
+  closes such a reader's key over both tables' values. Totality is the machine's, not each
+  table's: an override names a clause that is itself total and always answers. This is also the
+  path for a package's override of another's rows (two owners' rows with equal flags may not
+  overlap in one run, owner 2026-10-18): the mod's table, and a clause that wins where it has a
+  row.
+- **Which substates belong to which superstate** is not built: the members lists allow a
+  `(rest, walk)` state. The spec's sketch, a `sub` domain read from a table of (super, sub)
+  pairs, needs a joint foreign domain that the key-domain machinery does not have (a foreign
+  column gives one column's values, not pairs); it is an open question (Undecided).
 
 **Close.** `Close(instance, self, seed)` ends an instance's run, as the host does when the
 object leaves, from any state: closing is not a transition, so no exit row is needed per state.
@@ -958,10 +1023,10 @@ run 1,000 instances × 50 ticks, inputs varying per instance and tick from a tab
 |---|---|---|
 | build a definition: grazer | 194 to 258 us | 1200 us |
 | build a definition: per row | 0.85 to 0.89 us | 1.8 us |
-| build a definition: brain machine | 204,200 bytes | 260000 bytes |
+| build a definition: brain machine | 207,100 bytes | 260000 bytes |
 | bind: grazer | 0.89 to 0.91 us | 1.8 us |
 | bind: brain | 71 to 73 us | 150 us |
-| bind: grazer binding | 996 bytes | 1300 bytes |
+| bind: grazer binding | 993 bytes | 1300 bytes |
 | bind: brain binding | 37,100 bytes | 47000 bytes |
 | create an instance: grazer | 0.43 to 0.45 us | 0.9 us |
 | create an instance: brain | 0.40 to 0.42 us | 0.9 us |
@@ -1096,6 +1161,11 @@ overrule the same way.
 - The stranded-dependent rule (see Key domains): the owner finds blocking every load into a
   source while a dependent has gaps a bad rule, with no better one yet. A candidate: no load may
   add a gap, and gaps a bare retract left are reported but do not block.
+- Substate membership in a hierarchy (see Hierarchy): reporting or refusing a `(rest, walk)`
+  state needs a domain of (super, sub) pairs read from another table, jointly over two keys;
+  a foreign-column domain gives one column's values. A candidate: let a fall-through key also
+  name a pair table, `fallthrough: {table: substates, with: {super: super}}`, so a run keyed on
+  a pair the table lacks is an orphan, reported by `Load` and `Prepare`.
 - Edges on a handler's payload inputs (see Messages): such an edge crosses from the previous
   message's value (or a getter's neutral value between dispatches), not the previous tick's.
   Allowed as built; whether it means anything, or should be refused, is the owner's.

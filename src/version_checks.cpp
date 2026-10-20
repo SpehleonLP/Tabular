@@ -465,7 +465,7 @@ void DeclaredDomain(domain_def const& declared, table_def const* foreignDef, tab
 		break;
 	case domain_kind::FallThrough:
 		values.assign(1, 0);
-		domains.fallThroughKey = k;
+		domains.fallThroughKeys.push_back(k);
 		break;
 	case domain_kind::None:
 		break;   // the schema refuses a best table's key with no domain
@@ -549,15 +549,15 @@ void ResolveDomain(table_rows const& rows, key_domains& domains)
 	// In key order only when the columns over their rows lead the keys, and
 	// the walk needs key order.
 	SortTuples(domains.tuples, keys, count, false);
-	if (domains.fallThroughKey == UINT32_MAX)
+	if (domains.fallThroughKeys.empty())
 	{
 		return;
 	}
 
-	// A fall-through key: so far every tuple has the blank. A run keyed on a
-	// value is in the domain when its blank twin is, so it is checked because
-	// it is there, and a value no run names falls through to that twin.
-	size_t const         m = domains.fallThroughKey;
+	// Fall-through keys: so far every tuple has them all blank. A run keyed on
+	// a value in any of them is in the domain when its twin with every
+	// fall-through key blank is, so it is checked because it is there; a value
+	// no run names falls through, at the latest to that twin, which is total.
 	std::vector<int64_t> tuple(keys);
 	std::vector<int64_t> twin(keys);
 	size_t               added = 0;
@@ -567,12 +567,17 @@ void ResolveDomain(table_rows const& rows, key_domains& domains)
 		{
 			tuple[k] = rows.cells[r * rows.valueCount + rows.orderSlots[k]].i;
 		}
-		if (tuple[m] == 0)
+		twin = tuple;
+		bool valued = false;
+		for (uint32_t m : domains.fallThroughKeys)
+		{
+			valued  = valued || tuple[m] != 0;
+			twin[m] = 0;
+		}
+		if (!valued)
 		{
 			continue;
 		}
-		twin    = tuple;
-		twin[m] = 0;
 		// Binary search over the first count tuples, the sorted blank ones.
 		int64_t const* base = domains.tuples.data();
 		size_t         lo   = 0;

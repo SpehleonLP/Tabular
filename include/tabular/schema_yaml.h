@@ -60,14 +60,19 @@ struct schema_document
 //           given: {energy: input.energy}       # every table input
 //           set:   {mode: next}                 # state column: value column
 //           emit:  command                      # a command column
+//         - from:  grazer_brain_mod             # an override (Part 4):
+//           overrides: 0                        #   the clause directly before
+//           where: {mode: state.mode}
+//           set:   {mode: next}
 //
 // A source is state.<column>, input.<name>, clause.<n>.<column> (the row an
 // earlier clause of the same list picked) or {literal: <text>}, read as a cell
 // of the target's type. Hash members and literals are hashed as CSV cells are,
 // so within one machine hash 0 and two names with one hash are refused. A
-// table's hash key may declare `fallthrough: true` in place of a domain: a
-// value with no run retries the blank run (a blank CSV cell, allowed only
-// there). Each machine is checked against the tables (CheckMachine) before it is returned.
+// table's hash key may declare `fallthrough: true` in place of a domain: keys
+// with no run retry with blanks (a blank CSV cell, allowed only there), several
+// such keys giving way in key order. Each machine is checked against the
+// tables (CheckMachine) before it is returned.
 tl::expected<schema_document, ErrorContext> DocumentFromYaml(std::string_view text, std::string_view label);
 
 }

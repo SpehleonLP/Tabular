@@ -326,6 +326,13 @@ bool ReadSources(list_run const& run, std::span<resolved_source const> sources, 
 			{
 				return false;
 			}
+			// The coalesced answer (Part 4): the override's row where it hit.
+			if (from.overrideColumn != UINT32_MAX && run.answers[from.index + 1].outcome == clause_outcome::Answered)
+			{
+				out[s] = AnswerValue(run.machine.lists[run.list][from.index + 1], run.answers[from.index + 1],
+					from.overrideColumn);
+				break;
+			}
 			out[s] = AnswerValue(run.machine.lists[run.list][from.index], earlier, from.column);
 			break;
 		}
@@ -588,17 +595,21 @@ clause_answer RunClause(list_run const& run, size_t index)
 		}
 		before = std::span<cell const>(run.givenBefore.data(), rc.inputs.size());
 	}
-	// A fall-through key's value with no run falls through to the blank run,
-	// as every lookup of the table does. The retry writes run.keys itself, and
-	// a hit leaves the blank there; the value read is put back, so a report
-	// and provenance name the key as it came.
-	cell const   asRead = rc.fallThroughKey != UINT32_MAX ? keys[rc.fallThroughKey] : cell::Integer(0);
-	size_t const tuple  = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()),
-		rc.fallThroughKey, [&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; });
-	if (rc.fallThroughKey != UINT32_MAX && asRead.i != 0 && run.keys[rc.fallThroughKey].i == 0)
+	// Keys with no run fall through to blanks in the fall-through keys, in
+	// the order they give way, as every lookup of the table does. The retries
+	// write run.keys itself and put the values read back, so a report and
+	// provenance name the keys as they came.
+	uint32_t     blanked = 0;
+	size_t const tuple   = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()),
+		rc.fallThrough, [&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; },
+		&blanked);
+	answer.fellThrough = blanked != 0;
+	// An override's table need not be total: no run is NULL, and the clause it
+	// overrides answers alone.
+	if (tuple == SIZE_MAX && rc.overrides != UINT32_MAX)
 	{
-		answer.fellThrough               = true;
-		run.keys[rc.fallThroughKey]      = asRead;
+		answer.outcome = clause_outcome::Missed;
+		return answer;
 	}
 	if (tuple == SIZE_MAX)
 	{
@@ -671,11 +682,44 @@ clause_answer RunClause(list_run const& run, size_t index)
 	}
 
 	answer.outcome = clause_outcome::Answered;
-	for (auto const& [column, state] : rc.sets)
+	// An overridden clause's sets wait for its override, which keys on the
+	// state as this clause read it (see WriteOverridden).
+	if (rc.overriddenBy == UINT32_MAX)
 	{
-		run.next[state] = AnswerValue(pc, answer, column);
+		for (auto const& [column, state] : rc.sets)
+		{
+			run.next[state] = AnswerValue(pc, answer, column);
+		}
 	}
 	return answer;
+}
+
+// The coalesce (Part 4), once the override over has run or been skipped: the
+// overridden clause base, when it answered, writes each of its sets the
+// override did not just write. The override read state from next before
+// base's writes, as base did, so both clauses key on the same state.
+void WriteOverridden(list_run const& run, size_t base, size_t over)
+{
+	clause_answer const& answer = run.answers[base];
+	if (answer.outcome != clause_outcome::Answered)
+	{
+		return;
+	}
+	resolved_clause const& baseClause = run.machine.def.lists[run.list][base];
+	resolved_clause const& overClause = run.machine.def.lists[run.list][over];
+	bool const             hit        = run.answers[over].outcome == clause_outcome::Answered;
+	for (auto const& [column, state] : baseClause.sets)
+	{
+		bool replaced = false;
+		for (auto const& written : overClause.sets)
+		{
+			replaced = replaced || (hit && written.second == state);
+		}
+		if (!replaced)
+		{
+			run.next[state] = AnswerValue(run.machine.lists[run.list][base], answer, column);
+		}
+	}
 }
 
 list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state, void const* self, uint64_t seed)
@@ -750,16 +794,48 @@ void Record(instance& subject, list_run const& run, size_t index, clause_answer 
 #endif
 
 // Runs a list in order; each clause sees what the ones before it wrote. state
-// is the vector its State sources read.
-void RunList(instance& subject, trigger list, std::vector<cell> const& state, void const* self, uint64_t seed)
+// is the vector its State sources read. With left (a step's entry and exit:
+// the state being left), an entry or exit clause runs only when one of the
+// hash columns it is entered on differs between left and next, and answers
+// NotRun otherwise (Part 4: entry and exit run per column).
+void RunList(instance& subject, trigger list, std::vector<cell> const& state, void const* self, uint64_t seed,
+	std::vector<cell> const* left = nullptr)
 {
 	list_run const run = RunOver(subject, size_t(list), state, self, seed);
 	for (size_t i = 0; i < run.answers.size(); ++i)
 	{
-		run.answers[i] = RunClause(run, i);
+		resolved_clause const& rc = run.machine.def.lists[run.list][i];
+		bool runs = true;
+		if (left)
+		{
+			bool changed = false;
+			for (uint32_t column : rc.enteredOn)
+			{
+				changed = changed || (*left)[column].i != run.next[column].i;
+			}
+			runs = changed;
+		}
+		// An override joins onto its clause's answer: with none (a hold) there
+		// is nothing to coalesce, and the hold stands.
+		if (rc.overrides != UINT32_MAX && run.answers[rc.overrides].outcome != clause_outcome::Answered)
+		{
+			runs = false;
+		}
+		if (runs)
+		{
+			run.answers[i] = RunClause(run, i);
 #if TABULAR_PROVENANCE
-		Record(subject, run, i, run.answers[i]);
+			Record(subject, run, i, run.answers[i]);
 #endif
+		}
+		else
+		{
+			run.answers[i] = clause_answer{};
+		}
+		if (rc.overrides != UINT32_MAX)
+		{
+			WriteOverridden(run, rc.overrides, i);
+		}
 	}
 }
 
@@ -843,6 +919,13 @@ void Emit(instance& subject, trigger list)
 	{
 		clause_answer const& answer = answers[binding.answerStart[size_t(list)] + i];
 		if (clauses[i].emit == UINT32_MAX || answer.outcome != clause_outcome::Answered)
+		{
+			continue;
+		}
+		// An override that hit and emits replaces this clause's command.
+		uint32_t const by = clauses[i].overriddenBy;
+		if (by != UINT32_MAX && clauses[by].emit != UINT32_MAX
+			&& answers[binding.answerStart[size_t(list)] + by].outcome == clause_outcome::Answered)
 		{
 			continue;
 		}
@@ -1039,8 +1122,8 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	// entry the state entered (next), and entry's writes land last.
 	if (Entered(machine, current, next))
 	{
-		RunList(subject, trigger::Exit, current, self, seed);
-		RunList(subject, trigger::Entry, next, self, seed);
+		RunList(subject, trigger::Exit, current, self, seed, &current);
+		RunList(subject, trigger::Entry, next, self, seed, &current);
 	}
 	else
 	{

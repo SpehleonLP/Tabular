@@ -691,7 +691,7 @@ TEST(FallThroughKey, ItDeclaresNoOtherDomain)
 	EXPECT_TRUE(Mentions(both, "column 'event' of table 'grazer_brain' falls through and declares a domain")) << both;
 }
 
-TEST(FallThroughKey, IsOneHashKey)
+TEST(FallThroughKey, IsAHashKeyAndATableHasAtMostEight)
 {
 	std::string const flags = RefusalOf(DocumentFromYaml(R"(
 tables:
@@ -704,18 +704,25 @@ tables:
     order_by: {columns: [m]}
 )", "t.yaml"));
 	EXPECT_TRUE(Mentions(flags, "key 'm' of table 't' is a int; a fall-through key is a hash")) << flags;
-	std::string const two = RefusalOf(DocumentFromYaml(R"(
-tables:
-  - name: t
-    read_only: true
-    pick: best
-    columns:
-      - {name: a, type: hash, key: true, fallthrough: true}
-      - {name: b, type: hash, key: true, fallthrough: true}
-      - {name: v, type: int}
-    order_by: {columns: [a, b]}
-)", "t.yaml"));
-	EXPECT_TRUE(Mentions(two, "key 'b' of table 't' is a second fall-through key; a table has at most one")) << two;
+	// Several give way in key order (Part 4); a miss may try every
+	// combination of blanks, so their number is capped.
+	auto keys = [](int n)
+	{
+		std::string columns;
+		std::string order;
+		for (int k = 0; k < n; ++k)
+		{
+			std::string const name = "k" + std::to_string(k);
+			columns += "      - {name: " + name + ", type: hash, key: true, fallthrough: true}\n";
+			order += (k ? ", " : "") + name;
+		}
+		return RefusalOf(DocumentFromYaml("tables:\n  - name: t\n    read_only: true\n    pick: best\n    columns:\n" + columns
+			+ "      - {name: v, type: int}\n    order_by: {columns: [" + order + "]}\n", "t.yaml"));
+	};
+	EXPECT_EQ(keys(2), "(accepted)");
+	EXPECT_EQ(keys(8), "(accepted)");
+	std::string const nine = keys(9);
+	EXPECT_TRUE(Mentions(nine, "key 'k8' of table 't' is fall-through key 9; a table has at most 8")) << nine;
 }
 
 TEST(FallThroughKey, OnlyABestTablesKeyFallsThrough)

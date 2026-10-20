@@ -90,14 +90,17 @@ enum class domain_kind : uint8_t
 	Members,   // a literal list
 	Column,    // the distinct values another table's column holds in its current rows
 	Rows,      // the table's own rows: the keys over their rows together take the sub-tuples the rows name
-	// A fall-through key (YAML `fallthrough: true`; a hash key, at most one per
-	// table). Open: any value may arrive, and one no run keys on falls through
-	// to the blank run (key 0, a blank CSV cell, which only this key may hold).
-	// So the domain is the blank for every tuple of the other keys, plus every
-	// run the rows name whose other keys are in it: the blank run is the
-	// catch-all that must be total, and a run keyed on a value is checked
-	// because it is there. A machine branching on argument-free event types
-	// keys on one, from a hash input the host fills for one step.
+	// A fall-through key (YAML `fallthrough: true`; a hash key, at most eight
+	// per table). Open: any value may arrive, and keys no
+	// run has fall through to blanks (key 0, a blank CSV cell, which only such
+	// a key may hold): with several, they give way in key order, tried as bits
+	// in counting order, the first the lowest (commands-and-messages spec,
+	// Part 4). So the domain is every fall-through key blank for every tuple
+	// of the other keys, plus every run the rows name whose twin with them all
+	// blank is in it: that all-blank run is the catch-all that must be total,
+	// and a run keyed on a value is checked because it is there. A machine
+	// branching on argument-free event types keys on one, from a hash input
+	// the host fills for one step; a hierarchy puts one on its substate key.
 	FallThrough,
 	// A machine clause's output closes a key the same way; it is a fifth kind.
 };

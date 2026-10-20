@@ -66,6 +66,17 @@ struct add_clause
 	// A Command column of the table (its suffix included) whose command the
 	// run returns when the clause answers; empty for none.
 	std::string_view              emit;
+	// The clause this one overrides (Part 4 of the commands-and-messages
+	// spec): the one directly before it in the same list, by position;
+	// UINT32_MAX for none. An override is a left outer join with a coalesce:
+	// it runs when the clause it overrides answered; a key tuple its table
+	// has no run for is a miss (NULL), which writes nothing, emits nothing,
+	// holds nothing and is not reported, so its table need not be total; a
+	// hit writes its sets over that clause's and its emit replaces that
+	// clause's. A later clause reading the overridden clause reads the
+	// coalesced answer: the override's row's column of the same name when the
+	// override hit and its table has one, else the overridden clause's.
+	uint32_t                      overrides = UINT32_MAX;
 };
 
 // A state column. A hash names one of its members; an int or a double holds
@@ -113,7 +124,13 @@ struct create_machine
 // command column, an or clause is read only through its output and emits
 // nothing, an entry or exit clause sets no hash state column, each hash
 // state's initial value is a member, and no ordinary key reads a clause's
-// fall-through key, which may answer blank. No rows are read.
+// fall-through key, which may answer blank. An override directly follows the
+// clause it overrides, sets only state columns that clause sets, emits only
+// if it emits, neither it nor that clause reads an or table, that clause is
+// not itself an override and always answers for want of no run (each of its
+// keys closed by its source, or a fall-through key), and no clause reads an
+// override directly (it reads the coalesced answer through the clause
+// overridden). No rows are read.
 // Prepare checks this first.
 tl::expected<void, ErrorContext> CheckMachine(create_machine const& definition, schema const& tables);
 
@@ -153,15 +170,19 @@ private:
 // best or weighted clause by the values its rows can answer, a literal is one
 // value; any other source (a machine input, an int or double state column, an
 // or clause's flags) closes nothing, and the key keeps the table's declared
-// domain (an or or a weighted table declares none: its rows; a fall-through
-// key the blank run per tuple of the other keys, plus the runs keyed on a
-// value). A fall-through key is always open: whatever its source, a value
-// with no run falls through to the blank run. On a best table
+// domain (an or or a weighted table declares none: its rows; fall-through
+// keys the run with them all blank per tuple of the other keys, plus the runs
+// keyed on values). A fall-through key is always open: whatever its source,
+// keys with no run fall through to blanks. On a best table
 // every tuple of that domain must have a run that is total over the table's
 // inputs, with no dead row and no two owners' rows overlapping, which is the
 // check a load makes, over this domain instead of the table's; on a weighted
 // table every tuple must have a run; an or table answers 0 for a tuple with no
-// run. Every hash a set can write must be a member of its state column. A
+// run. An override clause's table need not be total: its domain is cut to
+// the tuples its rows have a run for, and each of those runs is proved as a
+// best or weighted clause's is; a tuple with none is a miss at run time. A
+// key closed by an overridden clause also takes the values its override's
+// same-named column can answer. Every hash a set can write must be a member of its state column. A
 // refusal names the machine, the clause list and the clause. report, if
 // given, is cleared and, if the machine is accepted, holds every run outside
 // a clause's domain as an orphan, clause by clause in list order.

@@ -1,7 +1,8 @@
 # Commands and messages
 
-**Status:** Parts 1, 2 and 3 built (2026-10-19, branch tabular-commands; see "As built" under
-each); Part 4 is design, not built. Taken from the owner's conversation of 2026-10-19, after slices
+**Status:** Parts 1 to 4 built (2026-10-19, branch tabular-commands; see "As built" under
+each), except Part 4's substate membership (the pair-table domain), which waits for the owner
+with the other Open questions; the spec stays active until those are decided. Taken from the owner's conversation of 2026-10-19, after slices
 0–8 landed. It replaces the slice-4 message design (R3: the message type as a key, arguments
 as positional input slots). **Contract:** `docs/definition.md`; each part below names the
 contract text it changes.
@@ -402,6 +403,51 @@ clause definition gains `overrides`. The key-domain section gains the fall-throu
 - An override that does not directly follow its clause, sets a column its clause doesn't, or
   overrides an override is refused.
 
+**As built** (2026-10-19). Entry and exit per column, several fall-through keys in the retry
+order above, and override clauses are built; the pair-table domain is not (below). Tests:
+`test/hierarchy_gtest.cpp`, including the craft bench's modal-only change, the HFSM's
+`walk → run` entry and its fall-through, the two-key retry order (`PickBest` and `Step` share
+it), the override's miss, hit and coalesced dependent, its refusals, and
+`ManySurfaces.OneTableAndTwoTablesWithAnOverrideRunTheSame`, which runs one machine written in
+one table and in two through the same events and compares states and commands step by step.
+Decided in building:
+
+- **Entry and exit groups.** Clauses of one entry or exit list that read one another (a clause
+  source), and an override with the clause it overrides, run as one group on the union of their
+  `state.<col>` keys, so a step never runs a reader whose source it skipped (which would hold it
+  silently). Creation, `Rebind` and `Close` run their lists whole. A skipped clause answers
+  `NotRun` and is not recorded in provenance.
+- **At most eight fall-through keys per table**, since a miss may try 2^n - 1 combinations; the
+  set is a fixed array, so a lookup allocates nothing. A combination that blanks a key already
+  blank repeats an earlier lookup and is skipped. A load requires the run with every
+  fall-through key blank for each tuple of the other keys (the catch-all); a run keyed on values
+  is in the domain when that all-blank twin is. `clause_answer::fellThrough` stays a bool (any
+  retry hit), and the keys keep the values as read.
+- **Overrides**, `overrides: <n>` / `add_clause::overrides`:
+  - The override keys on the state its base read: a step's state sources read next, so the
+    base's sets wait until the override has run, then write the columns the override did not
+    (without that, `where: {mode: state.mode}` would read the base's own write).
+  - It runs only when the base answered; a base that held stays held, with nothing to coalesce
+    onto. An override that itself holds (a failed script, a NaN) is reported as any clause is,
+    and the base's answer stands.
+  - A miss answers the new `clause_outcome::Missed`: no write, no emit, no report, no hold.
+  - It may emit only where its base emits, and neither may be an or table (an or pick answers
+    every key, so it has no miss, and no one row to replace).
+  - "May hold for want of a run" is read from the base's sources: a key other than a
+    fall-through key, read from a machine input, an int or double state column or an or clause,
+    closes nothing and is refused.
+  - The coalesced answer is by column name: a dependent reading `clause.<base>.<col>` reads the
+    override's `<col>` where it hit and its table has one (the same type, or refused). Reading
+    the override directly is refused. `Prepare` closes the dependent's key over both tables'
+    values.
+  - `Prepare` cuts an override's domain to the tuples its rows have a run for and proves each as
+    any best or weighted clause's run is proved.
+- **Not built: substate membership (the pair-table domain).** The rule above says it is
+  "ordinary key-domain machinery", but it is not: a foreign-column domain gives one column's
+  values, and a (super, sub) pair is a joint domain over two keys, which nothing has; and on a
+  fall-through key a domain filters runs rather than generating tuples. That is a core change,
+  not a front end, so it waits for the owner (Open questions).
+
 ## Integration (the host side)
 
 How the program uses Tabular, end to end. Everything here is the host's; Tabular's part is
@@ -552,6 +598,12 @@ built.
 None remain from the craft bench. Messages, the command runner and hierarchy are decided as
 above; `:lock` is marked speculative.
 
+- **Substate membership (for the owner).** Part 4's `(rest, walk)` check needs a domain of
+  (super, sub) pairs read jointly from another table. A candidate, kept small: a fall-through
+  key may also name a pair table, `fallthrough: {table: substates, with: {super: super}}`, and a
+  run keyed on a pair the table lacks becomes an orphan, reported by `Load` and `Prepare` (the
+  blank stays allowed). It would make the pair table a domain source, with the dependent
+  re-checks that brings.
 - **Edges on a handler's payload inputs (for the owner).** An edge compares an input with its
   previous value, the last one read. For a handler's payload that is the previous *message's*
   value (or the neutral value a getter answered at `CreateInstance` or between dispatches), not

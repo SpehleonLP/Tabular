@@ -102,6 +102,7 @@ set(TABULAR_TEST_SOURCES
 	test/edge_gtest.cpp
 	test/reload_gtest.cpp
 	test/evidence_gtest.cpp
+	test/hierarchy_gtest.cpp
 	test/budget_gtest.cpp
 	bench/budgets.cpp
 )

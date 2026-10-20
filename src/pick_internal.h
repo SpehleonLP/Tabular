@@ -7,8 +7,10 @@
 // public header.
 
 #include "tabular/pick.h"
+#include "table_layout.h"
 
 #include <algorithm>
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -132,37 +134,66 @@ row_test ScriptHolds(TableVersion const& version, size_t row, void const* this_i
 std::optional<uint32_t> OrOfRows(TableVersion const& version, size_t first, size_t last, pick_query const& query,
 	ErrorContext& error, size_t& failed_row);
 
-// The index among def's keys of its fall-through key (fallthrough: true), or
-// UINT32_MAX when it has none.
-uint32_t FallThroughKeyOf(table_def const& def);
-
 // The fall-through, a property of the table and so of every lookup of its
-// runs, interpreted or prepared: find(keys); when that misses (missed says so)
-// and the fall-through key holds a value, find once more with the same keys
-// and 0 in that key's slot, the blank run. The retry's keys are written to
-// scratch, which may be keys' own storage: then a retry that hits leaves the
-// blank there (which is how a step tells it fell through), and one that
-// misses puts the value back, so a report names the key as it came. scratch
-// is as wide as keys.
+// runs, interpreted or prepared: find(keys); when that misses (missed says
+// so), retry with blanks (0) in the fall-through keys that hold a value, in
+// counting order over those keys as bits, the first fall-through key in key
+// order the lowest: with keys (a, b) both falling through, (a, b), then
+// (0, b), then (a, 0), then (0, 0). A combination that blanks a key already 0
+// is the same lookup as one tried before, and is skipped. The first hit
+// answers; only a miss of all is a miss. The retries are written to scratch,
+// which may be keys' own storage, and every fall-through key is put back as
+// it came before returning, so a report names the keys as read. blanked, if
+// given, receives the combination that hit (0 for the keys as read, or for a
+// miss). scratch is as wide as keys.
 template<typename Find, typename Missed>
-auto FindFallingThrough(std::span<cell const> keys, std::span<cell> scratch, uint32_t fallThroughKey, Find const& find,
-	Missed const& missed)
+auto FindFallingThrough(std::span<cell const> keys, std::span<cell> scratch, fall_through_keys const& fall,
+	Find const& find, Missed const& missed, uint32_t* blanked = nullptr)
 {
+	if (blanked)
+	{
+		*blanked = 0;
+	}
 	auto found = find(keys);
-	if (fallThroughKey == UINT32_MAX || keys[fallThroughKey].i == 0 || !missed(found))
+	if (fall.count == 0 || !missed(found))
 	{
 		return found;
 	}
-	cell const type = keys[fallThroughKey];
+	std::array<cell, kMaxFallThroughKeys> asRead{};
+	uint32_t                              alreadyBlank = 0;
+	for (uint32_t i = 0; i < fall.count; ++i)
+	{
+		asRead[i] = keys[fall.key[i]];
+		alreadyBlank |= asRead[i].i == 0 ? uint32_t(1) << i : 0;
+	}
 	if (scratch.data() != keys.data())
 	{
 		std::copy(keys.begin(), keys.end(), scratch.begin());
 	}
-	scratch[fallThroughKey] = cell::Integer(0);
-	found = find(std::span<cell const>(scratch));
-	if (missed(found))
+	uint32_t const all = (uint32_t(1) << fall.count) - 1;
+	for (uint32_t mask = 1; mask <= all; ++mask)
 	{
-		scratch[fallThroughKey] = type;
+		if ((mask & alreadyBlank) != 0)
+		{
+			continue;
+		}
+		for (uint32_t i = 0; i < fall.count; ++i)
+		{
+			scratch[fall.key[i]] = ((mask >> i) & 1) != 0 ? cell::Integer(0) : asRead[i];
+		}
+		found = find(std::span<cell const>(scratch));
+		if (!missed(found))
+		{
+			if (blanked)
+			{
+				*blanked = mask;
+			}
+			break;
+		}
+	}
+	for (uint32_t i = 0; i < fall.count; ++i)
+	{
+		scratch[fall.key[i]] = asRead[i];
 	}
 	return found;
 }

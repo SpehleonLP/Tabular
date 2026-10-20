@@ -230,9 +230,36 @@ tl::expected<resolved_source, ErrorContext> ResolveSource(source const& from, co
 			return tl::make_unexpected(ErrorContext(what, " reads column '", from.name, "' of clause ", from.clause,
 				", and or table '", source.name, "' answers only its output '", source.columns[source.output].name, "'"));
 		}
+		// An override's answer is read through the clause it overrides, which
+		// gives the coalesced answer; read alone it would be NULL on a miss.
+		if (earlier[from.clause].overrides != UINT32_MAX)
+		{
+			return tl::make_unexpected(ErrorContext(what, " reads clause ", from.clause, ", which overrides clause ",
+				earlier[from.clause].overrides, "; read clause ", earlier[from.clause].overrides,
+				", which gives the coalesced answer"));
+		}
 		out.index  = from.clause;
 		out.column = *column;
 		fromText   = cc(std::string("column '"), from.name, "' of clause ", from.clause);
+		// The clause read is overridden: the coalesced answer is the
+		// override's column of the same name where the override hit, so that
+		// column must carry the same type.
+		if (from.clause + 1 < earlier.size() && earlier[from.clause + 1].overrides == from.clause)
+		{
+			uint32_t const   overrideTable = earlier[from.clause + 1].table;
+			table_def const& over          = tables.tables()[overrideTable];
+			auto             same          = tables.FindColumn(overrideTable, from.name);
+			if (same)
+			{
+				if (over.columns[*same].type != fromType)
+				{
+					return tl::make_unexpected(ErrorContext(what, " reads column '", from.name, "' of clause ", from.clause,
+						", a ", TypeName(fromType), ", and clause ", from.clause + 1, ", which overrides it, answers that column "
+						"from table '", over.name, "' as a ", TypeName(over.columns[*same].type)));
+				}
+				out.overrideColumn = *same;
+			}
+		}
 		break;
 	}
 	case source_kind::Literal:
@@ -261,6 +288,98 @@ tl::expected<resolved_source, ErrorContext> ResolveSource(source const& from, co
 	return out;
 }
 
+// What a source says about a key's run at run time: whether every value it
+// can hold is one Prepare proves a run for. A hash state column, a literal
+// and a best or weighted clause close their key; a machine input, an int or
+// a double state column and an or clause's flags close nothing, and a value
+// outside the declared domain holds the clause for want of a run.
+bool ClosesItsKey(resolved_source const& from, machine_def const& def, std::span<resolved_clause const> earlier,
+	schema const& tables)
+{
+	switch (from.kind)
+	{
+	case source_kind::State:   return def.state[from.index].type == column_type::Hash;
+	case source_kind::Literal: return true;
+	case source_kind::Input:   return false;
+	case source_kind::Clause:  return tables.tables()[earlier[from.index].table].pick != pick_policy::Or;
+	}
+	return false;
+}
+
+// An override (Part 4) is a left outer join with a coalesce onto the clause
+// before it: it must directly follow that clause, write only what that clause
+// writes (state columns, and an emit only where it emits), and that clause
+// must itself always answer for a reachable key, so the machine stays total
+// with the override's table partial. An or table answers every key (its OR
+// is 0 for none), so it has no miss to override with, nor a row to replace.
+tl::expected<void, ErrorContext> CheckOverride(add_clause const& c, resolved_clause const& over, uint32_t self,
+	machine_def const& def, std::span<resolved_clause const> earlier, schema const& tables)
+{
+	if (c.overrides >= self)
+	{
+		return tl::make_unexpected(ErrorContext("the clause overrides clause ", c.overrides,
+			"; an override names the clause directly before it"));
+	}
+	if (c.overrides + 1 != self)
+	{
+		return tl::make_unexpected(ErrorContext("the clause overrides clause ", c.overrides,
+			", which does not directly precede it; an override follows the clause it overrides"));
+	}
+	resolved_clause const& base     = earlier[c.overrides];
+	table_def const&       baseDef  = tables.tables()[base.table];
+	table_def const&       overDef  = tables.tables()[over.table];
+	if (base.overrides != UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("the clause overrides clause ", c.overrides,
+			", which is itself an override; an override names a clause that always answers"));
+	}
+	if (overDef.pick == pick_policy::Or || baseDef.pick == pick_policy::Or)
+	{
+		return tl::make_unexpected(ErrorContext("the clause overrides clause ", c.overrides, ", and table '",
+			(overDef.pick == pick_policy::Or ? overDef : baseDef).name,
+			"' is an or table, which answers every key (0 for none) and has no row to replace or miss to fall back from"));
+	}
+	for (auto const& [column, state] : over.sets)
+	{
+		bool shared = false;
+		for (auto const& baseSet : base.sets)
+		{
+			shared = shared || baseSet.second == state;
+		}
+		if (!shared)
+		{
+			return tl::make_unexpected(ErrorContext("the clause sets state column '", def.state[state].name,
+				"', which clause ", c.overrides, " it overrides does not; an override replaces that clause's answer, "
+				"so it sets a subset of its columns"));
+		}
+	}
+	if (over.emit != UINT32_MAX && base.emit == UINT32_MAX)
+	{
+		return tl::make_unexpected(ErrorContext("the clause emits, and clause ", c.overrides,
+			" it overrides does not; an override's emit replaces that clause's"));
+	}
+	for (size_t k = 0; k < base.keys.size(); ++k)
+	{
+		uint32_t column = 0;
+		for (uint32_t col = 0, seen = 0; col < baseDef.columns.size(); ++col)
+		{
+			if (baseDef.columns[col].key && seen++ == k)
+			{
+				column = col;
+				break;
+			}
+		}
+		if (IsFallThroughKey(baseDef, column) || ClosesItsKey(base.keys[k], def, earlier, tables))
+		{
+			continue;
+		}
+		return tl::make_unexpected(ErrorContext("the clause overrides clause ", c.overrides, ", whose key '",
+			baseDef.columns[column].name, "' of table '", baseDef.name, "' is read from a source that closes nothing, so "
+			"it may hold for want of a run; an override names a clause that always answers"));
+	}
+	return {};
+}
+
 tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, uint32_t self, machine_def const& def,
 	std::span<resolved_clause const> earlier, schema const& tables)
 {
@@ -283,6 +402,8 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		return tl::make_unexpected(ErrorContext("table '", t.name,
 			"' is an all table; a clause answers one value per column, and an all pick answers with every row that holds"));
 	}
+
+	out.fallThrough = FallThroughKeysOf(t);
 
 	// where: exactly one source per key column, in column order.
 	std::vector<uint32_t> keyColumns;
@@ -321,24 +442,30 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		{
 			return tl::make_unexpected(std::move(resolved.error()));
 		}
-		if (!t.domains.empty() && t.domains[at].kind == domain_kind::FallThrough)
-		{
-			out.fallThroughKey = static_cast<uint32_t>(at);
-		}
 		// An earlier clause keyed on a fall-through key can answer from its
 		// blank run, whose key holds 0: a value only a fall-through key holds,
 		// so an ordinary key reading it would look up a run no row can name (a
 		// hash 0 is refused) instead of a value.
-		if (resolved->kind == source_kind::Clause)
+		if (resolved->kind == source_kind::Clause && !(!t.domains.empty() && t.domains[at].kind == domain_kind::FallThrough))
 		{
-			table_def const& source = tables.tables()[earlier[resolved->index].table];
-			if (IsFallThroughKey(source, resolved->column) && !(!t.domains.empty()
-				&& t.domains[at].kind == domain_kind::FallThrough))
+			// The coalesced answer may come from the override's table, whose
+			// same-named column is as much a source.
+			std::pair<uint32_t, uint32_t> const read[] = {{earlier[resolved->index].table, resolved->column},
+				{resolved->overrideColumn == UINT32_MAX ? UINT32_MAX : earlier[resolved->index + 1].table, resolved->overrideColumn}};
+			for (auto const& [table, column] : read)
 			{
-				return tl::make_unexpected(ErrorContext("key '", b.target, "' reads column '",
-					source.columns[resolved->column].name, "' of clause ", resolved->index, ", the fall-through key of table '",
-					source.name, "'; that clause can answer from its blank run, with 0, which only a fall-through key "
-					"holds"));
+				if (table == UINT32_MAX)
+				{
+					continue;
+				}
+				table_def const& source = tables.tables()[table];
+				if (IsFallThroughKey(source, column))
+				{
+					return tl::make_unexpected(ErrorContext("key '", b.target, "' reads column '",
+						source.columns[column].name, "' of clause ", resolved->index, ", the fall-through key of table '",
+						source.name, "'; that clause can answer from its blank run, with 0, which only a fall-through key "
+						"holds"));
+				}
 			}
 		}
 		out.keys[at] = *resolved;
@@ -497,7 +624,86 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		}
 		out.emit = *column;
 	}
+
+	if (c.overrides != UINT32_MAX)
+	{
+		auto overridden = CheckOverride(c, out, self, def, earlier, tables);
+		if (!overridden)
+		{
+			return tl::make_unexpected(std::move(overridden.error()));
+		}
+		out.overrides = c.overrides;
+	}
 	return out;
+}
+
+// Which hash state columns' change runs each entry or exit clause on a step
+// (Part 4, owner 2026-10-19): the columns it keys on as state.<col>, read off
+// its where. Clauses that read one another (a clause source, either way), and
+// an override with the clause it overrides, run as one group on the union of
+// their columns, so a step never runs a reader whose source it skipped; a
+// group keying on no state column runs on any change of state, as every
+// clause did before.
+void EnteredOn(machine_def const& def, std::vector<resolved_clause>& clauses)
+{
+	std::vector<uint32_t> group(clauses.size());
+	for (uint32_t i = 0; i < clauses.size(); ++i)
+	{
+		group[i] = i;
+	}
+	auto root = [&](uint32_t i)
+	{
+		while (group[i] != i)
+		{
+			i = group[i];
+		}
+		return i;
+	};
+	for (uint32_t i = 0; i < clauses.size(); ++i)
+	{
+		// An override runs only when the clause it overrides answered, so the
+		// two run on one test.
+		if (clauses[i].overrides != UINT32_MAX)
+		{
+			group[root(i)] = root(clauses[i].overrides);
+		}
+		for (auto const* sources : {&clauses[i].keys, &clauses[i].inputs})
+		{
+			for (resolved_source const& from : *sources)
+			{
+				if (from.kind == source_kind::Clause)
+				{
+					group[root(i)] = root(from.index);
+				}
+			}
+		}
+	}
+	std::vector<std::vector<uint32_t>> columns(clauses.size());
+	for (uint32_t i = 0; i < clauses.size(); ++i)
+	{
+		for (resolved_source const& from : clauses[i].keys)
+		{
+			if (from.kind == source_kind::State && def.state[from.index].type == column_type::Hash)
+			{
+				columns[root(i)].push_back(from.index);
+			}
+		}
+	}
+	std::vector<uint32_t> every;
+	for (uint32_t s = 0; s < def.state.size(); ++s)
+	{
+		if (def.state[s].type == column_type::Hash)
+		{
+			every.push_back(s);
+		}
+	}
+	for (uint32_t i = 0; i < clauses.size(); ++i)
+	{
+		std::vector<uint32_t> on = columns[root(i)];
+		std::sort(on.begin(), on.end());
+		on.erase(std::unique(on.begin(), on.end()), on.end());
+		clauses[i].enteredOn = on.empty() ? every : std::move(on);
+	}
 }
 
 }
@@ -570,9 +776,15 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 						.with(ClausePlace(def.name, list, i, clauses[i].table)));
 				}
 			}
+			if (clause->overrides != UINT32_MAX)
+			{
+				def.lists[list][clause->overrides].overriddenBy = i;
+			}
 			def.lists[list].push_back(std::move(*clause));
 		}
 	}
+	EnteredOn(def, def.lists[size_t(trigger::Entry)]);
+	EnteredOn(def, def.lists[size_t(trigger::Exit)]);
 	return def;
 }
 
@@ -678,6 +890,18 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 					values.push_back(ValueAt(rows, row, from.column));
 					return true;
 				});
+				// The coalesced answer: where the override hits, its row's
+				// column of the same name is what the key reads.
+				if (from.overrideColumn != UINT32_MAX)
+				{
+					detail::prepared_clause const& over     = earlier[from.index + 1];
+					table_rows const&              overRows = version_access::Rows(*over.version);
+					EachAnswerRow(over, [&](uint32_t row)
+					{
+						values.push_back(ValueAt(overRows, row, from.overrideColumn));
+						return true;
+					});
+				}
 				std::sort(values.begin(), values.end());
 				values.erase(std::unique(values.begin(), values.end()), values.end());
 			}
@@ -719,6 +943,31 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 	return {};
 }
 
+// Cuts domains to the tuples version has rows for, in order.
+void KeepTuplesWithRuns(TableVersion const& version, detail::key_domains& domains)
+{
+	size_t const      keys = domains.overRows.size();
+	std::vector<cell> key(keys);
+	size_t            kept = 0;
+	for (size_t t = 0; t < domains.count; ++t)
+	{
+		int64_t const* tuple = domains.tuples.data() + t * keys;
+		for (size_t k = 0; k < keys; ++k)
+		{
+			key[k] = cell::Integer(tuple[k]);
+		}
+		auto run = version.FindOrdered(key);
+		if (!run || run->first == run->last)
+		{
+			continue;
+		}
+		std::copy(tuple, tuple + keys, domains.tuples.data() + kept * keys);
+		++kept;
+	}
+	domains.count = kept;
+	domains.tuples.resize(kept * keys);
+}
+
 tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def const& def, resolved_clause const& clause,
 	std::span<detail::prepared_clause const> earlier, relation_store const& store, watch_list& watch,
 	std::vector<run_note>* report)
@@ -741,6 +990,12 @@ tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def cons
 		return tl::make_unexpected(std::move(domain.error()));
 	}
 	detail::ResolveDomain(rows, domains);
+	// An override's table need not be total (Part 4): a tuple its rows have no
+	// run for is a miss at run time, so only the runs present are proved.
+	if (clause.overrides != UINT32_MAX)
+	{
+		KeepTuplesWithRuns(*out.version, domains);
+	}
 
 	// The load's own check, over the clause's domain: no row is fresh, and
 	// nothing is changing, so a gap names the run's first row.

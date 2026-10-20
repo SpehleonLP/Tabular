@@ -112,6 +112,7 @@ struct clause_yaml
 	bool        given = false;   // never written
 	bool        set   = false;   // never written
 	std::string emit;
+	uint32_t    overrides = UINT32_MAX;   // the clause overridden, by position (Part 4)
 };
 
 struct machine_yaml
@@ -230,6 +231,7 @@ YamlField const kClauseFields[] = {
 	{"given", FieldType::Nested, offsetof(clause_yaml, given)},
 	{"set",   FieldType::Nested, offsetof(clause_yaml, set)},
 	{"emit",  FieldType::String, offsetof(clause_yaml, emit)},
+	{"overrides", FieldType::UInt32, offsetof(clause_yaml, overrides)},
 };
 YamlSet const kClauseSet{kClauseFields, nullptr, "clause"};
 
@@ -784,7 +786,7 @@ tl::expected<void, ErrorContext> ReadMachine(machine_yaml const& in, LF::Yaml::N
 				return tl::make_unexpected(ErrorContext("the clause emits a column with no name").with(here()));
 			}
 			store.clauses[list].push_back(add_clause{clause.from, store.where[list][c], store.given[list][c],
-				store.sets[list][c], clause.emit});
+				store.sets[list][c], clause.emit, clause.overrides});
 		}
 	}
 	out = create_machine{in.name, store.state, store.inputs, store.clauses[0], store.clauses[1], store.clauses[2],

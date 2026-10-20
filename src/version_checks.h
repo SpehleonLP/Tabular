@@ -35,12 +35,13 @@ struct key_domains
 {
 	std::vector<uint8_t>              overRows;   // per key column
 	std::vector<std::vector<int64_t>> values;     // per key column not over its rows: sorted, distinct
-	// The fall-through key, if any: its values are {0}, the blank, and ResolveDomain
-	// adds every run the rows name whose other keys are in the domain.
-	uint32_t                          fallThroughKey = UINT32_MAX;
+	// The fall-through keys, in key order: each one's values are {0}, the
+	// blank, and ResolveDomain adds every run the rows name whose twin with
+	// every fall-through key blank is in the domain.
+	std::vector<uint32_t>             fallThroughKeys;
 	// The domain: the distinct sub-tuples the rows name in the columns over
 	// their rows, crossed with every other column's values (and the
-	// fall-through key's runs added). count tuples of one value per key, end to end, sorted
+	// fall-through keys' runs added). count tuples of one value per key, end to end, sorted
 	// as Publish sorts rows (each key a signed int64, key 0 most significant)
 	// and distinct.
 	size_t               count = 0;
@@ -51,7 +52,7 @@ struct key_domains
 	{
 		overRows.assign(keys, 0);
 		values.assign(keys, {});
-		fallThroughKey = UINT32_MAX;
+		fallThroughKeys.clear();
 	}
 };
 

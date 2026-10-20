@@ -6,7 +6,9 @@
 
 #include "tabular/relation.h"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -47,6 +49,35 @@ inline bool IsFallThroughKey(table_def const& def, uint32_t column)
 		k += def.columns[c].key ? 1 : 0;
 	}
 	return def.domains[k].kind == domain_kind::FallThrough;
+}
+
+// The most fall-through keys a table may declare: a lookup that misses may try
+// every combination of blanks, 2^n - 1 retries, so n stays small (Part 4 of
+// the commands-and-messages spec).
+inline constexpr size_t kMaxFallThroughKeys = 8;
+
+// A table's fall-through keys, as indices among its keys in key order, which
+// is the order they give way in (the first is the lowest bit of the retry
+// count). Fixed-size, so a lookup holds it without allocating.
+struct fall_through_keys
+{
+	std::array<uint32_t, kMaxFallThroughKeys> key{};
+	uint32_t                                  count = 0;
+};
+
+inline fall_through_keys FallThroughKeysOf(table_def const& def)
+{
+	// Domains are one per key column, in column order, as a picked table's
+	// keys are; the schema refuses more than kMaxFallThroughKeys.
+	fall_through_keys out;
+	for (uint32_t k = 0; k < def.domains.size() && out.count < kMaxFallThroughKeys; ++k)
+	{
+		if (def.domains[k].kind == domain_kind::FallThrough)
+		{
+			out.key[out.count++] = k;
+		}
+	}
+	return out;
 }
 
 // A flag set (AngelScript uint32) and a hash (CityHash32) are 32-bit values
