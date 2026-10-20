@@ -162,7 +162,11 @@ the feature is wrong, not the rule.
   not wrapped. A cell of several items that does not start with `(` and is not whole by itself
   (`message food (say`, `a) (b`) is refused, naming the line, since wrapping it would guess
   where its parenthesis was meant to go; a command that runs across cells starts with `(`. A
-  cell that is exactly `()` is the explicit "do nothing" and adds nothing. **Every command
+  string left open at a cell's end is refused too, naming the line: cells are quoted
+  (RFC 4180), so it is a comma that split one string across two cells, and joining would
+  silently drop the comma (an unquoted cell holding `"` is already refused by the reader); the
+  string written whole in one quoted cell reads intact. A cell that is an
+  empty list (`()`, `( )`) is the explicit "do nothing" and adds nothing. **Every command
   column is a list of commands** (2026-10-19): a declared command column's one cell is read by
   the same rule, so `anim chew` and `(anim chew)` both read as `((anim chew))`, `()` stays
   `()`, and a host reads every result the same way whichever kind of column it came from (a
@@ -171,8 +175,10 @@ the feature is wrong, not the rule.
   parentheses, double-quoted strings (`\"` and `\\` escape inside one; a backslash escapes
   whatever follows it) and atoms. A `)` that closes nothing, a `(` or a string never closed,
   text that is not one list (`(a) (b)`, a bare word), or an empty command is refused, naming the
-  line in CSV. The list is built once, at load, so a step never parses or builds text. A builder caller
-  writes the list itself, as the store keeps it. The header names
+  line in CSV. The list is built once, at load, so a step never parses or builds text. The
+  cell rule is the CSV front end's: a builder or store caller writes the list itself, in the
+  form the store keeps (`((anim chew))`), and the store only checks its shape, wrapping
+  nothing (a declared cell already in that form, read from CSV, is wrapped once more). The header names
   the declared columns and ends with the suffix column's name (the reader needs that last
   header cell to know where the suffix cells start); a header that names anything else
   extra, or puts the suffix column anywhere but last, is refused. A grid or a pivoted table cannot have a suffix
@@ -692,7 +698,9 @@ headers, with values in the cells. The phase table pivots the *output* into the 
 flags across the top are the value column, and the cells are bands, i.e. conditions.
 A key by key pivot is a **grid**, stored densely with every cell filled (a blank is an
 error). **A grid has one contributor** (owner, 2026-10-18): it is read-only, and a load from
-another owner is refused while the grid holds a version owned by someone else. A flags-of-key pivot and an output pivot are ordinary rows sorted by key, which the CSV
+another owner is refused while the grid holds a version owned by someone else. A grid of
+command cells holds a list of commands in each, as every command column does: the CSV reads a
+cell by the declared-column rule, and `LoadGrid` refuses a cell that is not one list. A flags-of-key pivot and an output pivot are ordinary rows sorted by key, which the CSV
 front end expands.
 
 **When a table runs (triggers).** At bind or instance creation; on entering a state (entry
@@ -832,6 +840,15 @@ The host supplies:
   argument-free types. A message an instance's own command sends never comes back into that
   instance's machine (the host tags it with the sender and skips that machine), and a message a
   command sends goes into the object's Mailbox under the engine's ordinary delivery rules.
+  **A payload getter answers outside a dispatch too** (2026-10-19): `CreateInstance`, `Rebind`
+  and `Close` read every input through its getter, with no message in flight, so a handler's
+  getter returns a neutral value then (a collision's `ny` 0, an event input's blank 0) and does
+  not fail. A failure there would hold those lists' clauses on a value that is not missing, and
+  spend the input's report-once bit, so a real failure during a dispatch would go unreported.
+  **The host resets a handler's payload and event inputs after the dispatch step** (2026-10-19):
+  "held for one step" is the host's, not Tabular's, which reads whatever the getter answers. An
+  event input left set fires its run again on the next step, and a `Rebind` or `Close` exit sees
+  it (tested, so the behaviour is pinned).
 - **Ending an instance** with `Close` when its object leaves, running the exit commands it
   returns.
 - **A seed** per instance and step (the `seed` of `CreateInstance` and `Step`).
@@ -1079,6 +1096,9 @@ overrule the same way.
 - The stranded-dependent rule (see Key domains): the owner finds blocking every load into a
   source while a dependent has gaps a bad rule, with no better one yet. A candidate: no load may
   add a gap, and gaps a bare retract left are reported but do not block.
+- Edges on a handler's payload inputs (see Messages): such an edge crosses from the previous
+  message's value (or a getter's neutral value between dispatches), not the previous tick's.
+  Allowed as built; whether it means anything, or should be refused, is the owner's.
 
 ## The host's part
 

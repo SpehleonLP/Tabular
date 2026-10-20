@@ -224,7 +224,7 @@ enum class provenance_run : uint8_t
 // previous values, which were never taken.
 struct provenance_entry
 {
-	uint64_t       pass  = 0;                       // 0 for creation, then one more per Step or Rebind
+	uint64_t       pass  = 0;                       // 0 for creation, then one more per Step, Rebind or Close
 	provenance_run run   = provenance_run::Create;
 	trigger        list  = {};
 	// The fall-through key's value had no run and the blank run was looked up

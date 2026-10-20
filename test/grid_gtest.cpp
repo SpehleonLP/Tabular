@@ -112,15 +112,44 @@ TEST(Grid, StringAndCommandGridsHoldText)
 		relation_store store = GridStore(type);
 		auto rows    = Ints({1});
 		auto columns = Ints({1, 2});
-		string_in const cells[] = {std::string_view("anim/walk.glb"), std::string_view("(play run)")};
+		// A command cell is a list of commands, as every command column holds.
+		std::string_view const first  = type == column_type::String ? "anim/walk.glb" : "((play walk))";
+		std::string_view const second = type == column_type::String ? "(play run)" : "((play run))";
+		string_in const cells[] = {first, second};
 		ASSERT_TRUE(store.LoadGrid(load_grid{0, 1, rows, columns, {}, cells}).has_value());
 		auto grid = store.Grid(0);
 		ASSERT_TRUE(grid.has_value()) << ErrorOf(grid);
 		ASSERT_EQ((*grid)->Columns(), 2u);
-		EXPECT_EQ(TextAt(**grid, 1, 1), "anim/walk.glb");
-		EXPECT_EQ(std::string_view((*grid)->StringAt(0, 1)), "(play run)");
+		EXPECT_EQ(TextAt(**grid, 1, 1), first);
+		EXPECT_EQ(std::string_view((*grid)->StringAt(0, 1)), second);
 		EXPECT_FALSE((*grid)->At(cell::Integer(1), cell::Integer(1)).has_value()) << "a text grid has no values";
 	}
+}
+
+// Every command column is exactly one list, a grid's cells too: the store
+// checks whatever surface wrote them, and the CSV reads a cell as a declared
+// column's is read.
+TEST(Grid, ACommandGridsCellsAreEachOneList)
+{
+	relation_store store = GridStore(column_type::Command);
+	auto rows    = Ints({1});
+	auto columns = Ints({1, 2});
+	string_in const two[] = {std::string_view("((play walk))"), std::string_view("(a) (b)")};
+	std::string const refused = RefusalOf(store.LoadGrid(load_grid{0, 1, rows, columns, {}, two}));
+	EXPECT_TRUE(Mentions(refused, "is not one list")) << refused;
+	EXPECT_TRUE(Mentions(refused, "grid 'g'")) << refused;
+	string_in const word[] = {std::string_view("((play walk))"), std::string_view("idle")};
+	EXPECT_TRUE(Mentions(RefusalOf(store.LoadGrid(load_grid{0, 1, rows, columns, {}, word})), "is not one list"))
+		<< "a bare word is the CSV's to wrap, not the store's";
+
+	ASSERT_EQ(RefusalOf(LoadGridCsv(store, csv_grid{0, 1, "creature,1,2\n1,play walk,()\n", "grid.csv"})), "(accepted)");
+	auto grid = store.Grid(0);
+	ASSERT_TRUE(grid.has_value()) << ErrorOf(grid);
+	EXPECT_EQ(TextAt(**grid, 1, 1), "((play walk))") << "a cell of several items is one command";
+	EXPECT_EQ(TextAt(**grid, 1, 2), "()");
+	std::string const split = RefusalOf(LoadGridCsv(store, csv_grid{0, 1, "creature,1,2\n1,a) (b,()\n", "grid.csv"}));
+	EXPECT_TRUE(Mentions(split, "grid.csv:2")) << split;
+	EXPECT_TRUE(Mentions(split, "not whole")) << split;
 }
 
 TEST(Grid, AHeldVersionKeepsItsCells)

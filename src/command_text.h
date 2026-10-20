@@ -26,16 +26,22 @@ tl::expected<void, ErrorContext> CheckCommandList(std::string_view command);
 // Command cells as the one list the store keeps: the cells joined with a
 // space, as a sequence of s-expressions, wrapped in parentheses. A declared
 // command column is one cell, a suffix every cell from its first on. Cell
-// boundaries mean nothing inside an open parenthesis or string, so a command
-// may run across cells when it starts with '('. Outside one, a cell of several
+// boundaries mean nothing inside an open parenthesis, so a command may run
+// across cells when it starts with '('. Outside one, a cell of several
 // items that does not start with '(' is one command written without its
 // parentheses, and is wrapped: `message this hard-land` reads as
 // `(message this hard-land)`, while a single word stays a word. A cell that is
-// exactly `()` is the explicit "do nothing" and adds nothing, and no cells (or
-// only empty ones) is `()`. Refused when a cell of several items that does
-// not start with '(' is not whole by itself (`message food (say`, `a) (b`):
-// wrapping it would hide where its parenthesis was meant to go. Refused too,
-// as CheckCommandList, when the joined list is not one list.
+// an empty list (`()`, `( )`) is the explicit "do nothing" and adds nothing,
+// and no cells (or only empty ones) is `()`. Refused when a cell of several
+// items that does not start with '(' is not whole by itself (`message food
+// (say`, `a) (b`): wrapping it would hide where its parenthesis was meant to
+// go; and when a string is open at a cell's end, which in a quoted CSV is an
+// unquoted comma inside it (joining would drop the comma). Refused too, as
+// CheckCommandList, when the joined list is not one list.
+//
+// This is the CSV front end's rule. The builder and the store take a command
+// column's text in the store's form, the list already written
+// (`((anim chew))`), and only check its shape: they wrap nothing.
 tl::expected<std::string, ErrorContext> CommandList(std::span<std::string_view const> cells);
 
 }

@@ -718,6 +718,24 @@ tables:
 	EXPECT_TRUE(Mentions(two, "key 'b' of table 't' is a second fall-through key; a table has at most one")) << two;
 }
 
+TEST(FallThroughKey, OnlyABestTablesKeyFallsThrough)
+{
+	std::string const weighted = RefusalOf(DocumentFromYaml(R"(
+tables:
+  - name: t
+    read_only: true
+    pick: weighted
+    weight: w
+    columns:
+      - {name: a, type: hash, key: true, fallthrough: true}
+      - {name: w, type: double}
+    order_by: {columns: [a]}
+)", "t.yaml"));
+	EXPECT_TRUE(Mentions(weighted, "key 'a' of table 't' falls through, and only a best table's key falls through"))
+		<< weighted;
+	EXPECT_FALSE(Mentions(weighted, "declares a domain")) << "the author declared no domain: " << weighted;
+}
+
 // ---- Messages out of Tabular ---------------------------------------------------------
 
 namespace
@@ -892,6 +910,270 @@ TEST(MachineClose, CloseAllocatesNothing)
 		Close(grazer, &host, uint64_t(i));
 	}
 	EXPECT_EQ(count.Count(), 0u);
+}
+
+// ---- The host's rules for handlers -------------------------------------------------------
+
+namespace
+{
+
+// A handler whose entry and exit read its payload: the getter is asked at
+// creation and at close, with no message in flight, and answers the neutral
+// value then (the host's rule), which those lists see.
+constexpr std::string_view kNudge = R"(
+tables:
+  - name: nudge
+    read_only: true
+    pick: best
+    inputs:
+      - {name: ny, type: double, range: -1..1}
+    columns:
+      - {name: ny, type: band, input: ny}
+    suffix: command
+machines:
+  - name: on_nudge
+    inputs:
+      - {name: ny, type: double, range: -1..1}
+    state:
+      - {name: mode, type: hash, members: [still], initial: still}
+    entry:
+      - from:  nudge
+        given: {ny: input.ny}
+        emit:  command
+    exit:
+      - from:  nudge
+        given: {ny: input.ny}
+        emit:  command
+)";
+
+constexpr std::string_view kNudgeRows = R"(ny,         command
+-1..-0.1,   (down)
+-0.1..0.1,  (neutral)
+0.1..1,     (up)
+)";
+
+cell ReadNyCounted(void* data, void const* self, ErrorContext*)
+{
+	++*static_cast<int*>(data);
+	return cell::Real(Host(self).ny);
+}
+
+}
+
+TEST(HandlerRules, CreateAndCloseReadThePayloadThroughItsGetter)
+{
+	auto doc = DocumentFromYaml(kNudge, "nudge.yaml");
+	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
+	relation_store store(std::move(doc->tables));
+	csv_rows load;
+	load.table = 0;
+	load.owner = 1;
+	load.text  = kNudgeRows;
+	load.label = "nudge.csv";
+	ASSERT_EQ(RefusalOf(LoadCsv(store, load)), "(accepted)");
+	auto machine = Prepare(doc->machines()[0], store);
+	ASSERT_TRUE(machine.has_value()) << RefusalOf(machine);
+	int reads = 0;
+	host_binding host;
+	host.resolve = [&reads](std::string_view) -> tl::expected<input_getter, ErrorContext>
+	{
+		return input_getter{&ReadNyCounted, &reads};
+	};
+	auto binding = Bind(*machine, std::move(host));
+	ASSERT_TRUE(binding.has_value()) << RefusalOf(binding);
+
+	host_object object;   // no collision in flight: ny is the neutral 0
+	instance handler = CreateInstance(**binding, 1, 1, &object);
+	EXPECT_EQ(reads, 1) << "creation reads the payload through its getter";
+	ASSERT_EQ(handler.Emitted().size(), 1u);
+	EXPECT_EQ(handler.Emitted()[0].command, "((neutral))") << "entry sees the neutral value the getter answers";
+
+	object.ny = 0.9;   // a dispatch: the host fills the payload for one step
+	Step(handler, &object, 2);
+	object.ny = 0;     // and resets it after
+	EXPECT_EQ(reads, 2);
+
+	std::span<emitted const> const closed = Close(handler, &object, 3);
+	EXPECT_EQ(reads, 3) << "close reads the payload through its getter too";
+	ASSERT_EQ(closed.size(), 1u);
+	EXPECT_EQ(closed[0].command, "((neutral))") << "exit sees the neutral value, not the last message's";
+}
+
+TEST(HandlerRules, AnEventInputTheHostLeavesSetFiresItsRunAgain)
+{
+	// "Held for one step" is the host's: Tabular reads what the getter
+	// answers, so an event left set is a second event.
+	effects_fixture f(kBench, {kBenchRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance bench = f.Create(host);
+	f.log.Take();
+	host.can_back = true;
+	host.event    = Hash("back");   // filled, and never reset
+	f.Step(bench, &host, 1);
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(basket-back)"}));
+	f.Step(bench, &host, 2);
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:(basket-back)"})) << "the run fires again";
+	host.event = 0;
+	f.Step(bench, &host, 3);
+	EXPECT_EQ(f.log.Take(), (std::vector<std::string>{"0:()"})) << "reset, the blank run answers";
+}
+
+// ---- A fall-through key fed by another's ------------------------------------------------
+
+namespace
+{
+
+// mood's fall-through key reads what the brain's fall-through key answered:
+// the brain's blank run answers 0, and 0 looks up mood's blank run itself.
+constexpr std::string_view kMoodChain = R"(
+tables:
+  - name: brain
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode,  type: hash, key: true, domain: rows}
+      - {name: event, type: hash, key: true, fallthrough: true}
+      - {name: next,  type: hash}
+    order_by: {columns: [mode, event]}
+  - name: mood
+    read_only: true
+    pick: best
+    columns:
+      - {name: kind, type: hash, key: true, fallthrough: true}
+      - {name: v,    type: int}
+    order_by: {columns: [kind]}
+machines:
+  - name: moody
+    inputs:
+      - {name: event, type: hash}
+    state:
+      - {name: mode, type: hash, members: [idle, panic], initial: idle}
+      - {name: mood, type: int, initial: 0}
+    step:
+      - from:  brain
+        where: {mode: state.mode, event: input.event}
+        set:   {mode: next}
+      - from:  mood
+        where: {kind: clause.0.event}
+        set:   {mood: v}
+)";
+
+constexpr std::string_view kMoodBrainRows = R"(mode,  event,  next
+idle,  ,       idle
+idle,  scared, panic
+panic, ,       panic
+panic, calm,   idle
+)";
+
+constexpr std::string_view kMoodRows = R"(kind,   v
+,       1
+scared, 2
+)";
+
+}
+
+TEST(FallThroughKey, ABlankAnswerFromAnEarlierClauseLooksUpTheBlankRun)
+{
+	effects_fixture f(kMoodChain, {kMoodBrainRows, kMoodRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance moody = f.Create(host);
+	f.Step(moody, &host, 1, Message("scared"));
+	EXPECT_EQ(moody.State(0).i, Hash("panic"));
+	EXPECT_EQ(moody.State(1).i, 2) << "the brain answered scared, which mood has a run for";
+	EXPECT_FALSE(moody.Answer(trigger::Step, 1).fellThrough);
+
+	f.Step(moody, &host, 2, Message("wave"));
+	EXPECT_TRUE(moody.Answer(trigger::Step, 0).fellThrough) << "wave has no brain run: the blank one answers";
+	EXPECT_EQ(moody.Answer(trigger::Step, 1).outcome, clause_outcome::Answered);
+	EXPECT_EQ(moody.State(1).i, 1) << "the blank run's 0 is mood's blank run";
+	EXPECT_FALSE(moody.Answer(trigger::Step, 1).fellThrough) << "0 is the blank itself, not a value that fell through";
+
+	f.Step(moody, &host, 3, Message("calm"));
+	EXPECT_EQ(moody.State(0).i, Hash("idle"));
+	EXPECT_EQ(moody.State(1).i, 1) << "calm has no mood run: mood falls through on its own";
+	EXPECT_TRUE(moody.Answer(trigger::Step, 1).fellThrough);
+}
+
+// ---- Close after a rebind, and on a fall-through exit ---------------------------------------
+
+TEST(MachineClose, CloseAfterARebindRunsTheNewBindingsExit)
+{
+	effects_fixture f(kGrazer, {kBrainRows, kEnterRows, kExitRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance grazer = f.Create(host);
+	f.Step(grazer, &host, 1);
+	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
+	auto rebound = Bind(f.machine, LoggingHost(f.log));
+	ASSERT_TRUE(rebound.has_value()) << RefusalOf(rebound);
+	Rebind(grazer, **rebound, &host, 2);
+	f.binding = nullptr;   // the host drops the old binding at once
+	std::span<emitted const> const closed = Close(grazer, &host, 3);
+	ASSERT_EQ(closed.size(), 1u);
+	EXPECT_EQ(closed[0].command, "((abort walk))");
+	EXPECT_EQ(&grazer.binding(), rebound->get()) << "closed under the binding it was moved onto";
+}
+
+namespace
+{
+
+// An exit keyed on a fall-through event too: what the host fills at close
+// picks the abort, and an event no row names falls through to the blank run.
+constexpr std::string_view kEventExitRows = R"(mode,  event,  command
+idle,  ,       (abort stand)
+walk,  ,       (abort walk)
+walk,  scared, (abort walk) (flinch)
+eat,   ,       (abort chew)
+panic, ,       (abort run)
+)";
+
+}
+
+TEST(MachineClose, CloseOnAFallThroughExitFallsThroughAndIsRecordedAsClose)
+{
+	std::string const yaml = Replace(Replace(kGrazer, R"(  - name: grazer_exit
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode, type: hash, key: true, domain: rows}
+    order_by: {columns: [mode]})", R"(  - name: grazer_exit
+    read_only: true
+    pick: best
+    columns:
+      - {name: mode,  type: hash, key: true, domain: rows}
+      - {name: event, type: hash, key: true, fallthrough: true}
+    order_by: {columns: [mode, event]})"), R"(      - from:  grazer_exit
+        where: {mode: state.mode})", R"(      - from:  grazer_exit
+        where: {mode: state.mode, event: input.event})");
+	effects_fixture f(yaml, {kBrainRows, kEnterRows, kEventExitRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance grazer = f.Create(host);
+	f.Step(grazer, &host, 1);
+	ASSERT_EQ(grazer.State(0).i, Hash("walk"));
+	host.event = Hash("wave");
+	std::span<emitted const> const closed = Close(grazer, &host, 2);
+	ASSERT_EQ(closed.size(), 1u);
+	EXPECT_EQ(closed[0].command, "((abort walk))") << "wave has no exit run: the blank one answers";
+	EXPECT_TRUE(grazer.Answer(trigger::Exit, 0).fellThrough);
+	host.event = Hash("scared");
+	EXPECT_EQ(Close(grazer, &host, 3)[0].command, "((abort walk) (flinch))");
+#if TABULAR_PROVENANCE
+	provenance_view const ring = grazer.Provenance();
+	ASSERT_GE(ring.size(), 2u);
+	provenance_entry const& fell = ring[ring.size() - 2];
+	EXPECT_EQ(fell.run, provenance_run::Close);
+	EXPECT_EQ(fell.list, trigger::Exit);
+	EXPECT_TRUE(fell.fellThrough);
+	ASSERT_EQ(fell.Keys().size(), 2u);
+	EXPECT_EQ(fell.Keys()[1].i, Hash("wave")) << "the key as read, not the blank it retried";
+	provenance_entry const& hit = ring[ring.size() - 1];
+	EXPECT_EQ(hit.run, provenance_run::Close);
+	EXPECT_FALSE(hit.fellThrough);
+	EXPECT_EQ(hit.pass, fell.pass + 1) << "each close is a pass";
+#endif
 }
 
 // ---- Exit ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+#include "command_text.h"
 #include "csv_cells.h"
 #include "csv_text.h"
 
@@ -53,6 +54,9 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 	std::vector<cell>      values;
 	std::vector<string_in> strings;
 	std::vector<uint32_t>  lineOf;
+	// A command cell's list, built here and viewed by strings: sized once, so
+	// the views stay put.
+	std::vector<std::string> lists(def.grid_cells == column_type::Command ? (file.rows() - 1) * (width - 1) : 0);
 	for (size_t r = 1; r < file.rows(); ++r)
 	{
 		uint32_t const line = file.line_of_row(r);
@@ -81,6 +85,22 @@ tl::expected<void, ErrorContext> LoadGridCsv(relation_store& store, csv_grid con
 				if (!present)
 				{
 					return tl::make_unexpected(std::move(present.error()).with(label(line)));
+				}
+				if (def.grid_cells == column_type::Command)
+				{
+					// Every command column is a list of commands, a grid's cells
+					// read as a declared column's are.
+					std::string_view const cells[] = {cellText};
+					auto list = detail::CommandList(cells);
+					if (!list)
+					{
+						return tl::make_unexpected(std::move(list.error()).with("column '", column.name, "'")
+							.with(label(line)));
+					}
+					std::string& kept = lists[(r - 1) * (width - 1) + (h - 1)];
+					kept = std::move(*list);
+					strings.emplace_back(std::string_view(kept));
+					continue;
 				}
 				strings.emplace_back(cellText);
 				continue;

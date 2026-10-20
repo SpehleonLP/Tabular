@@ -24,8 +24,18 @@ std::string_view Trim(std::string_view text)
 	return text;
 }
 
-// Where a lex stands, carried across the cells of one row, since a string or
-// a list may run over several.
+// `()`, `( )` and the like: the explicit "do nothing", which adds nothing.
+bool IsEmptyList(std::string_view text)
+{
+	if (text.size() < 2 || text.front() != '(' || text.back() != ')')
+	{
+		return false;
+	}
+	return Trim(text.substr(1, text.size() - 2)).empty();
+}
+
+// Where a lex stands, carried across the cells of one row, since a list may
+// run over several.
 struct command_lexer
 {
 	size_t depth     = 0;
@@ -138,7 +148,7 @@ tl::expected<std::string, ErrorContext> CommandList(std::span<std::string_view c
 	{
 		std::string_view const text = Trim(raw);
 		bool const topLevel = across.depth == 0 && !across.inString;
-		if (text.empty() || (topLevel && text == "()"))
+		if (text.empty() || (topLevel && IsEmptyList(text)))
 		{
 			continue;
 		}
@@ -166,6 +176,15 @@ tl::expected<std::string, ErrorContext> CommandList(std::span<std::string_view c
 		out += text;
 		across.Feed(text);
 		across.EndCell();
+		// Cells are quoted (RFC 4180), so a string open at a cell's end is a
+		// comma inside it that split the cell: `(say "hi, there")` as two.
+		// Joining with a space would silently drop the comma and the spaces
+		// around it.
+		if (across.inString)
+		{
+			return tl::make_unexpected(ErrorContext("the cell '", text, "' has a string that is never closed within "
+				"it; a string holding a comma is written whole in one quoted cell, as a spreadsheet saves it"));
+		}
 	}
 	out += ')';
 	auto checked = CheckCommandList(out);

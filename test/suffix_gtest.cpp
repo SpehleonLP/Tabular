@@ -165,13 +165,31 @@ TEST(SuffixCsv, CellsThatJoinIntoTwoListsAreRefused)
 	EXPECT_TRUE(Mentions(refused, "is not one list")) << refused;
 }
 
-// () is the explicit "do nothing", in a suffix as in a declared column.
+// () is the explicit "do nothing", in a suffix as in a declared column, and
+// so is an empty list written with space inside it.
 TEST(SuffixCsv, AnEmptyListCellAddsNothing)
 {
 	relation_store store = Store();
-	ASSERT_EQ(Load(store, "mode,command\nidle,()\neat,(),idle\n"), "");
+	ASSERT_EQ(Load(store, "mode,command\nidle,()\neat,(),idle\nrun,( ),(  ),walk\nsit,( )\n"), "");
 	EXPECT_EQ(CommandOf(store, 0), "()");
 	EXPECT_EQ(CommandOf(store, 1), "(idle)");
+	EXPECT_EQ(CommandOf(store, 2), "(walk)") << "( ) is () and adds no empty command";
+	EXPECT_EQ(CommandOf(store, 3), "()");
+}
+
+// Cells are quoted (RFC 4180), so a string open at a cell's end is a comma
+// inside it that split the cell: joining the cells would drop it.
+TEST(SuffixCsv, AStringOpenAtACellsEndIsRefusedNamingTheLine)
+{
+	relation_store store = Store();
+	std::string const unquoted = Load(store, "mode,command\nidle,(anim stand)\neat,(say \"hi, there\")\n");
+	EXPECT_TRUE(Mentions(unquoted, "enter.csv:3")) << "the reader refuses a quote in an unquoted cell: " << unquoted;
+	std::string const split = Load(store, "mode,command\neat,\"(say \"\"hi\",\" there\"\")\"\n");
+	EXPECT_TRUE(Mentions(split, "enter.csv:2")) << split;
+	EXPECT_TRUE(Mentions(split, "the cell '(say \"hi' has a string that is never closed within it")) << split;
+	EXPECT_EQ(store.RowCount(0), 0u);
+	ASSERT_EQ(Load(store, "mode,command\neat,\"(say \"\"hi, there\"\")\"\n"), "") << "the quoted cell reads intact";
+	EXPECT_EQ(CommandOf(store, 0), "((say \"hi, there\"))");
 }
 
 TEST(SuffixCsv, AnUnterminatedStringIsRefusedNamingTheLine)

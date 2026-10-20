@@ -499,6 +499,15 @@ the list, and the runner does the rest.
   "step it again".** This is speculative (the owner came up with it on the spot) and the host's
   business entirely. While locked the machine's state doesn't change, so the runner has nothing
   to chase, and on unlock the next step decides what happens from there.
+- **A payload getter answers outside a dispatch too** (added 2026-10-19, from the Part 3
+  review). `CreateInstance`, `Rebind` and `Close` read every input through its getter when no
+  message is in flight, so a handler's getter returns a neutral value then (`ny` 0, an event
+  input's blank 0) and must not fail. A failure would hold those lists' clauses and spend the
+  input's report-once bit, hiding a real failure during a later dispatch.
+- **The host resets a handler's payload and event inputs after the dispatch step** (added
+  2026-10-19). "Held for one step" is the host's convention; Tabular reads what the getter
+  answers. An event input left set fires its run again next step, and a `Rebind` or `Close`
+  exit sees it; a test pins that.
 - **Leaving from any state means the host ends the instance.** Closing isn't a transition, so
   no exit row is needed for every state. Tabular needs one small API for it: run the exit list
   and return its commands. `Rebind` already does this internally.
@@ -542,3 +551,10 @@ built.
 
 None remain from the craft bench. Messages, the command runner and hierarchy are decided as
 above; `:lock` is marked speculative.
+
+- **Edges on a handler's payload inputs (for the owner).** An edge compares an input with its
+  previous value, the last one read. For a handler's payload that is the previous *message's*
+  value (or the neutral value a getter answered at `CreateInstance` or between dispatches), not
+  the previous tick's. Whether such an edge means anything, and whether it should be refused,
+  is undecided. Built behaviour is unchanged: it is allowed, and crosses from the last value
+  read.

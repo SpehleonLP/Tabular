@@ -1,5 +1,6 @@
 #include "tabular/grid.h"
 
+#include "command_text.h"
 #include "relation_internal.h"
 
 #include <algorithm>
@@ -171,6 +172,19 @@ tl::expected<void, ErrorContext> relation_store::LoadGrid(load_grid const& comma
 			if (!fits)
 			{
 				return tl::make_unexpected(std::move(fits.error()));
+			}
+		}
+	}
+	// Every command column is one list of commands, a grid's cells too,
+	// whichever surface wrote them.
+	if (def.grid_cells == column_type::Command)
+	{
+		for (string_in const& s : command.strings)
+		{
+			auto shaped = detail::CheckCommandList(s.text);
+			if (!shaped)
+			{
+				return tl::make_unexpected(std::move(shaped.error()).with("grid '", def.name, "'"));
 			}
 		}
 	}

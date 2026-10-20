@@ -536,17 +536,21 @@ tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_tabl
 	{
 		add_column const& in     = c.columns[i];
 		key_domain const& domain = in.domain;
+		// A fall-through is declared in place of a domain, so the refusals
+		// name it as the author wrote it.
+		bool const fallThrough = domain.kind == domain_kind::FallThrough;
 		if (domain.kind != domain_kind::None && !in.key)
 		{
 			return tl::make_unexpected(ErrorContext("column '", in.name, "' of table '", c.name,
-				"' declares a domain, and only a key has one"));
+				fallThrough ? "' falls through, and only a key does" : "' declares a domain, and only a key has one"));
 		}
 		if (!in.key || def.pick != pick_policy::Best)
 		{
 			if (domain.kind != domain_kind::None)
 			{
 				return tl::make_unexpected(ErrorContext("key '", in.name, "' of table '", c.name,
-					"' declares a domain, and only a best table's keys are checked over one"));
+					fallThrough ? "' falls through, and only a best table's key falls through to a blank run"
+								: "' declares a domain, and only a best table's keys are checked over one"));
 			}
 			continue;
 		}
