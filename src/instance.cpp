@@ -544,8 +544,10 @@ ErrorContext ConditionError(TableVersion const& version, size_t row, ErrorContex
 // Runs one clause: its sources, its run, its pick, then its sets into next.
 // A clause that cannot answer writes nothing, says why in its answer, and
 // reports it once (a source held by an earlier hold or a failed getter was
-// reported where that hold began).
-clause_answer RunClause(list_run const& run, size_t index)
+// reported where that hold began). level is the retry count its run was found
+// at (0 for the keys as read); an override's hit counts only at a level no
+// higher than baseLevel, the one the clause it overrides answered at.
+clause_answer RunClause(list_run const& run, size_t index, uint32_t& level, uint32_t baseLevel)
 {
 	resolved_clause const& rc = run.machine.def.lists[run.list][index];
 	prepared_clause const& pc = run.machine.lists[run.list][index];
@@ -596,13 +598,22 @@ clause_answer RunClause(list_run const& run, size_t index)
 		before = std::span<cell const>(run.givenBefore.data(), rc.inputs.size());
 	}
 	// Keys with no run fall through to blanks in the fall-through keys, in
-	// the order they give way, as every lookup of the table does. The retries
+	// the order they give way: key order, as every lookup of the table, except
+	// an override's, whose own keys go first and then its base's. The retries
 	// write run.keys itself and put the values read back, so a report and
 	// provenance name the keys as they came.
-	uint32_t     blanked = 0;
-	size_t const tuple   = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()),
+	uint32_t blanked = 0;
+	size_t   tuple   = detail::FindFallingThrough(keys, std::span<cell>(run.keys.data(), rc.keys.size()),
 		rc.fallThrough, [&](std::span<cell const> k) { return FindTuple(pc, k); }, [](size_t t) { return t == SIZE_MAX; },
 		&blanked);
+	level = blanked;
+	// An override's run found less specifically than its base's (more of the
+	// base's fall-through keys blanked) loses to the base's.
+	if (tuple != SIZE_MAX && rc.overrides != UINT32_MAX && (blanked >> rc.ownFallThrough) > baseLevel)
+	{
+		tuple   = SIZE_MAX;
+		blanked = 0;
+	}
 	answer.fellThrough = blanked != 0;
 	// An override's table need not be total: no run is NULL, and the clause it
 	// overrides answers alone.
@@ -802,6 +813,8 @@ void RunList(instance& subject, trigger list, std::vector<cell> const& state, vo
 	std::vector<cell> const* left = nullptr)
 {
 	list_run const run = RunOver(subject, size_t(list), state, self, seed);
+	// The level the clause before answered at, which its override is bounded by.
+	uint32_t baseLevel = 0;
 	for (size_t i = 0; i < run.answers.size(); ++i)
 	{
 		resolved_clause const& rc = run.machine.def.lists[run.list][i];
@@ -823,7 +836,9 @@ void RunList(instance& subject, trigger list, std::vector<cell> const& state, vo
 		}
 		if (runs)
 		{
-			run.answers[i] = RunClause(run, i);
+			uint32_t level = 0;
+			run.answers[i] = RunClause(run, i, level, baseLevel);
+			baseLevel      = level;
 #if TABULAR_PROVENANCE
 			Record(subject, run, i, run.answers[i]);
 #endif

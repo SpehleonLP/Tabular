@@ -267,7 +267,9 @@ the column's `domain:`:
   with the first fall-through key in key order the lowest bit, so with keys (super, sub, kind),
   sub and kind falling through, a lookup tries (super, sub, kind), (super, _, kind),
   (super, sub, _), (super, _, _): the author lists keys from the one that should give way first
-  to the one that should hold out longest. A combination that blanks a key already blank is
+  to the one that should hold out longest. The one exception is an override's lookup in a
+  step: its own fall-through keys give way first and then its base's, in the base's order, so
+  the two give way level by level (Hierarchy). A combination that blanks a key already blank is
   skipped (it repeats an earlier lookup); the first hit answers, and only a miss of all finds no
   run. The cap of eight bounds a miss at 255 retries. Child runs are total, as every run is: a
   fall-through happens only when there is no run at all. It replaces R3's `domain: message`: a
@@ -366,7 +368,8 @@ that does not directly follow the clause it overrides, sets a state column that 
 not, emits where it does not, reads or overrides an or table, overrides an override, or
 overrides a clause that may hold for want of a run (a key, other than a fall-through key, read
 from a source that closes nothing: a machine input, an int or double state column, an or
-clause); a clause reading an override directly (it reads the clause overridden, which gives the
+clause), or does not fall through on each of that clause's fall-through keys from the same
+source (the two give way level by level, Hierarchy); a clause reading an override directly (it reads the clause overridden, which gives the
 coalesced answer), or reading an overridden column whose override's same-named column has
 another type; a hash state with no members, a duplicate member, or an initial value that is not
 a member. Both the
@@ -603,10 +606,20 @@ compile to one internal table (owner, 2026-10-19).
   reading the overridden clause reads the coalesced answer: where the override hit, its row's
   column of the same name, if its table has one; otherwise the overridden clause's. `Prepare`
   closes such a reader's key over both tables' values. Totality is the machine's, not each
-  table's: an override names a clause that is itself total and always answers. This is also the
-  path for a package's override of another's rows (two owners' rows with equal flags may not
-  overlap in one run, owner 2026-10-18): the mod's table, and a clause that wins where it has a
-  row.
+  table's: an override names a clause that is itself total and always answers.
+  **The two give way level by level** (owner, 2026-10-20). A level is one blanking of the
+  overridden clause's fall-through keys, from none blanked to all, in their retry order; at
+  each, the override is tried first, then the overridden clause, so the more specific row wins
+  and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the
+  substate's `(rest, sleep, _)` and gets up; `dance`, which nothing names, finds
+  `(rest, sleep, _)` before `(rest, _)` and snores on. That is the one-table order with keys
+  (super, sub, kind). So the override falls through on each of the overridden clause's
+  fall-through keys, read from the same source (refused otherwise), and its own fall-through
+  keys give way first, inside each level. An override run found at a less specific level than
+  the overridden clause's answers `Missed`, as a miss does. Overrides are hierarchy within one
+  package: a package does not see another's tables, so it cannot override another's clause.
+  Several contributors write the same tables only in an engine-owned system (dialog, the
+  display relations); if overrides are allowed there, they follow this rule.
 - **Which substates belong to which superstate** is not built: the members lists allow a
   `(rest, walk)` state. The spec's sketch, a `sub` domain read from a table of (super, sub)
   pairs, needs a joint foreign domain that the key-domain machinery does not have (a foreign

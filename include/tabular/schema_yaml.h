@@ -60,7 +60,7 @@ struct schema_document
 //           given: {energy: input.energy}       # every table input
 //           set:   {mode: next}                 # state column: value column
 //           emit:  command                      # a command column
-//         - from:  grazer_brain_mod             # an override (Part 4):
+//         - from:  grazer_brain_detail          # an override (Part 4):
 //           overrides: 0                        #   the clause directly before
 //           where: {mode: state.mode}
 //           set:   {mode: next}

@@ -552,8 +552,9 @@ TEST(Hierarchy, ALoadDemandsTheRunWithEveryFallThroughKeyBlank)
 namespace
 {
 
-// The spec's mod: the base package's table is total, the mod's has rows only
-// where it changes something, and its clause overrides the base clause.
+// Two tables of one package: the first is total, the second (named for the
+// conditions it carries) has rows only where it changes something, and its
+// clause overrides the first's.
 // Clause 2 reads the base clause's next, which is the coalesced answer.
 constexpr std::string_view kModded = R"(
 tables:
@@ -741,11 +742,13 @@ TEST(OverrideClause, ItNamesAClauseThatAlwaysAnswers)
 namespace
 {
 
-// One hierarchical machine in two forms. One table: the event's kind falls
-// through first, then the substate. Two tables: the superstate's rules, and
-// an override with the substates' own rows. Each lookup tries the same keys
-// in the same order: (super, kind, sub), (super, _, sub), then (super, kind),
-// (super, _).
+// One hierarchical machine in two forms. One table: the substate gives way
+// first, then the event's kind (spec Part 4). Two tables: the superstate's
+// rules, and an override with the substates' own rows, the two giving way
+// level by level (owner, 2026-10-20). Each tries the same keys in the same
+// order: (super, sub, kind), (super, _, kind), then (super, sub, _),
+// (super, _, _), so a superstate's row for the event beats a substate's
+// row for no event.
 constexpr std::string_view kOneTable = R"(
 tables:
   - name: rules
@@ -753,11 +756,11 @@ tables:
     pick: best
     columns:
       - {name: super, type: hash, key: true, domain: rows}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
       - {name: sub,   type: hash, key: true, fallthrough: true}
+      - {name: kind,  type: hash, key: true, fallthrough: true}
       - {name: next_super, type: hash}
       - {name: next_sub,   type: hash}
-    order_by: {columns: [super, kind, sub]}
+    order_by: {columns: [super, sub, kind]}
     suffix: command
 machines:
   - name: creature
@@ -865,8 +868,40 @@ TEST(ManySurfaces, OneTableAndTwoTablesWithAnOverrideRunTheSame)
 		EXPECT_EQ(a.State(1).i, b.State(1).i) << "step " << seed << " on '" << kind << "'";
 		++seed;
 	}
-	EXPECT_EQ(a.State(0).i, Hash("rest"));
-	EXPECT_EQ(a.State(1).i, Hash("sleep")) << "a sleeper's own blank-kind row holds out against every kind, in both";
+	EXPECT_EQ(a.State(0).i, Hash("move"));
+	EXPECT_EQ(a.State(1).i, Hash("walk")) << "wake got the sleeper up, and nap and wake move nothing while walking";
+}
+
+// The owner's case (2026-10-20): asleep, `wake` finds the superstate's
+// (rest, wake) before the substate's (rest, sleep, _), and gets up; `dance`,
+// which no one has a row for, finds (rest, sleep, _) before (rest, _), and
+// snores on. In both forms.
+TEST(ManySurfaces, ASuperstatesRowForTheEventBeatsASubstatesRowForNone)
+{
+	machine_fixture one(kOneTable, {kOneTableRows});
+	machine_fixture two(kTwoTables, {kSuperRows, kSubRows});
+	ASSERT_TRUE(one.binding) << one.refusal;
+	ASSERT_TRUE(two.binding) << two.refusal;
+	for (machine_fixture const* form : {&one, &two})
+	{
+		host_object host;
+		instance creature = CreateInstance(*form->binding, 1, 1, &host);
+		Dispatch(creature, host, "hit", 2);
+		Dispatch(creature, host, "nap", 3);
+		ASSERT_EQ(creature.State(1).i, Hash("sleep"));
+		EXPECT_EQ(Dispatch(creature, host, "dance", 4), std::vector<std::string>{"((snore))"});
+		EXPECT_EQ(creature.State(1).i, Hash("sleep")) << "no row for dance: the substate's own row for none";
+		EXPECT_EQ(Dispatch(creature, host, "wake", 5), std::vector<std::string>{"((get up))"});
+		EXPECT_EQ(creature.State(0).i, Hash("move"));
+		EXPECT_EQ(creature.State(1).i, Hash("walk")) << "the superstate's row for wake, not the substate's for none";
+	}
+	host_object host;
+	instance creature = CreateInstance(*two.binding, 1, 1, &host);
+	Dispatch(creature, host, "hit", 2);
+	Dispatch(creature, host, "nap", 3);
+	Dispatch(creature, host, "wake", 4);
+	EXPECT_EQ(creature.Answer(trigger::Step, 1).outcome, clause_outcome::Missed)
+		<< "the override found (rest, _, sleep), less specific than the base's (rest, wake)";
 }
 
 // Per-column entry, several fall-through keys, an override's miss and hit,
@@ -1268,4 +1303,120 @@ TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
 	EXPECT_TRUE(Mentions(refused, "the key is in the table's domain")) << refused;
 	EXPECT_EQ(RefusalOf(LoadCsv(store, csv_rows{1, 1, "mode,next,command\nidle,sleep,()\nwalk,walk,()\nsleep,idle,()\n",
 		"mod.csv"})), "(accepted)") << "the same table, total over its members, loads";
+}
+
+// The levels line up only when the override falls through on its base's
+// fall-through keys, read from the same source.
+TEST(OverrideClause, ItFallsThroughOnItsBasesFallThroughKeys)
+{
+	std::string const keyed = Replace(kTwoTables, R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
+      - {name: sub,   type: hash, key: true, domain: rows})", R"(      - {name: kind,  type: hash, key: true, domain: rows}
+      - {name: sub,   type: hash, key: true, domain: rows})");
+	std::string const refused = RefusalOf(DocumentFromYaml(keyed, "machine.yaml"));
+	EXPECT_TRUE(Mentions(refused, "machine 'creature' step clause 1 (table 'sub_rules')")) << refused;
+	EXPECT_TRUE(Mentions(refused, "whose fall-through key 'kind' of table 'super_rules' it does not fall through on")) << refused;
+}
+
+namespace
+{
+
+// kTwoTables with a substate key that falls through in the override too, and
+// after the event's kind in key order: the override's own key, sub, still
+// gives way first, inside each level of the base's kind.
+std::string WithFallingSub()
+{
+	return Replace(kTwoTables, R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
+      - {name: sub,   type: hash, key: true, domain: rows})", R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
+      - {name: sub,   type: hash, key: true, fallthrough: true})");
+}
+
+// The override's catch-all for each superstate, a row for wake with any
+// substate of rest, and the sleeper's own row for none.
+constexpr std::string_view kFallingSubRows = R"(super, kind, sub,   next_super, next_sub, command
+move,  ,     ,      move,       walk,     (o-move)
+rest,  ,     ,      rest,       sit,      (o-rest)
+rest,  wake, ,      rest,       sit,      (o-wake)
+rest,  ,     sleep, rest,       sleep,    (snore)
+)";
+
+}
+
+// Resting and sitting, wake: the override's (rest, wake, _) blanks only its
+// own key, so it ties the base's (rest, wake) and wins the tie. With no event,
+// the override's (rest, _, _) ties the base's (rest, _): both read kind blank.
+// Asleep, dance: the override's (rest, _, sleep) and the base's (rest, _) are
+// both at the level with kind blanked, and the override's wins.
+TEST(OverrideClause, ItsOwnFallThroughKeysGiveWayFirstInsideEachLevel)
+{
+	machine_fixture f(WithFallingSub(), {kSuperRows, kFallingSubRows});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance creature = CreateInstance(*f.binding, 1, 1, &host);
+	Dispatch(creature, host, "hit", 2);
+	ASSERT_EQ(creature.State(1).i, Hash("sit"));
+	EXPECT_EQ(Dispatch(creature, host, "wake", 3), std::vector<std::string>{"((o-wake))"})
+		<< "(rest, wake, _) is as specific as (rest, wake) once sub, the override's own key, gives way";
+	EXPECT_EQ(Dispatch(creature, host, "", 4), std::vector<std::string>{"((o-rest))"});
+	Dispatch(creature, host, "nap", 5);
+	ASSERT_EQ(creature.State(1).i, Hash("sleep"));
+	EXPECT_EQ(Dispatch(creature, host, "dance", 6), std::vector<std::string>{"((snore))"});
+}
+
+// A twin is found by source, not by name: here both of the override's
+// fall-through keys read state.sub, so none reads the base's input.kind.
+TEST(OverrideClause, ItsTwinKeyReadsTheSameSourceAsTheBasesKey)
+{
+	std::string const crossed = Replace(WithFallingSub(), R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
+        set:   {super: next_super, sub: next_sub})", R"(        where: {super: state.super, kind: state.sub, sub: state.sub}
+        set:   {super: next_super, sub: next_sub})");
+	std::string const refused = RefusalOf(DocumentFromYaml(crossed, "machine.yaml"));
+	EXPECT_TRUE(Mentions(refused, "whose fall-through key 'kind' of table 'super_rules' it does not fall through on")) << refused;
+}
+
+// Two fall-through keys the override declares in the other key order: its
+// levels follow the base's order (x, the base's first, gives way first), not
+// its own key order.
+TEST(OverrideClause, ItsLevelsFollowTheBasesOrderOfFallThroughKeys)
+{
+	constexpr std::string_view yaml = R"(
+tables:
+  - name: base
+    read_only: true
+    pick: best
+    columns:
+      - {name: x,    type: hash, key: true, fallthrough: true}
+      - {name: y,    type: hash, key: true, fallthrough: true}
+      - {name: next, type: hash}
+    order_by: {columns: [x, y]}
+  - name: over
+    read_only: true
+    pick: best
+    columns:
+      - {name: y,    type: hash, key: true, fallthrough: true}
+      - {name: x,    type: hash, key: true, fallthrough: true}
+      - {name: next, type: hash}
+    order_by: {columns: [y, x]}
+machines:
+  - name: twins
+    inputs:
+      - {name: kind, type: hash}
+    state:
+      - {name: mood, type: hash, members: [p, calm], initial: p}
+      - {name: last, type: hash, members: [base0, basep, baseq, over0, overq], initial: base0}
+    step:
+      - from:  base
+        where: {x: state.mood, y: input.kind}
+        set:   {last: next}
+      - from:  over
+        overrides: 0
+        where: {x: state.mood, y: input.kind}
+        set:   {last: next}
+)";
+	machine_fixture f(yaml, {"x, y, next\n , , base0\np, , basep\n , q, baseq\n", "y, x, next\n , , over0\nq, , overq\n"});
+	ASSERT_TRUE(f.binding) << f.refusal;
+	host_object host;
+	instance subject = CreateInstance(*f.binding, 1, 1, &host);
+	Dispatch(subject, host, "q", 2);
+	EXPECT_EQ(subject.State(1).i, Hash("overq"))
+		<< "the base answers (_, q) with x blanked; the override's (q, _) is x blanked too, a tie it wins";
 }

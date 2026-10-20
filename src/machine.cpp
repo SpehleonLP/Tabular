@@ -8,6 +8,7 @@
 #include "Support/strings.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -306,6 +307,19 @@ bool ClosesItsKey(resolved_source const& from, machine_def const& def, std::span
 	return false;
 }
 
+// The column of the table's k-th key, keys counted in column order.
+uint32_t KeyColumn(table_def const& def, size_t k)
+{
+	for (uint32_t col = 0, seen = 0; col < def.columns.size(); ++col)
+	{
+		if (def.columns[col].key && seen++ == k)
+		{
+			return col;
+		}
+	}
+	return 0;
+}
+
 // An override (Part 4) is a left outer join with a coalesce onto the clause
 // before it: it must directly follow that clause, write only what that clause
 // writes (state columns, and an emit only where it emits), and that clause
@@ -360,15 +374,7 @@ tl::expected<void, ErrorContext> CheckOverride(add_clause const& c, resolved_cla
 	}
 	for (size_t k = 0; k < base.keys.size(); ++k)
 	{
-		uint32_t column = 0;
-		for (uint32_t col = 0, seen = 0; col < baseDef.columns.size(); ++col)
-		{
-			if (baseDef.columns[col].key && seen++ == k)
-			{
-				column = col;
-				break;
-			}
-		}
+		uint32_t const column = KeyColumn(baseDef, k);
 		if (IsFallThroughKey(baseDef, column) || ClosesItsKey(base.keys[k], def, earlier, tables))
 		{
 			continue;
@@ -377,6 +383,74 @@ tl::expected<void, ErrorContext> CheckOverride(add_clause const& c, resolved_cla
 			baseDef.columns[column].name, "' of table '", baseDef.name, "' is read from a source that closes nothing, so "
 			"it may hold for want of a run; an override names a clause that always answers"));
 	}
+	return {};
+}
+
+bool SameSource(resolved_source const& a, resolved_source const& b)
+{
+	if (a.kind != b.kind)
+	{
+		return false;
+	}
+	switch (a.kind)
+	{
+	case source_kind::State:
+	case source_kind::Input:   return a.index == b.index;
+	case source_kind::Clause:  return a.index == b.index && a.column == b.column;
+	case source_kind::Literal: return a.literal.i == b.literal.i;
+	}
+	return false;
+}
+
+// An override gives way level by level with the clause it overrides (owner,
+// 2026-10-20): at each blanking of the base's fall-through keys the override
+// is tried first, then the base, so the more specific row wins and the
+// override wins a tie. Asleep, `wake` finds the superstate's (rest, wake)
+// before the substate's (rest, sleep, blank). The levels line up only when
+// the override falls through on each of the base's fall-through keys, read
+// from the same source; its own fall-through keys give way first, inside each
+// level, as a substate key below the event in one table does.
+tl::expected<void, ErrorContext> LevelOverride(resolved_clause& over, resolved_clause const& base,
+	table_def const& baseDef, uint32_t baseIndex)
+{
+	std::array<bool, kMaxFallThroughKeys>     shared{};
+	std::array<uint32_t, kMaxFallThroughKeys> twin{};
+	for (uint32_t b = 0; b < base.fallThrough.count; ++b)
+	{
+		resolved_source const& from  = base.keys[base.fallThrough.key[b]];
+		uint32_t               found = UINT32_MAX;
+		for (uint32_t o = 0; o < over.fallThrough.count && found == UINT32_MAX; ++o)
+		{
+			if (!shared[o] && SameSource(over.keys[over.fallThrough.key[o]], from))
+			{
+				found = o;
+			}
+		}
+		if (found == UINT32_MAX)
+		{
+			uint32_t const column = KeyColumn(baseDef, base.fallThrough.key[b]);
+			return tl::make_unexpected(ErrorContext("the clause overrides clause ", baseIndex, ", whose fall-through key '",
+				baseDef.columns[column].name, "' of table '", baseDef.name, "' it does not fall through on from the same "
+				"source; an override gives way level by level with the clause it overrides, so it falls through on "
+				"each of its fall-through keys"));
+		}
+		shared[found] = true;
+		twin[b]       = over.fallThrough.key[found];
+	}
+	fall_through_keys ordered;
+	for (uint32_t o = 0; o < over.fallThrough.count; ++o)
+	{
+		if (!shared[o])
+		{
+			ordered.key[ordered.count++] = over.fallThrough.key[o];
+		}
+	}
+	over.ownFallThrough = ordered.count;
+	for (uint32_t b = 0; b < base.fallThrough.count; ++b)
+	{
+		ordered.key[ordered.count++] = twin[b];
+	}
+	over.fallThrough = ordered;
 	return {};
 }
 
@@ -631,6 +705,11 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 		if (!overridden)
 		{
 			return tl::make_unexpected(std::move(overridden.error()));
+		}
+		auto levelled = LevelOverride(out, earlier[c.overrides], tables.tables()[earlier[c.overrides].table], c.overrides);
+		if (!levelled)
+		{
+			return tl::make_unexpected(std::move(levelled.error()));
 		}
 		out.overrides = c.overrides;
 	}

@@ -155,7 +155,7 @@ tables:
     pick: best                 # none | best | all | or | weighted
     # output: <flags col>      # or tables
     # weight: <double col>     # weighted tables
-    # suffix: command          # trailing Command column; CSV reads the rest of the line into it
+    # suffix: command          # trailing Command column; CSV joins every cell from it on into one list
     # pivot: {headers: <flags col>, cells: <col>}
     # grid:  {rows: {name, type}, columns: {name, type}, cells: <type>}
     # read_only: defaults to true for picked tables and grids; stating false is refused
@@ -173,7 +173,7 @@ machines:
         given: {energy: input.energy}           # one per table input
         set:   {mode: next}                     # state column: value column
         emit:  command                          # optional Command column
-      # - from: grazer_brain_mod                # an override of the clause above
+      # - from: grazer_brain_detail             # an override of the clause above
       #   overrides: 0                          # its position in the same list
       #   ...
 ```
@@ -246,7 +246,7 @@ An instance's own messages never come back into its own machine; the host routes
 A hierarchical state machine is an outer join, and can be written two ways that compile to the same thing:
 
 - **One table**, with fall-through on the substate key: a substate with no row of its own falls through to the superstate's blank row.
-- **Two tables**, with `overrides: <n>` on the second clause. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as it uses `domain: rows` (a `members:` domain is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. This is also how a package or mod overrides another's behaviour.
+- **Two tables**, with `overrides: <n>` on the second clause. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as it uses `domain: rows` (a `members:` domain is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. The two **give way level by level**: at each blanking of the base's fall-through keys the override is tried first, then the base, so the more specific row wins and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the substate's `(rest, sleep, _)`; that is the one-table order with keys `(super, sub, kind)`. So the override falls through on each of the base's fall-through keys, from the same source, and its own fall-through keys give way first. Overrides are hierarchy within a package: a package can't see another's tables.
 
 **Entry and exit run per column.** An entry or exit clause runs only when a state column its `where:` reads changed. Clauses that read one another, and an override with its base, run as one group. Creation, `Rebind` and `Close` run their lists whole.
 
@@ -310,7 +310,7 @@ A clause that cannot answer **holds**: it writes nothing and emits nothing. `Ans
 | `NoRun` | The key tuple has no run in the proved domain, even after falling through |
 | `Failed` | A script condition could not answer, or an input was refused |
 | `SourceHeld` | An upstream clause or input had no value |
-| `Missed` | An override had no run for its key tuple, so its base answered alone. Not a hold, never reported. |
+| `Missed` | An override had no run for its key tuple, or only a less specific one than its base's, so its base answered alone. Not a hold, never reported. |
 
 `clause_answer::fellThrough` says whether the clause's own keys had no run and a retry with fall-through keys blanked answered.
 

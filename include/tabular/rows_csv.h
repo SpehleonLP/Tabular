@@ -16,23 +16,32 @@ namespace tabular
 // texts with one hash, or a text hashing to 0, are refused, naming both lines,
 // flags an unsigned decimal
 // or 0x hex below 2^32, an int a signed decimal, a double as from_chars reads
-// it, a vec2 as `a..b`, two floats, a command verbatim, a string as its trimmed text. Cells are trimmed of
-// surrounding whitespace, blank
-// lines and lines starting with '#' are skipped, a leading UTF-8 BOM is
-// dropped, and text is otherwise taken byte for byte, so a hash matches the
-// one a script literal of the same name gets. The rows replace the owner's
+// it, a vec2 as `a..b`, two floats, a command as one list of commands (below),
+// a string as its text. Cells are quoted as RFC 4180 has it, so a
+// quoted cell may hold commas, doubled quotes and line breaks; cells are
+// trimmed of whitespace outside the quotes, trailing empty cells past the
+// header say nothing, blank lines (a row of nothing but separators included)
+// and lines whose first unquoted character is '#' are skipped, a leading UTF-8
+// BOM is dropped, and text is otherwise taken byte for byte, so a hash matches
+// the one a script literal of the same name gets. The rows replace the owner's
 // rows in the table, all or none; a refusal names the offending line.
 //
 // A condition cell's text is handed to condition, which returns the compiled
 // closure or an error; that is the whole of Tabular's part in compiling
 // conditions. It is needed only when a non-blank condition cell appears. A
-// blank condition cell is no condition: it is not handed to condition. Every
-// other blank cell is refused.
+// blank condition cell is no condition: it is not handed to condition. A
+// blank fall-through key is the blank, 0, and a blank edge cell no edge.
+// Every other blank cell is refused, a declared command cell's included
+// (`()` is the explicit "do nothing").
 //
-// A table with a suffix (table_def::suffix) ends its header with the suffix
-// column's name, and each row's last cell is the rest of its line: everything
-// after the declared cells, commas included, trimmed at its two ends. An empty
-// suffix, or a row with no cell for it, is refused naming the line.
+// A command cell is one list of commands: a cell of several items that does
+// not start with '(' is one command and is wrapped, so `anim chew` reads as
+// `((anim chew))`, while a single word stays a word. A table with a suffix
+// (table_def::suffix) ends its header with the suffix column's name, and every
+// cell of a row from the suffix column on is joined, with a space, into that
+// one list, so a command may run across cells; no cells, or only `()`, is
+// `()`. Refused, naming the line, when the cells do not join into exactly one
+// list (see the commands-and-messages spec, Part 2).
 //
 // A pivoted load reads the table's pivot: the header row names the key
 // columns, in key order, then the flag headers, whose order gives the flag

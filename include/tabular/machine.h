@@ -75,7 +75,12 @@ struct add_clause
 	// hit writes its sets over that clause's and its emit replaces that
 	// clause's. A later clause reading the overridden clause reads the
 	// coalesced answer: the override's row's column of the same name when the
-	// override hit and its table has one, else the overridden clause's.
+	// override hit and its table has one, else the overridden clause's. The
+	// two give way level by level (owner, 2026-10-20): at each blanking of the
+	// overridden clause's fall-through keys the override is tried first, so a
+	// run the override finds less specifically than that clause's is a miss
+	// too, and the override falls through on each of those keys, read from the
+	// same source; its own fall-through keys give way first.
 	uint32_t                      overrides = UINT32_MAX;
 };
 
@@ -128,7 +133,9 @@ struct create_machine
 // clause it overrides, sets only state columns that clause sets, emits only
 // if it emits, neither it nor that clause reads an or table, that clause is
 // not itself an override and always answers for want of no run (each of its
-// keys closed by its source, or a fall-through key), and no clause reads an
+// keys closed by its source, or a fall-through key), the override falls
+// through on each of that clause's fall-through keys from the same source,
+// and no clause reads an
 // override directly (it reads the coalesced answer through the clause
 // overridden). No rows are read.
 // Prepare checks this first.

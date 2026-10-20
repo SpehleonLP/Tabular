@@ -148,7 +148,7 @@ enum class clause_outcome : uint8_t
 	NoRun,        // its key tuple has no run: a key value outside the domain Prepare proved (a fall-through key's value with none falls through to the blank run first)
 	Failed,       // the pick failed: a script condition could not answer, or a ranged input was NaN, or a flag set was wider than 32 bits
 	SourceHeld,   // a source had no value: an earlier clause that did not answer, or an input whose getter failed
-	Missed,       // an override found no run for its key tuple: NULL, so the clause it overrides answers alone; not a hold, never reported
+	Missed,       // an override found no run for its key tuple, or only one less specific than the clause it overrides answered from (more of that clause's fall-through keys blanked): NULL, so that clause answers alone; not a hold, never reported
 };
 
 // A clause that did not answer wrote nothing and emitted nothing: its table

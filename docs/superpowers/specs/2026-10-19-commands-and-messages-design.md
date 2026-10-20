@@ -356,10 +356,10 @@ from the superstate's row. A `run` answers from its own row.
 
 ### Hierarchy in two tables: an override clause
 
-**Why it is wanted beyond hierarchy.** Two owners' rows with equal flags may not overlap in
-one key run (owner, 2026-10-18). So a package cannot override another package's rows in the
-same table: it needs a table of its own, and a clause that lets that table win where it has a
-row. That is the same outer join.
+**Hierarchy within a package (owner, 2026-10-20).** A package does not see another package's
+tables, so one package never overrides another's clause; an override is hierarchy inside one
+package. Several contributors write the same tables only in an engine-owned system (dialog,
+the display relations). If overrides are allowed there, they follow the level rule below.
 
 **Rule.** A clause may declare `overrides: <earlier clause>`:
 
@@ -374,6 +374,10 @@ row. That is the same outer join.
   every override names a clause that is itself total, so for every reachable key and input
   something answers. `Prepare` refuses an override of a clause that is itself an override, or
   of one that may hold for want of a run.
+- **It gives way level by level with that clause** (owner, 2026-10-20; see As built): at each
+  blanking of that clause's fall-through keys the override is tried first, then that clause, so
+  the more specific row wins and the override a tie. So it falls through on each of those keys,
+  read from the same source, or is refused.
 
 ```yaml
 step:
@@ -382,7 +386,7 @@ step:
     given: {energy: input.energy}
     set:   {mode: next}
     emit:  command
-  - from:  grazer_brain_mod      # a mod's table, rows only where it changes something
+  - from:  grazer_brain_detail   # the same package's second table, rows only where it changes something
     overrides: 0
     where: {mode: state.mode}
     given: {energy: input.energy}
@@ -457,6 +461,21 @@ Decided in building:
     silence the base's emit is an owner question (Open questions).
   - Provenance records the base as `Answered` with its own row, before the override's
     replacement; the override's entry, the next one, shows what replaced it.
+- **The override and its base give way level by level (owner, 2026-10-20, after the
+  2026-10-20 review).** As first built, the override ran all its own retries before its base
+  answered, so a substate's row for no event beat a superstate's row for the event: asleep,
+  `wake` snored on. That is the opposite of the retry order decided above, and the one-table
+  and two-table forms agreed only with the event key before the substate key. Now a level is
+  one blanking of the base's fall-through keys, in their retry order, and at each the override
+  is tried first, then the base: the more specific row wins, the override a tie. The override
+  falls through on each of the base's fall-through keys, read from the same source (refused
+  otherwise), and its own fall-through keys give way first, inside each level. An override run
+  less specific than the base's answers `Missed`. In the step, the override's retry order is its
+  own fall-through keys, then the base's in the base's order, so its retry count shifted right
+  by its own keys' number is comparable with the base's (`resolved_clause::ownFallThrough`).
+  Tests: `ManySurfaces.OneTableAndTwoTablesWithAnOverrideRunTheSame` (now with keys
+  (super, sub, kind)), `ManySurfaces.ASuperstatesRowForTheEventBeatsASubstatesRowForNone`,
+  `OverrideClause.ItFallsThroughOnItsBasesFallThroughKeys`.
 - **Not built: substate membership (the pair-table domain).** The rule above says it is
   "ordinary key-domain machinery", but it is not: a foreign-column domain gives one column's
   values, and a (super, sub) pair is a joint domain over two keys, which nothing has; and on a
@@ -621,7 +640,7 @@ above; `:lock` is marked speculative.
   re-checks that brings.
 - **An override hit with no emit (for the owner).** Built: the column-subset rule, so the base's
   command goes out with the override's state (Part 4, As built). The alternative is that any
-  hit silences the base's emit, so a mod that changes only state also drops the base's command
+  hit silences the base's emit, so an override that changes only state also drops the base's command
   (an override wanting the base's command would then have to repeat it). Unchanged until
   decided.
 - **Edges on a handler's payload inputs (for the owner).** An edge compares an input with its

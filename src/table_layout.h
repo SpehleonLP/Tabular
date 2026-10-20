@@ -56,9 +56,11 @@ inline bool IsFallThroughKey(table_def const& def, uint32_t column)
 // the commands-and-messages spec).
 inline constexpr size_t kMaxFallThroughKeys = 8;
 
-// A table's fall-through keys, as indices among its keys in key order, which
-// is the order they give way in (the first is the lowest bit of the retry
-// count). Fixed-size, so a lookup holds it without allocating.
+// A table's fall-through keys, as indices among its keys, in the order they
+// give way in (the first is the lowest bit of the retry count): key order,
+// except an override's in a step, which is its own keys and then its base's,
+// in the base's order (resolved_clause::ownFallThrough). Fixed-size, so a
+// lookup holds it without allocating.
 struct fall_through_keys
 {
 	std::array<uint32_t, kMaxFallThroughKeys> key{};

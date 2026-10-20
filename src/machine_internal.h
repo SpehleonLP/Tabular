@@ -58,7 +58,15 @@ struct resolved_clause
 	std::vector<uint32_t>        enteredOn;
 	// The table's fall-through keys, the slots a step's run lookup retries with
 	// 0 (blank) when the keys as read have no run, in the order they give way.
+	// An override's are its own keys first, then its base's fall-through keys
+	// in the base's order (see ownFallThrough).
 	fall_through_keys            fallThrough;
+	// An override: how many of fallThrough are keys its base does not have.
+	// The rest are the base's, so the retry count shifted right by this is the
+	// level, comparable with the base's own retry count: a hit counts only at a
+	// level no less specific than the one the base answered at (owner,
+	// 2026-10-20: the more specific row wins, and the override wins a tie).
+	uint32_t                     ownFallThrough = 0;
 };
 
 struct state_column

@@ -434,7 +434,7 @@ tl::expected<table_def, ErrorContext> BuildTable(create_table const& declared, s
 
 	// A suffix is one more Command column after the declared ones, so the store,
 	// the picks and every front end see an ordinary column; only the CSV reader
-	// treats it differently (it takes the rest of the line).
+	// treats it differently (it joins every cell from the suffix on into one list).
 	std::vector<add_column> widened;
 	create_table            withSuffix;
 	create_table const*     source = &declared;
