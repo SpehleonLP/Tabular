@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "generated/tree_paths.h"
 
 using namespace tabular::bench;
 
