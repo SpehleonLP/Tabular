@@ -40,7 +40,7 @@ budget_sizes Small()
 
 std::string Definition()
 {
-	std::ifstream file(REPO_ROOT "/Spehleon/Tabular/docs/definition.md");
+	std::ifstream file(std::string(REPO_ROOT) + "/Spehleon/Tabular/docs/definition.md");
 	std::stringstream text;
 	text << file.rdbuf();
 	return text.str();
