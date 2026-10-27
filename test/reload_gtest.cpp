@@ -324,7 +324,7 @@ struct reload_world
 			return {};
 		}
 		Targets()[bound->get()] = log_target{&log, std::string(tag)};
-		return *bound;
+		return std::move(*bound);
 	}
 };
 

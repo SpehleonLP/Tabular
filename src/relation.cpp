@@ -1679,7 +1679,7 @@ tl::expected<counted_ptr<TableVersion const>, ErrorContext> relation_store::Vers
 	{
 		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is mutable, not a best table, and no domain comes from it, so it has no version"));
 	}
-	return _storage->versions[table];
+	return counted_ptr<TableVersion const>(_storage->versions[table]); // owned: the slot is republished by the next write
 }
 
 namespace

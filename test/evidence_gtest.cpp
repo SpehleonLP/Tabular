@@ -185,7 +185,7 @@ struct World
 			return {};
 		}
 		Targets()[bound->get()] = log_target{this, label};
-		return *bound;
+		return std::move(*bound);
 	}
 
 	void Log(std::string const& label, emitted const& result)

@@ -129,7 +129,7 @@ private:
 // resolve is missing, when it refuses an input, or when it returns a getter
 // with no read function. Bind adopts every getter resolve returns, succeed or
 // fail: on a refusal those already returned are released.
-tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const> machine, host_binding&& host);
+tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const> const& machine, host_binding&& host);
 
 // The draw site of a weighted clause: the machine's name hashed (CityHash32)
 // in the high word, then the clause list (bits 24..31) and the clause's

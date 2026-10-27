@@ -266,7 +266,7 @@ tl::expected<counted_ptr<GridVersion const>, ErrorContext> relation_store::Grid(
 	{
 		return tl::make_unexpected(ErrorContext("table '", defs[table].name, "' is not a grid"));
 	}
-	return _storage->grids[table];
+	return counted_ptr<GridVersion const>(_storage->grids[table]); // owned: the slot is republished by the next write
 }
 
 }

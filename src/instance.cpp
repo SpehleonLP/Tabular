@@ -174,7 +174,7 @@ uint64_t DrawSite(std::string_view machine, trigger list, uint32_t clause)
 	return (name << 32) | (uint64_t(list) << 24) | (clause & 0xFFFFFFu);
 }
 
-tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const> machine, host_binding&& host)
+tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine const> const& machine, host_binding&& host)
 {
 	if (!machine)
 	{
@@ -1162,7 +1162,7 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	// Both bindings live to the end: holding fresh keeps a rebind onto the
 	// binding subject already holds safe when the assignment below drops its
 	// reference; old is what the exit and migration read until then.
-	counted_ptr<Binding const> const old   = instance_access::BindingOf(subject);
+	counted_ptr<Binding const> const old(instance_access::BindingOf(subject)); // owned: the assignment below drops the subject's reference
 	counted_ptr<Binding const> const fresh = CountedWrap(&binding);
 	detail::machine_def const&       from  = machine_access::Of(old->machine()).def;
 	detail::machine_def const&       to    = machine_access::Of(fresh->machine()).def;
