@@ -7,7 +7,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <array>
@@ -174,8 +174,8 @@ struct machine_fixture
 	counted_ptr<Machine const>      machine;
 	counted_ptr<Binding const>      binding;
 
-	machine_fixture(std::string_view yaml, std::vector<std::string_view> const& rows)
-		: document(Parse(yaml)), store(std::move(document.tables))
+	machine_fixture(std::string_view source, std::vector<std::string_view> const& rows)
+		: document(Parse(source)), store(std::move(document.tables))
 	{
 		// A refused document already failed the test; a run on it would crash it.
 		if (document.machines().empty())
@@ -207,9 +207,9 @@ struct machine_fixture
 		}
 	}
 
-	static schema_document Parse(std::string_view yaml)
+	static schema_document Parse(std::string_view source)
 	{
-		auto doc = DocumentFromYaml(yaml, "machine.yaml");
+		auto doc = ReadDocument(source, "machine.tabular");
 		EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 		return doc ? std::move(*doc) : schema_document{};
 	}
@@ -259,56 +259,33 @@ std::span<emitted const> StepOn(instance& subject, host_object& host, uint64_t s
 // brings it back to graze.
 
 constexpr std::string_view kGrazer = R"(
-tables:
-  - name: settle
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: anim, type: int}
-    order_by: {columns: [mode]}
-  - name: grazer_brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: threat, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: energy, type: band, input: energy}
-      - {name: threat, type: band, input: threat}
-      - {name: when,   type: condition}
-      - {name: next,   type: hash}
-    order_by: {columns: [mode]}
-  - name: grazer_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: anim, type: int}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [graze, flee, freeze, fight], initial: graze}
-      - {name: anim, type: int, initial: 0}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from:  settle
-        where: {mode: state.mode}
-        set:   {anim: anim}
-      - from:  grazer_brain
-        where: {mode: state.mode}
-        given: {energy: input.energy, threat: input.threat}
-        set:   {mode: next}
-    entry:
-      - from:  grazer_enter
-        where: {mode: state.mode}
-        set:   {anim: anim}
-        emit:  command
+[table settle
+  (key mode hash (domain rows))
+  (column anim int)
+  (order mode)]
+[table grazer_brain
+  (input energy double 0..1)
+  (input threat double 0..1)
+  (key mode hash (domain rows))
+  (column energy band (input energy))
+  (column threat band (input threat))
+  (column when condition)
+  (column next hash)
+  (order mode)]
+[table grazer_enter
+  (key mode hash (domain rows))
+  (column anim int)
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members graze flee freeze fight) (initial graze))
+  (state anim int (initial 0))
+  (input energy double 0..1)
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+entry,grazer_enter,mode=state.mode,,anim=anim,command,
+step,settle,mode=state.mode,,anim=anim,,
+step,grazer_brain,mode=state.mode,energy=input.energy threat=input.threat,mode=next,,
 )";
 
 constexpr std::string_view kSettleRows = "mode,anim\ngraze,0\nflee,0\nfreeze,0\nfight,0\n";
@@ -680,34 +657,21 @@ namespace
 // flip moves mode; show reads mode as the step has written it. hold is a
 // column no clause writes.
 constexpr std::string_view kFlip = R"(
-tables:
-  - name: flip
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: show
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: label, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: flipper
-    state:
-      - {name: mode,  type: hash, members: [a, b], initial: a}
-      - {name: label, type: hash, members: [x, y, z], initial: z}
-      - {name: hold,  type: int, initial: 42}
-    step:
-      - from: flip
-        where: {mode: state.mode}
-        set: {mode: next}
-      - from: show
-        where: {mode: state.mode}
-        set: {label: label}
+[table flip
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table show
+  (key mode hash (domain rows))
+  (column label hash)
+  (order mode)]
+[machine flipper
+  (state mode hash (members a b) (initial a))
+  (state label hash (members x y z) (initial z))
+  (state hold int (initial 42))]
+list,from,where,given,set,emit,overrides
+step,flip,mode=state.mode,,mode=next,,
+step,show,mode=state.mode,,label=label,,
 )";
 
 constexpr std::string_view kFlipRows = "mode,next\na,b\nb,a\n";
@@ -746,8 +710,8 @@ TEST(MachineStep, AColumnNoClauseWritesHolds)
 
 TEST(MachineStep, OfTwoClausesSettingOneColumnTheLaterWins)
 {
-	std::string const both = Replace(kFlip, "        set: {label: label}\n",
-		"        set: {label: label}\n      - from: flip\n        where: {mode: state.mode}\n        set: {mode: next}\n");
+	std::string const both = Replace(kFlip, "step,show,mode=state.mode,,label=label,,\n",
+		"step,show,mode=state.mode,,label=label,,\nstep,flip,mode=state.mode,,mode=next,,\n");
 	machine_fixture f(both, {kFlipRows, kShowRows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
@@ -759,8 +723,7 @@ TEST(MachineStep, OfTwoClausesSettingOneColumnTheLaterWins)
 
 TEST(MachineStep, ALiteralSourceIsItsValueEveryStep)
 {
-	std::string const literal = Replace(kFlip, "        where: {mode: state.mode}\n        set: {label: label}\n",
-		"        where: {mode: {literal: b}}\n        set: {label: label}\n");
+	std::string const literal = Replace(kFlip, "step,show,mode=state.mode,", "step,show,mode=(literal b),");
 	machine_fixture f(literal, {kFlipRows, kShowRows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
@@ -806,31 +769,18 @@ TEST(MachineStep, SeveralMachinesOnOneObjectAreSeveralInstances)
 TEST(MachineStep, AnEarlierClausesAnswerIsReadThisStep)
 {
 	constexpr std::string_view chain = R"(
-tables:
-  - name: mood_of
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: mood, type: hash}
-    order_by: {columns: [mode]}
-  - name: react
-    read_only: true
-    pick: best
-    columns:
-      - {name: mood, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mood]}
-machines:
-  - name: chain
-    state:
-      - {name: mode, type: hash, members: [calm, alert], initial: calm}
-    step:
-      - from: mood_of
-        where: {mode: state.mode}
-      - from: react
-        where: {mood: clause.0.mood}
-        set: {mode: next}
+[table mood_of
+  (key mode hash (domain rows))
+  (column mood hash)
+  (order mode)]
+[table react
+  (key mood hash (domain rows))
+  (column next hash)
+  (order mood)]
+[machine chain (state mode hash (members calm alert) (initial calm))]
+list,from,where,given,set,emit,overrides
+step,mood_of,mode=state.mode,,,,
+step,react,mood=clause.0.mood,,mode=next,,
 )";
 	machine_fixture f(chain, {"mode,mood\ncalm,happy\nalert,tense\n", "mood,next\nhappy,alert\ntense,calm\n"});
 	ASSERT_TRUE(f.binding);
@@ -852,45 +802,28 @@ namespace
 // GrazerTables), with more flag groups and two script conditions so the
 // ranked fall-through has groups to rank and rows to fall past.
 constexpr std::string_view kSpecGrazer = R"(
-tables:
-  - name: grazer_brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: energy,  type: band, input: energy}
-      - {name: near,    type: flags, input: food_near}
-      - {name: when,    type: condition}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: grazer_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [idle, walk, eat, panic], initial: idle}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: message, type: hash}
-    step:
-      - from:  grazer_brain
-        where: {mode: state.mode, message: input.message}
-        given: {energy: input.energy, food_near: input.food_near}
-        set:   {mode: next}
-    entry:
-      - from:  grazer_enter
-        where: {mode: state.mode}
-        emit:  command
+[table grazer_brain
+  (input energy double 0..1)
+  (input food_near flags)
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column energy band (input energy))
+  (column near flags (input food_near))
+  (column when condition)
+  (column next hash)
+  (order mode message)]
+[table grazer_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members idle walk eat panic) (initial idle))
+  (input energy double 0..1)
+  (input food_near flags)
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,grazer_enter,mode=state.mode,,,command,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kSpecBrainRows = R"(# grazer_brain
@@ -981,37 +914,22 @@ TEST(MachineStep, TheFlagsRankTheGroupsAsPickBestRanksRows)
 TEST(MachineStep, AClauseReadingAHeldClauseHolds)
 {
 	constexpr std::string_view chain = R"(
-tables:
-  - name: mood_of
-    read_only: true
-    pick: best
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: threat, type: band, input: threat}
-      - {name: mood,   type: hash}
-    order_by: {columns: [mode]}
-  - name: react
-    read_only: true
-    pick: best
-    columns:
-      - {name: mood, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mood]}
-machines:
-  - name: chain
-    state:
-      - {name: mode, type: hash, members: [calm, alert], initial: calm}
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from: mood_of
-        where: {mode: state.mode}
-        given: {threat: input.threat}
-      - from: react
-        where: {mood: clause.0.mood}
-        set: {mode: next}
+[table mood_of
+  (input threat double 0..1)
+  (key mode hash (domain rows))
+  (column threat band (input threat))
+  (column mood hash)
+  (order mode)]
+[table react
+  (key mood hash (domain rows))
+  (column next hash)
+  (order mood)]
+[machine chain
+  (state mode hash (members calm alert) (initial calm))
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+step,mood_of,mode=state.mode,threat=input.threat,,,
+step,react,mood=clause.0.mood,,mode=next,,
 )";
 	machine_fixture f(chain, {"mode,threat,mood\ncalm,0..1,happy\nalert,0..1,tense\n", "mood,next\nhappy,alert\ntense,calm\n"});
 	ASSERT_TRUE(f.binding);
@@ -1030,46 +948,26 @@ namespace
 // Creation and entry: start sets mode on creation; go moves it on a step;
 // enter answers for the state entered, writing data (an int), never a state.
 constexpr std::string_view kEnter = R"(
-tables:
-  - name: start
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: go
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: next,  type: hash}
-      - {name: count, type: int}
-    order_by: {columns: [mode]}
-machines:
-  - name: door
-    state:
-      - {name: mode,    type: hash, members: [a, b, c, d], initial: a}
-      - {name: entered, type: int, initial: 0}
-    create:
-      - from: start
-        where: {mode: state.mode}
-        set: {mode: next}
-    step:
-      - from: go
-        where: {mode: state.mode}
-        set: {mode: next}
-    entry:
-      - from: enter
-        where: {mode: state.mode}
-        set: {entered: count}
+[table start
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table go
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table enter
+  (key mode hash (domain rows))
+  (column next hash)
+  (column count int)
+  (order mode)]
+[machine door
+  (state mode hash (members a b c d) (initial a))
+  (state entered int (initial 0))]
+list,from,where,given,set,emit,overrides
+create,start,mode=state.mode,,mode=next,,
+entry,enter,mode=state.mode,,entered=count,,
+step,go,mode=state.mode,,mode=next,,
 )";
 
 constexpr std::string_view kStartRows = "mode,next\na,d\nb,b\nc,c\nd,d\n";
@@ -1094,9 +992,8 @@ TEST(MachineStep, AnEntryClauseMayNotSetAHashState)
 {
 	// Entry runs once per step, after the step list: a state an entry write
 	// moved to would get no entry of its own, so the write is refused.
-	std::string const transition = Replace(kEnter, "        set: {entered: count}\n",
-		"        set: {mode: next, entered: count}\n");
-	std::string const error = RefusalOf(DocumentFromYaml(transition, "machine.yaml"));
+	std::string const transition = Replace(kEnter, "entry,enter,mode=state.mode,,entered=count,,", "entry,enter,mode=state.mode,,mode=next entered=count,,");
+	std::string const error = RefusalOf(ReadDocument(transition, "machine.tabular"));
 	EXPECT_TRUE(Mentions(error, "machine 'door' entry clause 0 (table 'enter')")) << error;
 	EXPECT_TRUE(Mentions(error, "sets hash state column 'mode'")) << error;
 	EXPECT_TRUE(Mentions(error, "belongs in the step list")) << error;
@@ -1108,34 +1005,20 @@ namespace
 // Entry counts its own runs: tally maps n to n + 1, so entered rises by one
 // for each run of the entry list.
 constexpr std::string_view kTally = R"(
-tables:
-  - name: go
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: tally
-    read_only: true
-    pick: best
-    columns:
-      - {name: n,    type: int, key: true, domain: rows}
-      - {name: next, type: int}
-    order_by: {columns: [n]}
-machines:
-  - name: counter
-    state:
-      - {name: mode,    type: hash, members: [a, b, c], initial: a}
-      - {name: entered, type: int, initial: 0}
-    step:
-      - from: go
-        where: {mode: state.mode}
-        set: {mode: next}
-    entry:
-      - from: tally
-        where: {n: state.entered}
-        set: {entered: next}
+[table go
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table tally
+  (key n int (domain rows))
+  (column next int)
+  (order n)]
+[machine counter
+  (state mode hash (members a b c) (initial a))
+  (state entered int (initial 0))]
+list,from,where,given,set,emit,overrides
+entry,tally,n=state.entered,,entered=next,,
+step,go,mode=state.mode,,mode=next,,
 )";
 
 constexpr std::string_view kTallyGoRows = "mode,next\na,b\nb,c\nc,c\n";
@@ -1311,29 +1194,18 @@ namespace
 // a larger R & F, and R itself between two groups equal in both (3, 5 and 7
 // against F = 1, or 5 and 7 against F = 4). b..f each send it back to a.
 constexpr std::string_view kRanker = R"(
-tables:
-  - name: ranked
-    read_only: true
-    pick: best
-    inputs:
-      - {name: food_near, type: flags}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: near, type: flags, input: food_near}
-      - {name: when, type: condition}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: ranker
-    state:
-      - {name: mode, type: hash, members: [a, b, c, d, e, f], initial: a}
-    inputs:
-      - {name: food_near, type: flags}
-    step:
-      - from: ranked
-        where: {mode: state.mode}
-        given: {food_near: input.food_near}
-        set: {mode: next}
+[table ranked
+  (input food_near flags)
+  (key mode hash (domain rows))
+  (column near flags (input food_near))
+  (column when condition)
+  (column next hash)
+  (order mode)]
+[machine ranker
+  (state mode hash (members a b c d e f) (initial a))
+  (input food_near flags)]
+list,from,where,given,set,emit,overrides
+step,ranked,mode=state.mode,food_near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kRankerRows = R"(mode, near, when, next
@@ -1406,25 +1278,17 @@ namespace
 // so a key that ties sends the search to the next key, and negative keys sort
 // below zero as int64 does.
 constexpr std::string_view kWalker = R"(
-tables:
-  - name: walk
-    read_only: true
-    pick: best
-    columns:
-      - {name: x,  type: int, key: true, domain: rows}
-      - {name: y,  type: int, key: true, domain: rows}
-      - {name: nx, type: int}
-      - {name: ny, type: int}
-    order_by: {columns: [x, y]}
-machines:
-  - name: walker
-    state:
-      - {name: x, type: int, initial: -7}
-      - {name: y, type: int, initial: -4}
-    step:
-      - from: walk
-        where: {x: state.x, y: state.y}
-        set: {x: nx, y: ny}
+[table walk
+  (key x int (domain rows))
+  (key y int (domain rows))
+  (column nx int)
+  (column ny int)
+  (order x y)]
+[machine walker
+  (state x int (initial -7))
+  (state y int (initial -4))]
+list,from,where,given,set,emit,overrides
+step,walk,x=state.x y=state.y,,x=nx y=ny,,
 )";
 
 constexpr int64_t kWalkX[] = {-7, -2, -1, 0, 3};
@@ -1483,52 +1347,32 @@ namespace
 // The definition's chain: an or clause answers flags, a best clause keyed by
 // them moves mode, and a weighted clause keyed by the moved mode draws a mood.
 constexpr std::string_view kPhaseChain = R"(
-tables:
-  - name: phase
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true}
-      - {name: t,    type: band, input: t}
-      - {name: when, type: condition}
-      - {name: bits, type: flags}
-    order_by: {columns: [mode]}
-  - name: lookup
-    read_only: true
-    pick: best
-    columns:
-      - {name: bits, type: flags, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [bits]}
-  - name: wander
-    read_only: true
-    pick: weighted
-    weight: w
-    columns:
-      - {name: mode, type: hash, key: true}
-      - {name: w,    type: double}
-      - {name: mood, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: chain
-    state:
-      - {name: mode, type: hash, members: [idle, walk], initial: idle}
-      - {name: mood, type: hash, members: [calm, edgy], initial: calm}
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    step:
-      - from: phase
-        where: {mode: state.mode}
-        given: {t: input.t}
-      - from: lookup
-        where: {bits: clause.0.bits}
-        set: {mode: next}
-      - from: wander
-        where: {mode: state.mode}
-        set: {mood: mood}
+[table phase
+  (input t double 0..1)
+  (key mode hash)
+  (column t band (input t))
+  (column when condition)
+  (column bits flags)
+  (pick or bits)
+  (order mode)]
+[table lookup
+  (key bits flags (domain rows))
+  (column next hash)
+  (order bits)]
+[table wander
+  (key mode hash)
+  (column w double)
+  (column mood hash)
+  (pick weighted w)
+  (order mode)]
+[machine chain
+  (state mode hash (members idle walk) (initial idle))
+  (state mood hash (members calm edgy) (initial calm))
+  (input t double 0..1)]
+list,from,where,given,set,emit,overrides
+step,phase,mode=state.mode,t=input.t,,,
+step,lookup,bits=clause.0.bits,,mode=next,,
+step,wander,mode=state.mode,,mood=mood,,
 )";
 
 // idle answers 1, 2 or 3, and 4 more when cornered; walk 1 or 9. lookup has no

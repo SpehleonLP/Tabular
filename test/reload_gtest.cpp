@@ -4,7 +4,7 @@
 #include "tabular/machine.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <cstdint>
@@ -252,9 +252,9 @@ void Rebound(instance& subject, Binding const& binding, void const* self, uint64
 	}
 }
 
-schema_document Parse(std::string_view yaml)
+schema_document Parse(std::string_view source)
 {
-	auto doc = DocumentFromYaml(yaml, "reload.yaml");
+	auto doc = ReadDocument(source, "reload.tabular");
 	EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 	return doc ? std::move(*doc) : schema_document{};
 }
@@ -271,13 +271,13 @@ struct reload_world
 
 	bool                                          integerThreat = false;   // Bound's threat wire answers an int
 
-	explicit reload_world(std::string_view yaml) : store(TablesOf(yaml)) {}
+	explicit reload_world(std::string_view source) : store(TablesOf(source)) {}
 
 	std::vector<std::string> Take() { return log.Take(); }
 
-	schema TablesOf(std::string_view yaml)
+	schema TablesOf(std::string_view source)
 	{
-		documents.push_back(std::make_unique<schema_document>(Parse(yaml)));
+		documents.push_back(std::make_unique<schema_document>(Parse(source)));
 		return std::move(documents.back()->tables);
 	}
 
@@ -293,13 +293,13 @@ struct reload_world
 	}
 
 	// The first document's machine prepared against the store as it is now.
-	tl::expected<counted_ptr<Machine const>, ErrorContext> Prepared(std::string_view yaml = {})
+	tl::expected<counted_ptr<Machine const>, ErrorContext> Prepared(std::string_view source = {})
 	{
-		if (!yaml.empty())
+		if (!source.empty())
 		{
-			documents.push_back(std::make_unique<schema_document>(Parse(yaml)));
+			documents.push_back(std::make_unique<schema_document>(Parse(source)));
 		}
-		schema_document const& doc = yaml.empty() ? *documents.front() : *documents.back();
+		schema_document const& doc = source.empty() ? *documents.front() : *documents.back();
 		if (doc.machines().empty())
 		{
 			return tl::make_unexpected(ErrorContext("the document has no machine"));
@@ -307,11 +307,11 @@ struct reload_world
 		return Prepare(doc.machines()[0], store);
 	}
 
-	// Prepared (from yaml, or the first document when empty) and bound, its
+	// Prepared (from source, or the first document when empty) and bound, its
 	// commands logged tagged tag.
-	counted_ptr<Binding const> Bound(std::string_view tag, std::string_view yaml = {})
+	counted_ptr<Binding const> Bound(std::string_view tag, std::string_view source = {})
 	{
-		auto prepared = Prepared(yaml);
+		auto prepared = Prepared(source);
 		EXPECT_TRUE(prepared.has_value()) << RefusalOf(prepared);
 		if (!prepared)
 		{
@@ -339,54 +339,31 @@ constexpr char const* kNoCounting = "a sanitizer owns operator new in this build
 // migration left.
 
 constexpr std::string_view kMover = R"(
-tables:
-  - name: m_step
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: m_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: lv,   type: int}
-      - {name: sp,   type: double}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: m_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: lv,   type: int}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: m
-    state:
-      - {name: mode,  type: hash, members: [a, b, c], initial: a}
-      - {name: level, type: int, initial: 5}
-      - {name: speed, type: double, initial: 1.5}
-    inputs:
-      - {name: message, type: hash}
-    step:
-      - from:  m_step
-        where: {mode: state.mode, message: input.message}
-        set:   {mode: next}
-    exit:
-      - from:  m_exit
-        where: {mode: state.mode}
-        set:   {level: lv}
-        emit:  command
-    entry:
-      - from:  m_enter
-        where: {mode: state.mode}
-        set:   {level: lv, speed: sp}
-        emit:  command
+[table m_step
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column next hash)
+  (order mode message)]
+[table m_enter
+  (key mode hash (domain rows))
+  (column lv int)
+  (column sp double)
+  (order mode)
+  (suffix command)]
+[table m_exit
+  (key mode hash (domain rows))
+  (column lv int)
+  (order mode)
+  (suffix command)]
+[machine m
+  (state mode hash (members a b c) (initial a))
+  (state level int (initial 5))
+  (state speed double (initial 1.5))
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,m_enter,mode=state.mode,,level=lv speed=sp,command,
+step,m_step,mode=state.mode message=input.message,,mode=next,,
+exit,m_exit,mode=state.mode,,level=lv,command,
 )";
 
 constexpr std::string_view kMoverStepRows = R"(mode, message, next
@@ -412,10 +389,10 @@ c, 30, (exit c)
 
 enum mover_table : uint32_t { MoverStep, MoverEnter, MoverExit };
 
-std::string Quiet(std::string_view yaml)
+std::string Quiet(std::string_view source)
 {
-	std::string out = Replace(yaml, "        set:   {level: lv}\n", "");
-	return Replace(out, "        set:   {level: lv, speed: sp}\n", "");
+	std::string out = Replace(source, ",,level=lv speed=sp,command,", ",,,command,");
+	return Replace(out, ",,level=lv,command,", ",,,command,");
 }
 
 // The mover's world, loaded.
@@ -495,8 +472,8 @@ TEST(MachineRebind, AMemberThatIsGoneResetsToTheNewInitialValue)
 	// c leaves the members, and the rows that moved to it go with it.
 	w->Load(MoverStep, "mode, message, next\na, , a\nb, , b\na, to_b, b\n");
 	EXPECT_TRUE(mover.binding().machine().Stale(w->store));
-	std::string const v2yaml = Replace(Quiet(kMover), "members: [a, b, c], initial: a", "members: [a, b], initial: b");
-	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
+	std::string const v2source = Replace(Quiet(kMover), "(members a b c) (initial a)", "(members a b) (initial b)");
+	counted_ptr<Binding const> v2 = w->Bound("v2", v2source);
 	ASSERT_TRUE(v2);
 	Rebound(mover, *v2, &host, 2);
 	EXPECT_EQ(mover.State(0).i, Hash("b")) << "c is no member: the new initial value, not the first member";
@@ -514,14 +491,14 @@ TEST(MachineRebind, ColumnsMigrateByNameNotPositionAndAGoneColumnIsDropped)
 	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_EQ(mover.State(2).d, 0.5);
 
-	std::string const v2yaml = Replace(Quiet(kMover),
-		"      - {name: mode,  type: hash, members: [a, b, c], initial: a}\n"
-		"      - {name: level, type: int, initial: 5}\n"
-		"      - {name: speed, type: double, initial: 1.5}\n",
-		"      - {name: speed, type: double, initial: 9}\n"
-		"      - {name: mood,  type: hash, members: [calm, cross], initial: cross}\n"
-		"      - {name: mode,  type: hash, members: [a, b, c], initial: a}\n");
-	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
+	std::string const v2source = Replace(Quiet(kMover),
+		"  (state mode hash (members a b c) (initial a))\n"
+		"  (state level int (initial 5))\n"
+		"  (state speed double (initial 1.5))\n",
+		"  (state speed double (initial 9))\n"
+		"  (state mood hash (members calm cross) (initial cross))\n"
+		"  (state mode hash (members a b c) (initial a))\n");
+	counted_ptr<Binding const> v2 = w->Bound("v2", v2source);
 	ASSERT_TRUE(v2);
 	Rebound(mover, *v2, &host, 2);
 	ASSERT_EQ(mover.StateCount(), 3u) << "level is gone";
@@ -540,9 +517,9 @@ TEST(MachineRebind, ATypeChangeResetsIncludingIntToDoubleAndBack)
 	Stepped(mover, &host, 1, Message("to_b"));
 	ASSERT_EQ(mover.State(1).i, 2);
 
-	std::string v2yaml = Replace(Quiet(kMover), "{name: level, type: int, initial: 5}", "{name: level, type: double, initial: 0.125}");
-	v2yaml = Replace(v2yaml, "{name: speed, type: double, initial: 1.5}", "{name: speed, type: int, initial: 7}");
-	counted_ptr<Binding const> v2 = w->Bound("v2", v2yaml);
+	std::string v2source = Replace(Quiet(kMover), "(state level int (initial 5))", "(state level double (initial 0.125))");
+	v2source = Replace(v2source, "(state speed double (initial 1.5))", "(state speed int (initial 7))");
+	counted_ptr<Binding const> v2 = w->Bound("v2", v2source);
 	ASSERT_TRUE(v2);
 	Rebound(mover, *v2, &host, 2);
 	EXPECT_EQ(mover.State(0).i, Hash("b"));
@@ -595,43 +572,24 @@ namespace
 {
 
 constexpr std::string_view kStartle = R"(
-tables:
-  - name: startle
-    read_only: true
-    pick: best
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: rise,   type: band, input: threat, edge: true}
-      - {name: next,   type: hash}
-    order_by: {columns: [mode]}
-  - name: startle_enter
-    read_only: true
-    pick: best
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: rise, type: band, input: threat, edge: true}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [graze, startled], initial: graze}
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from:  startle
-        where: {mode: state.mode}
-        given: {threat: input.threat}
-        set:   {mode: next}
-    entry:
-      - from:  startle_enter
-        where: {mode: state.mode}
-        given: {threat: input.threat}
-        emit:  command
+[table startle
+  (input threat double 0..1)
+  (key mode hash (domain rows))
+  (column rise band (input threat) edge)
+  (column next hash)
+  (order mode)]
+[table startle_enter
+  (input threat double 0..1)
+  (key mode hash (domain rows))
+  (column rise band (input threat) edge)
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members graze startled) (initial graze))
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+entry,startle_enter,mode=state.mode,threat=input.threat,,command,
+step,startle,mode=state.mode,threat=input.threat,mode=next,,
 )";
 
 constexpr std::string_view kStartleRows = R"(mode, rise, next
@@ -650,36 +608,25 @@ startled, ,       (anim startle)
 // input the old machine did not have.
 std::string Alarmed()
 {
-	std::string yaml = Replace(kStartle, "    inputs:\n      - {name: threat, type: double, range: 0..1}\n    step:",
-		"    inputs:\n      - {name: alarm, type: double, range: 0..1}\n    step:");
-	yaml = Replace(yaml, "        given: {threat: input.threat}\n        set:", "        given: {threat: input.alarm}\n        set:");
-	return Replace(yaml, "        given: {threat: input.threat}\n        emit:", "        given: {threat: input.alarm}\n        emit:");
+	std::string source = Replace(kStartle, "(initial graze))\n  (input threat double 0..1)]",
+		"(initial graze))\n  (input alarm double 0..1)]");
+	source = Replace(source, "step,startle,mode=state.mode,threat=input.threat,", "step,startle,mode=state.mode,threat=input.alarm,");
+	return Replace(source, "entry,startle_enter,mode=state.mode,threat=input.threat,", "entry,startle_enter,mode=state.mode,threat=input.alarm,");
 }
 
 // The grazer with an exit table reading threat both ways: a plain band (is
 // threat high as graze is left?) and an edge (did it just cross?).
 std::string WithExit()
 {
-	std::string yaml = Replace(kStartle, "machines:\n", R"(  - name: startle_exit
-    read_only: true
-    pick: best
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: rise, type: band, input: threat, edge: true}
-      - {name: high, type: band, input: threat}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-)");
-	return Replace(yaml, "    entry:\n", R"(    exit:
-      - from:  startle_exit
-        where: {mode: state.mode}
-        given: {threat: input.threat}
-        emit:  command
-    entry:
-)");
+	std::string source = Replace(kStartle, "[machine grazer", R"([table startle_exit
+  (input threat double 0..1)
+  (key mode hash (domain rows))
+  (column rise band (input threat) edge)
+  (column high band (input threat))
+  (order mode)
+  (suffix command)]
+[machine grazer)");
+	return source + "exit,startle_exit,mode=state.mode,threat=input.threat,,command,\n";
 }
 
 constexpr std::string_view kStartleExitRows = R"(mode, rise, high, command
@@ -788,10 +735,10 @@ TEST(MachineRebind, AnInputWhoseTypeChangedIsANewInput)
 	auto w = Startle();
 	// The old machine reads alarm, and declares threat an int whose wire answers
 	// a hundredth of the host's threat (90 for 0.9), which it never reads.
-	std::string const v1yaml = Replace(Alarmed(), "      - {name: alarm, type: double, range: 0..1}\n    step:",
-		"      - {name: alarm, type: double, range: 0..1}\n      - {name: threat, type: int}\n    step:");
+	std::string const v1source = Replace(Alarmed(), "(input alarm double 0..1)]",
+		"(input alarm double 0..1)\n  (input threat int)]");
 	w->integerThreat = true;
-	counted_ptr<Binding const> v1 = w->Bound("v1", v1yaml);
+	counted_ptr<Binding const> v1 = w->Bound("v1", v1source);
 	ASSERT_TRUE(v1);
 	host_object host;
 	host.threat     = 0.9;
@@ -835,34 +782,19 @@ TEST(MachineRebind, TheReportOnceMemoryIsClearedForTheNewBinding)
 TEST(MachineRebind, AnOldExitThatHoldsReportsToTheOldBindingAndSendsNoAbort)
 {
 	reload_world w(R"(
-tables:
-  - name: bye
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: when, type: condition}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: hello
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: leaver
-    state:
-      - {name: mode, type: hash, members: [a], initial: a}
-    exit:
-      - from:  bye
-        where: {mode: state.mode}
-        emit:  command
-    entry:
-      - from:  hello
-        where: {mode: state.mode}
-        emit:  command
+[table bye
+  (key mode hash (domain rows))
+  (column when condition)
+  (order mode)
+  (suffix command)]
+[table hello
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine leaver (state mode hash (members a) (initial a))]
+list,from,where,given,set,emit,overrides
+entry,hello,mode=state.mode,,,command,
+exit,bye,mode=state.mode,,,command,
 )");
 	w.Load(0, "mode, when, command\na, cornered, (abort a)\na, , (abort plain)\n");
 	w.Load(1, "mode, command\na, (hello)\n");
@@ -922,55 +854,32 @@ namespace
 {
 
 constexpr std::string_view kGrazer = R"(
-tables:
-  - name: grazer_brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy,    type: double, range: 0..1}
-      - {name: food_near, type: flags}
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: energy,  type: band, input: energy}
-      - {name: near,    type: flags, input: food_near}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: grazer_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: grazer_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [idle, walk, eat, panic], initial: idle}
-    inputs:
-      - {name: energy,    type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: message,   type: hash}
-    step:
-      - from:  grazer_brain
-        where: {mode: state.mode, message: input.message}
-        given: {energy: input.energy, food_near: input.food_near}
-        set:   {mode: next}
-    exit:
-      - from:  grazer_exit
-        where: {mode: state.mode}
-        emit:  command
-    entry:
-      - from:  grazer_enter
-        where: {mode: state.mode}
-        emit:  command
+[table grazer_brain
+  (input energy double 0..1)
+  (input food_near flags)
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column energy band (input energy))
+  (column near flags (input food_near))
+  (column next hash)
+  (order mode message)]
+[table grazer_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[table grazer_exit
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members idle walk eat panic) (initial idle))
+  (input energy double 0..1)
+  (input food_near flags)
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,grazer_enter,mode=state.mode,,,command,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+exit,grazer_exit,mode=state.mode,,,command,
 )";
 
 constexpr std::string_view kBrainRows = R"(# grazer_brain
@@ -1014,12 +923,12 @@ std::unique_ptr<reload_world> Grazer()
 }
 
 // What a host does on a reload, for every instance of one binding: the
-// machine is prepared again (from yaml when its definition changed too),
+// machine is prepared again (from source when its definition changed too),
 // bound, and each instance rebound. Nothing here is Tabular's.
 counted_ptr<Binding const> Reload(reload_world& world, std::span<instance* const> instances, host_object const& host,
-	std::string_view tag, std::string_view yaml = {})
+	std::string_view tag, std::string_view source = {})
 {
-	counted_ptr<Binding const> fresh = world.Bound(tag, yaml);
+	counted_ptr<Binding const> fresh = world.Bound(tag, source);
 	if (!fresh)
 	{
 		return fresh;
@@ -1080,9 +989,9 @@ TEST(GrazerReload, AddingTheMemberSleepKeepsTheMode)
 	w->Load(Enter, std::string(kEnterRows) + "sleep, (anim sleep)\n");
 	w->Load(Exit, std::string(kExitRows) + "sleep, (abort sleep)\n");
 	ASSERT_TRUE(v1->machine().Stale(w->store));
-	std::string const v2yaml = Replace(kGrazer, "members: [idle, walk, eat, panic]", "members: [idle, walk, eat, panic, sleep]");
+	std::string const v2source = Replace(kGrazer, "(members idle walk eat panic)", "(members idle walk eat panic sleep)");
 	instance* const one[] = {&grazer};
-	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2yaml);
+	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2source);
 	ASSERT_TRUE(v2);
 	EXPECT_EQ(grazer.State(0).i, Hash("walk")) << "walk is still a member";
 	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort walk))", "v2:((anim walk))"}));
@@ -1113,9 +1022,9 @@ eat,   ,        0..1,   0,    eat
 	w->Load(Enter, Replace(kEnterRows, "panic, (anim run), \"(message this \"\"calm\"\" :delay random(0.4, 1.0))\"\n", ""));
 	w->Load(Exit, Replace(kExitRows, "panic, (abort run)\n", ""));
 	ASSERT_TRUE(v1->machine().Stale(w->store));
-	std::string const v2yaml = Replace(kGrazer, "members: [idle, walk, eat, panic]", "members: [idle, walk, eat]");
+	std::string const v2source = Replace(kGrazer, "(members idle walk eat panic)", "(members idle walk eat)");
 	instance* const one[] = {&grazer};
-	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2yaml);
+	counted_ptr<Binding const> v2 = Reload(*w, one, host, "v2", v2source);
 	ASSERT_TRUE(v2);
 	EXPECT_EQ(grazer.State(0).i, Hash("idle")) << "panic is no member: the initial value";
 	EXPECT_EQ(w->Take(), (std::vector<std::string>{"v1:((abort run))", "v2:((anim stand))"}))
@@ -1132,8 +1041,8 @@ TEST(GrazerReload, AFailedPrepareLeavesTheOldBindingRunning)
 	w->Take();
 	// Deleting panic from the members without deleting the rows that move to
 	// it: the new machine is refused, and the host keeps stepping the old one.
-	std::string const v2yaml = Replace(kGrazer, "members: [idle, walk, eat, panic]", "members: [idle, walk, eat]");
-	auto refused = w->Prepared(v2yaml);
+	std::string const v2source = Replace(kGrazer, "(members idle walk eat panic)", "(members idle walk eat)");
+	auto refused = w->Prepared(v2source);
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "member")) << RefusalOf(refused);
 	Stepped(grazer, &host, 1, Message("scared"));
 	EXPECT_EQ(grazer.State(0).i, Hash("panic"));
@@ -1152,39 +1061,24 @@ namespace
 {
 
 constexpr std::string_view kWalker = R"(
-tables:
-  - name: walker_brain
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: target,  type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: next,    type: hash}
-      - {name: goal,    type: hash}
-    order_by: {columns: [mode, target, message]}
-  - name: walker_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: walker
-    state:
-      - {name: mode,   type: hash, members: [idle, walk, bridge_c, bridge_d, bridge_e], initial: idle}
-      - {name: target, type: hash, members: [idle, walk], initial: idle}
-    inputs:
-      - {name: message, type: hash}
-    step:
-      - from:  walker_brain
-        where: {mode: state.mode, target: state.target, message: input.message}
-        set:   {mode: next, target: goal}
-    entry:
-      - from:  walker_enter
-        where: {mode: state.mode}
-        emit:  command
+[table walker_brain
+  (key mode hash (domain rows))
+  (key target hash (domain rows))
+  (key message hash fallthrough)
+  (column next hash)
+  (column goal hash)
+  (order mode target message)]
+[table walker_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine walker
+  (state mode hash (members idle walk bridge_c bridge_d bridge_e) (initial idle))
+  (state target hash (members idle walk) (initial idle))
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,walker_enter,mode=state.mode,,,command,
+step,walker_brain,mode=state.mode target=state.target message=input.message,,mode=next target=goal,,
 )";
 
 constexpr std::string_view kWalkerStayRows = R"(mode, target, message, next, goal
@@ -1311,47 +1205,26 @@ namespace
 {
 
 constexpr std::string_view kForager = R"(
-tables:
-  - name: forager_brain
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: forager_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: forager_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: forager
-    state:
-      - {name: mode, type: hash, members: [idle, graze], initial: idle}
-    inputs:
-      - {name: message, type: hash}
-    step:
-      - from:  forager_brain
-        where: {mode: state.mode, message: input.message}
-        set:   {mode: next}
-    exit:
-      - from:  forager_exit
-        where: {mode: state.mode}
-        emit:  command
-    entry:
-      - from:  forager_enter
-        where: {mode: state.mode}
-        emit:  command
+[table forager_brain
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column next hash)
+  (order mode message)]
+[table forager_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[table forager_exit
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine forager
+  (state mode hash (members idle graze) (initial idle))
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,forager_enter,mode=state.mode,,,command,
+step,forager_brain,mode=state.mode message=input.message,,mode=next,,
+exit,forager_exit,mode=state.mode,,,command,
 )";
 
 constexpr std::string_view kForagerBrainRows = R"(mode, message, next

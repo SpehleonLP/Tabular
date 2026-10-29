@@ -5,7 +5,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "Support/strings.h"
 #include "cityhash/src/city.h"
 
@@ -181,45 +181,28 @@ host_binding BenchHost()
 // flags input, a band and two script conditions, and an entry clause that
 // emits.
 constexpr std::string_view kGrazer = R"(
-tables:
-  - name: grazer_brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: energy,  type: band, input: energy}
-      - {name: near,    type: flags, input: food_near}
-      - {name: when,    type: condition}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: grazer_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [idle, walk, eat, panic], initial: idle}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: message, type: hash}
-    step:
-      - from:  grazer_brain
-        where: {mode: state.mode, message: input.message}
-        given: {energy: input.energy, food_near: input.food_near}
-        set:   {mode: next}
-    entry:
-      - from:  grazer_enter
-        where: {mode: state.mode}
-        emit:  command
+[table grazer_brain
+  (input energy double 0..1)
+  (input food_near flags)
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column energy band (input energy))
+  (column near flags (input food_near))
+  (column when condition)
+  (column next hash)
+  (order mode message)]
+[table grazer_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members idle walk eat panic) (initial idle))
+  (input energy double 0..1)
+  (input food_near flags)
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+entry,grazer_enter,mode=state.mode,,,command,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kGrazerBrainRows = R"(mode,  message, energy,   near, when,     next
@@ -277,41 +260,38 @@ std::string Member(size_t m)
 // script: an even table ten energy bands, an odd one a ranked flags column
 // with two groups (0 and 1) of five bands. Every point lies in one row of its
 // cell, so each clause tries exactly one row: a row evaluated is a clause run.
-std::string BrainYaml(budget_sizes const& sizes)
+std::string BrainSource(budget_sizes const& sizes)
 {
-	std::string yaml = "tables:\n";
+	std::string source;
 	for (size_t t = 0; t < sizes.clauses; ++t)
 	{
 		bool const ranked = t % 2 == 1;
-		yaml += "  - name: t" + std::to_string(t) + "\n    read_only: true\n    pick: best\n    inputs:\n"
-			"      - {name: energy, type: double, range: 0..1}\n";
+		source += "[table t" + std::to_string(t) + "\n  (input energy double 0..1)\n";
 		if (ranked)
 		{
-			yaml += "      - {name: near, type: flags}\n";
+			source += "  (input near flags)\n";
 		}
-		yaml += "    columns:\n      - {name: mode, type: hash, key: true, domain: rows}\n"
-			"      - {name: energy, type: band, input: energy}\n";
+		source += "  (key mode hash (domain rows))\n  (column energy band (input energy))\n";
 		if (ranked)
 		{
-			yaml += "      - {name: near, type: flags, input: near}\n";
+			source += "  (column near flags (input near))\n";
 		}
-		yaml += "      - {name: next, type: hash}\n    order_by: {columns: [mode]}\n";
+		source += "  (column next hash)\n  (order mode)]\n";
 	}
-	yaml += "machines:\n  - name: brain\n    state:\n      - {name: mode, type: hash, members: [";
+	source += "[machine brain\n  (state mode hash (members";
 	for (size_t m = 0; m < sizes.modes; ++m)
 	{
-		yaml += (m == 0 ? "" : ", ") + Member(m);
+		source += " " + Member(m);
 	}
-	yaml += "], initial: m0}\n    inputs:\n      - {name: energy, type: double, range: 0..1}\n"
-		"      - {name: near, type: flags}\n    step:\n";
+	source += ") (initial m0))\n  (input energy double 0..1)\n  (input near flags)]\n"
+		"list,from,where,given,set,emit,overrides\n";
 	for (size_t t = 0; t < sizes.clauses; ++t)
 	{
 		bool const ranked = t % 2 == 1;
-		yaml += "      - from: t" + std::to_string(t) + "\n        where: {mode: state.mode}\n"
-			"        given: {energy: input.energy" + std::string(ranked ? ", near: input.near" : "") + "}\n"
-			"        set: {mode: next}\n";
+		source += "step,t" + std::to_string(t) + ",mode=state.mode,energy=input.energy"
+			+ std::string(ranked ? " near=input.near" : "") + ",mode=next,,\n";
 	}
-	return yaml;
+	return source;
 }
 
 std::string BrainRows(budget_sizes const& sizes, size_t t)
@@ -348,9 +328,9 @@ struct Workload
 	explicit Workload(schema_document&& parsed) : document(std::move(parsed)), store(std::move(document.tables)) {}
 };
 
-tl::expected<std::unique_ptr<Workload>, ErrorContext> Build(std::string_view yaml, std::span<std::string const> rows)
+tl::expected<std::unique_ptr<Workload>, ErrorContext> Build(std::string_view source, std::span<std::string const> rows)
 {
-	auto parsed = DocumentFromYaml(yaml, "budget.yaml");
+	auto parsed = ReadDocument(source, "budget.tabular");
 	if (!parsed)
 	{
 		return tl::make_unexpected(std::move(parsed.error()));
@@ -572,7 +552,7 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 	std::unique_ptr<Workload>& brain)
 {
 	std::string const grazerRows[] = {std::string(kGrazerBrainRows), std::string(kGrazerEnterRows)};
-	std::string const brainYaml    = BrainYaml(sizes);
+	std::string const brainSource  = BrainSource(sizes);
 	std::vector<std::string> brainRows;
 	for (size_t t = 0; t < sizes.clauses; ++t)
 	{
@@ -581,7 +561,7 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 
 	// The fastest build of repeats; the previous repeat's workload is freed
 	// before the clock starts, so a timing is a build and not a teardown too.
-	auto timeBuild = [&](std::unique_ptr<Workload>& kept, std::string_view yaml,
+	auto timeBuild = [&](std::unique_ptr<Workload>& kept, std::string_view source,
 						 std::span<std::string const> rows) -> tl::expected<double, ErrorContext>
 	{
 		double best = std::numeric_limits<double>::infinity();
@@ -589,7 +569,7 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 		{
 			kept.reset();
 			steady::time_point const start = steady::now();
-			auto built = Build(yaml, rows);
+			auto built = Build(source, rows);
 			best = std::min(best, Elapsed(start));
 			if (!built)
 			{
@@ -604,7 +584,7 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 	{
 		return tl::make_unexpected(std::move(grazerTimed.error()));
 	}
-	auto brainTimed = timeBuild(brain, brainYaml, brainRows);
+	auto brainTimed = timeBuild(brain, brainSource, brainRows);
 	if (!brainTimed)
 	{
 		return tl::make_unexpected(std::move(brainTimed.error()));
@@ -612,9 +592,9 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 	double const grazerNs = *grazerTimed;
 	double const brainNs  = *brainTimed;
 	TABULAR_TRY(r.Add("build a definition: grazer", grazerNs / 1000.0,
-		cc("the spec grazer from text: YAML, ", grazer->rows, " CSV rows, Prepare; the fastest of ", sizes.repeats)));
+		cc("the spec grazer from text: file, ", grazer->rows, " CSV rows, Prepare; the fastest of ", sizes.repeats)));
 	TABULAR_TRY(r.Add("build a definition: per row", brainNs / double(brain->rows) / 1000.0,
-		cc("the budget brain from text (YAML, ", brain->rows, " CSV rows in ", sizes.clauses,
+		cc("the budget brain from text (file, ", brain->rows, " CSV rows in ", sizes.clauses,
 			" tables, Prepare) per row; the fastest of ", sizes.repeats)));
 
 	std::vector<counted_ptr<Machine const>> keptMachines;
@@ -644,33 +624,33 @@ tl::expected<void, ErrorContext> MeasureBuild(results& r, budget_sizes const& si
 
 // ---- Relations ----------------------------------------------------------------------
 
-constexpr std::string_view kSpawnPoints = R"(
-tables:
-  - name: spawn_points
-    read_only: false
-    columns:
-      - {name: section, type: int, key: true}
-      - {name: x,       type: double}
-    order_by: {columns: [section]}
-)";
-
-constexpr std::string_view kDisplayOwners = R"(
-tables:
-  - name: owner
-    read_only: false
-    pick: best
-    inputs:
-      - {name: live, type: flags}
-    columns:
-      - {name: display, type: hash, key: true, domain: rows}
-      - {name: needs,   type: flags, input: live}
-      - {name: object,  type: hash}
-    order_by: {columns: [display]}
-)";
-
-tl::expected<relation_store, ErrorContext> StoreOf(std::string_view yaml)
+// Built here, not read: both tables take rows at run time, and every table a
+// file declares is read-only.
+tl::expected<relation_store, ErrorContext> SpawnPointsStore()
 {
-	auto s = SchemaFromYaml(yaml, "budget.yaml");
+	static add_column const columns[] = {{"section", column_type::Int, true}, {"x", column_type::Double}};
+	static uint32_t const   bySection[] = {0};
+	static order_by const   order{bySection, false};
+	create_table const      tables[] = {{"spawn_points", columns, &order}};
+	auto s = BuildSchema(tables);
+	if (!s)
+	{
+		return tl::make_unexpected(std::move(s.error()));
+	}
+	return relation_store(std::move(*s));
+}
+
+tl::expected<relation_store, ErrorContext> DisplayOwnersStore()
+{
+	static add_input const  inputs[]  = {{"live", column_type::Flags}};
+	static add_column const columns[] = {
+		{"display", column_type::Hash, true, UINT32_MAX, key_domain::Rows()},
+		{"needs", column_type::Flags, false, 0},
+		{"object", column_type::Hash}};
+	static uint32_t const   byDisplay[] = {0};
+	static order_by const   order{byDisplay, false};
+	create_table const      tables[] = {{"owner", columns, &order, false, inputs, pick_policy::Best}};
+	auto s = BuildSchema(tables);
 	if (!s)
 	{
 		return tl::make_unexpected(std::move(s.error()));
@@ -682,7 +662,7 @@ tl::expected<void, ErrorContext> MeasureRelations(results& r, budget_sizes const
 {
 	// A plain mutable table, the first version's spawn_points: 100 owners'
 	// rows over 500 sections.
-	auto spawn = StoreOf(kSpawnPoints);
+	auto spawn = SpawnPointsStore();
 	if (!spawn)
 	{
 		return tl::make_unexpected(std::move(spawn.error()));
@@ -744,7 +724,7 @@ tl::expected<void, ErrorContext> MeasureRelations(results& r, budget_sizes const
 
 	// A mutable best table, the display owners: per display an engine default
 	// row and three owners' ranked rows.
-	auto display = StoreOf(kDisplayOwners);
+	auto display = DisplayOwnersStore();
 	if (!display)
 	{
 		return tl::make_unexpected(std::move(display.error()));
