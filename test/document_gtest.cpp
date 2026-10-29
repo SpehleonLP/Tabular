@@ -1685,3 +1685,12 @@ walk,0..1,0..1,walk,(hold)
 	ASSERT_TRUE(held.has_value() && held->has_value());
 	EXPECT_EQ(*sa.CommandAt(0, **held, 4), "((hold))") << "the fragment's * answers what walk's own row leaves";
 }
+
+TEST(Document, OnlyABestTableDropsAStarCopy)
+{
+	// Outside a best table no row is dead: a later row of the same keys is
+	// another answer (all), another candidate (weighted) or another value (or).
+	EXPECT_EQ(CompiledOf("[table fx (pick all) (order k)]\n>k, v: int\na, 1\n*, 2\n"), "k,v\na,1\na,2\n");
+	EXPECT_EQ(CompiledOf("[table w (order k)]\n>k, weight\na, 1\n*, 2\n"), "k,weight\na,1\na,2\n");
+	EXPECT_EQ(CompiledOf("[table b (order k)]\n>k, v: int\na, 1\n*, 2\n"), "k,v\na,1\n") << "a best table's copy yields";
+}

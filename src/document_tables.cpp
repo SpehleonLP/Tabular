@@ -886,9 +886,10 @@ tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text 
 		{
 			return filled;
 		}
-		// A pivot's cells are its columns' flag headers, so no copy of one is
-		// judged dead here; the loader judges every row.
-		if (row.copy && !build.pivoted && Answered(build, kept, row))
+		// Only a best table has dead rows: under any other pick a later row of
+		// the same keys is another answer. A pivot's cells are its columns'
+		// flag headers, so no copy of one is judged here; the loader judges it.
+		if (row.copy && build.pick == pick_policy::Best && !build.pivoted && Answered(build, kept, row))
 		{
 			continue;
 		}
