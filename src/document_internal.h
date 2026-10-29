@@ -45,6 +45,10 @@ struct DocumentStorage
 	shared_array<create_machine>   commands;
 	// Each machine's body, whose cells its clauses' names view.
 	shared_array<detail::csv_text> bodies;
+	// The sections the caller claimed, and every one's words end to end, which
+	// each section's words views.
+	shared_array<host_section>     hosts;
+	shared_array<std::string_view> host_words;
 	// Names that had escapes in the file and so are not a view of it; a deque
 	// keeps each where it was put while the count is still unknown.
 	std::deque<std::string>        owned;

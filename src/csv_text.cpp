@@ -146,7 +146,12 @@ tl::expected<csv_text, ErrorContext> csv_text::Read(std::string_view text, std::
 	return out;
 }
 
-size_t csv_text::used_width(size_t row) const
+}
+
+namespace tabular
+{
+
+size_t cell_rows::used_width(size_t row) const
 {
 	size_t width = _rows[row].count;
 	while (width > 0 && _cells[_rows[row].first + width - 1].size == 0)
@@ -156,7 +161,7 @@ size_t csv_text::used_width(size_t row) const
 	return width;
 }
 
-std::string_view csv_text::cell(size_t column, size_t row) const
+std::string_view cell_rows::cell(size_t column, size_t row) const
 {
 	if (row >= _rows.size() || column >= _rows[row].count)
 	{
@@ -164,6 +169,17 @@ std::string_view csv_text::cell(size_t column, size_t row) const
 	}
 	cell_span const& span = _cells[_rows[row].first + column];
 	return std::string_view(_text).substr(span.offset, span.size);
+}
+
+tl::expected<cell_rows, ErrorContext> ReadCells(std::string_view text, std::string_view label, uint32_t first_line)
+{
+	auto read = detail::csv_text::Read(text, label, first_line);
+	if (!read)
+	{
+		return tl::make_unexpected(std::move(read.error()));
+	}
+	// csv_text adds only its reader, so the rows it read are all of it.
+	return cell_rows(std::move(*read));
 }
 
 }

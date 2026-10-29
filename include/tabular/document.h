@@ -24,6 +24,19 @@ struct section_rows
 	uint32_t         first_line = 1;
 };
 
+// A section whose head the caller claimed (ReadDocument's host_heads): Tabular
+// keeps it unread, so a host can put its own declarations in the same file
+// without Tabular learning what they mean. Every view is into the document's own
+// copy of the file; the host reads body with ReadCells (tabular/cell_rows.h).
+struct host_section
+{
+	std::string_view                  head;        // "class", "messages", ...
+	std::span<std::string_view const> words;       // the bracket's atoms after the head, as written
+	std::string_view                  body;        // CSV text up to the next bracket; may be empty
+	uint32_t                          line = 0;    // the bracket's line
+	uint32_t                          body_line = 0;
+};
+
 // Tables, the machines that read them, and the row text of the tables, from one
 // .tabular file. The machine commands and the row text are views into the
 // document, valid while it lives; tables can be moved out into a relation_store
@@ -40,8 +53,10 @@ struct schema_document
 	std::span<create_machine const> machines() const;
 	// Only the tables that have a body, in file order.
 	std::span<section_rows const>   rows() const;
+	// The claimed sections, in file order.
+	std::span<host_section const>   host_sections() const;
 
-	std::unique_ptr<DocumentStorage> storage;   // what machines() and rows() view
+	std::unique_ptr<DocumentStorage> storage;   // what machines(), rows() and host_sections() view
 };
 
 // A .tabular file. A line starting with `[` declares a table, a grid or a
@@ -73,7 +88,11 @@ struct schema_document
 // label names the source in errors; an error's message carries no position, and
 // its context is `<label>:<line>`, as csv_text writes it. The result owns a
 // copy of text. Each machine is checked against the tables before it is returned.
-tl::expected<schema_document, ErrorContext> ReadDocument(std::string_view text, std::string_view label);
+//
+// A bracket whose head is one of host_heads is passed through as a host_section
+// instead of being refused as unknown; its words after the head must be atoms.
+tl::expected<schema_document, ErrorContext> ReadDocument(std::string_view text, std::string_view label,
+	std::span<std::string_view const> host_heads = {});
 
 // A file of tables alone; refused when it declares machines or has rows, which a
 // schema would drop, naming ReadDocument.

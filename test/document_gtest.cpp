@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
+#include "tabular/cell_rows.h"
 #include "tabular/document.h"
 #include "tabular/grid.h"
 #include "tabular/machine.h"
 #include "tabular/pick.h"
 #include "cityhash/src/city.h"
 
+#include <array>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -1049,4 +1051,100 @@ step,grazer_brain,mode=state.mode,,mode=next,command,
 	ASSERT_TRUE(d.has_value()) << d.error().format();
 	EXPECT_EQ(d->machines().size(), 1u);
 	EXPECT_EQ(d->rows().size(), 1u);
+}
+
+// ---- Host sections --------------------------------------------------------------
+
+namespace
+{
+
+// Line 1 is [class Grazer], line 2 [messages], whose body starts on line 3.
+constexpr std::string_view kHosted =
+	"[class Grazer]\n"
+	"[messages]\n"
+	"message,from,p1,p2\n"
+	"Eat,,amount: int,\n"
+	"[table t (key mode hash (domain rows)) (column next hash) (order mode)]\n"
+	"mode,next\n"
+	"a,b\n"
+	"b,a\n"
+	"[machine m (state mode hash (members a b) (initial a))]\n"
+	"list,from,where,given,set,emit,overrides\n"
+	"step,t,mode=state.mode,,mode=next,,\n";
+
+constexpr std::array<std::string_view, 2> kHostHeads{"class", "messages"};
+
+}
+
+TEST(Document, ClaimedHeadsPassThroughUnread)
+{
+	std::string buffer(kHosted);
+	auto d = ReadDocument(buffer, "h.tabular", kHostHeads);
+	// The views are into the document's copy, not the caller's buffer.
+	buffer.assign(buffer.size(), 'x');
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	std::span<host_section const> const hosts = d->host_sections();
+	ASSERT_EQ(hosts.size(), 2u);
+
+	EXPECT_EQ(hosts[0].head, "class");
+	ASSERT_EQ(hosts[0].words.size(), 1u);
+	EXPECT_EQ(hosts[0].words[0], "Grazer");
+	EXPECT_TRUE(hosts[0].body.empty()) << hosts[0].body;
+	EXPECT_EQ(hosts[0].line, 1u);
+
+	EXPECT_EQ(hosts[1].head, "messages");
+	EXPECT_TRUE(hosts[1].words.empty());
+	EXPECT_EQ(hosts[1].line, 2u);
+	EXPECT_EQ(hosts[1].body_line, 3u);
+	EXPECT_TRUE(Mentions(std::string(hosts[1].body), "Eat,,amount: int,")) << hosts[1].body;
+	EXPECT_FALSE(Mentions(std::string(hosts[1].body), "[table")) << "the body ends at the next bracket";
+
+	// The table and the machine read as they would without the host sections.
+	EXPECT_EQ(d->tables.tables().size(), 1u);
+	EXPECT_EQ(d->rows().size(), 1u);
+	EXPECT_EQ(d->machines().size(), 1u);
+}
+
+TEST(Document, UnclaimedHeadIsStillRefused)
+{
+	auto d = ReadDocument(kHosted, "h.tabular");
+	ASSERT_FALSE(d.has_value());
+	EXPECT_TRUE(Mentions(d.error().message, "unknown bracket 'class'")) << d.error().format();
+	EXPECT_EQ(Where(d.error()), "h.tabular:1") << d.error().format();
+
+	// Claiming one head does not claim the other.
+	constexpr std::array<std::string_view, 1> classOnly{"class"};
+	auto partly = ReadDocument(kHosted, "h.tabular", classOnly);
+	ASSERT_FALSE(partly.has_value());
+	EXPECT_TRUE(Mentions(partly.error().message, "unknown bracket 'messages'")) << partly.error().format();
+	EXPECT_EQ(Where(partly.error()), "h.tabular:2") << partly.error().format();
+}
+
+TEST(Document, AClaimedHeadTakesOnlyBareWords)
+{
+	auto list = ReadDocument("# note\n[class (Grazer)]\n", "h.tabular", kHostHeads);
+	ASSERT_FALSE(list.has_value());
+	EXPECT_TRUE(Mentions(list.error().message, "a list")) << list.error().format();
+	EXPECT_EQ(Where(list.error()), "h.tabular:2") << list.error().format();
+
+	auto quoted = ReadDocument("[class \"Grazer\"]\n", "h.tabular", kHostHeads);
+	ASSERT_FALSE(quoted.has_value());
+	EXPECT_TRUE(Mentions(quoted.error().message, "a quoted string")) << quoted.error().format();
+}
+
+TEST(Document, ReadCellsUndoesQuotes)
+{
+	auto cells = ReadCells("a,\"b,\"\"c\"\"\"\n# note\n\nd\n", "t", 7);
+	ASSERT_TRUE(cells.has_value()) << cells.error().format();
+	ASSERT_EQ(cells->rows(), 2u);
+	EXPECT_EQ(cells->cell(0, 0), "a");
+	EXPECT_EQ(cells->cell(1, 0), "b,\"c\"");
+	EXPECT_EQ(cells->used_width(0), 2u);
+	EXPECT_EQ(cells->cell(0, 1), "d");
+	EXPECT_EQ(cells->line_of_row(0), 7u);
+	EXPECT_EQ(cells->line_of_row(1), 10u);
+
+	auto open = ReadCells("a\n\"never closed\n", "t", 7);
+	ASSERT_FALSE(open.has_value());
+	EXPECT_EQ(Where(open.error()), "t:8") << open.error().format();
 }

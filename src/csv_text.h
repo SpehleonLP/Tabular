@@ -11,22 +11,14 @@
 // of quotes. Spehleon/lib's CSV::File has no quoting and other engine code
 // reads it, so Tabular reads its own.
 
-#include "Errors/errorcontext.h"
-
-#include <expected/include/tl/expected.hpp>
-
-#include <cstdint>
-#include <string>
-#include <string_view>
-#include <vector>
+#include "tabular/cell_rows.h"
 
 namespace tabular::detail
 {
 
-// A CSV text as rows of cells, quotes undone. Blank rows (nothing but
-// separators and spaces, as a spreadsheet writes an empty row) and comment
-// rows (first unquoted character '#') are skipped; a leading BOM is dropped.
-class csv_text
+// The reader behind ReadCells; cell_rows holds what it reads. Kept as its own
+// name so every Tabular front end says csv_text::Read.
+class csv_text : public cell_rows
 {
 public:
 	// Refused, naming label and a line: an unterminated quote (the line it
@@ -36,35 +28,6 @@ public:
 	// the author can find.
 	static tl::expected<csv_text, ErrorContext> Read(std::string_view text, std::string_view label,
 		uint32_t first_line = 1);
-
-	size_t rows() const { return _rows.size(); }
-	// The cells row has, padding included.
-	size_t width(size_t row) const { return _rows[row].count; }
-	// The cells row has up to its last non-empty one: a spreadsheet pads every
-	// row to its widest with empty cells, so trailing empties carry nothing.
-	size_t used_width(size_t row) const;
-	// Empty past the row's end. An unquoted cell is trimmed; a quoted one is
-	// its text between the quotes, exactly.
-	std::string_view cell(size_t column, size_t row) const;
-	// The line a row starts on: a quoted cell may run over several.
-	uint32_t line_of_row(size_t row) const { return _rows[row].line; }
-
-private:
-	struct cell_span
-	{
-		uint32_t offset = 0;
-		uint32_t size   = 0;
-	};
-	struct row_span
-	{
-		uint32_t first = 0;
-		uint32_t count = 0;
-		uint32_t line  = 0;
-	};
-
-	std::string            _text;    // every cell's text, end to end
-	std::vector<cell_span> _cells;
-	std::vector<row_span>  _rows;
 };
 
 }

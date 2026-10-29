@@ -2,6 +2,8 @@
 #include "document_internal.h"
 #include "csv_cells.h"
 
+#include <algorithm>
+
 namespace tabular
 {
 
@@ -28,7 +30,89 @@ std::span<section_rows const> schema_document::rows() const
 	return storage->rows;
 }
 
-tl::expected<schema_document, ErrorContext> ReadDocument(std::string_view text, std::string_view label)
+std::span<host_section const> schema_document::host_sections() const
+{
+	if (!storage)
+	{
+		return {};
+	}
+	return storage->hosts;
+}
+
+namespace
+{
+
+bool Claimed(detail::section const& section, std::span<std::string_view const> host_heads)
+{
+	detail::sexpr const& head = section.header.items[0];
+	if (head.what != detail::sexpr::kind::Atom)
+	{
+		return false;
+	}
+	return std::find(host_heads.begin(), host_heads.end(), head.text) != host_heads.end();
+}
+
+// Takes the claimed sections out of sections into storage, unread, and leaves
+// the rest for the table and machine readers.
+tl::expected<void, ErrorContext> TakeHostSections(std::vector<detail::section>& sections,
+	std::span<std::string_view const> host_heads, std::string_view label, DocumentStorage& storage)
+{
+	size_t hostCount = 0;
+	size_t wordCount = 0;
+	for (detail::section const& section : sections)
+	{
+		if (Claimed(section, host_heads))
+		{
+			++hostCount;
+			wordCount += section.header.items.size() - 1;
+		}
+	}
+	if (hostCount == 0)
+	{
+		return {};
+	}
+	storage.hosts      = shared_array<host_section>(hostCount);
+	storage.host_words = shared_array<std::string_view>(wordCount);
+
+	std::vector<detail::section> unclaimed;
+	unclaimed.reserve(sections.size() - hostCount);
+	uint32_t host = 0;
+	uint32_t word = 0;
+	for (detail::section& section : sections)
+	{
+		if (!Claimed(section, host_heads))
+		{
+			unclaimed.push_back(std::move(section));
+			continue;
+		}
+		std::span<detail::sexpr const> const items = section.header.items;
+		uint32_t const first = word;
+		for (detail::sexpr const& item : items.subspan(1))
+		{
+			// A host reads a word as one name; a list or a quoted string would
+			// need Tabular to say how it reads, which it does not.
+			if (item.what != detail::sexpr::kind::Atom)
+			{
+				return detail::Refuse(label, item.line, "[", items[0].text, "] takes bare words after its head, not ",
+					item.what == detail::sexpr::kind::List ? "a list" : "a quoted string");
+			}
+			storage.host_words[word++] = item.text;
+		}
+		host_section& out = storage.hosts[host++];
+		out.head      = items[0].text;
+		out.words     = std::span<std::string_view const>(storage.host_words.begin() + first, word - first);
+		out.body      = section.body;
+		out.line      = section.header.line;
+		out.body_line = section.body_line;
+	}
+	sections = std::move(unclaimed);
+	return {};
+}
+
+}
+
+tl::expected<schema_document, ErrorContext> ReadDocument(std::string_view text, std::string_view label,
+	std::span<std::string_view const> host_heads)
 {
 	auto held = std::make_unique<DocumentStorage>();
 	// Every view the document hands out points into this copy, so the caller's
@@ -40,6 +124,11 @@ tl::expected<schema_document, ErrorContext> ReadDocument(std::string_view text, 
 	if (!sections)
 	{
 		return tl::make_unexpected(std::move(sections.error()));
+	}
+	auto hosts = TakeHostSections(*sections, host_heads, held->label, *held);
+	if (!hosts)
+	{
+		return tl::make_unexpected(std::move(hosts.error()));
 	}
 	auto tables = detail::ReadTables(*sections, held->label, *held);
 	if (!tables)

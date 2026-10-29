@@ -51,6 +51,7 @@ set(TABULAR_SOURCES
 
 # Headers are listed so IDEs show them in the project; the build does not need them.
 set(TABULAR_HEADERS
+	include/tabular/cell_rows.h
 	include/tabular/document.h
 	include/tabular/draw.h
 	include/tabular/grid.h
