@@ -5,7 +5,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <algorithm>
@@ -51,22 +51,17 @@ double const kNaN = std::numeric_limits<double>::quiet_NaN();
 
 // One best table: label (key), zone (an edge over t), clip.
 constexpr std::string_view kZone = R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: t, edge: true}
-      - {name: clip,  type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t) edge)
+  (column clip int)
+  (order label)]
 )";
 
-relation_store StoreFrom(std::string_view yaml)
+relation_store StoreFrom(std::string_view source)
 {
-	auto s = SchemaFromYaml(yaml, "edge.yaml");
+	auto s = ReadSchema(source, "edge.tabular");
 	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
 	return relation_store(s ? std::move(*s) : schema{});
 }
@@ -118,26 +113,21 @@ int64_t ZoneClip(relation_store const& store, double previous, double now)
 
 TEST(EdgeSchema, AnEdgeIsABandColumnAndNoOtherKind)
 {
-	auto accepted = SchemaFromYaml(kZone, "edge.yaml");
+	auto accepted = ReadSchema(kZone, "edge.tabular");
 	ASSERT_TRUE(accepted.has_value()) << RefusalOf(accepted);
 	table_def const& def = accepted->tables()[0];
 	EXPECT_TRUE(def.columns[1].edge);
 	EXPECT_FALSE(def.columns[2].edge);
 	EXPECT_TRUE(def.edges);
 
-	auto onInt = SchemaFromYaml(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: t}
-      - {name: clip,  type: int, edge: true}
-    order_by: {columns: [label]}
-)", "edge.yaml");
+	auto onInt = ReadSchema(R"(
+[table zone
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t))
+  (column clip int edge)
+  (order label)]
+)", "edge.tabular");
 	EXPECT_TRUE(Mentions(RefusalOf(onInt), "column 'clip' of table 'zone' is an int marked edge; only a band is an edge"))
 		<< RefusalOf(onInt);
 
@@ -151,34 +141,23 @@ tables:
 
 TEST(EdgeSchema, OrAndAllTablesCarryEdgesAndAPlainBandTableHasNone)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: pulse
-    read_only: true
-    pick: or
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: bit,  type: flags}
-    output: bit
-  - name: every
-    read_only: true
-    pick: all
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: clip, type: int}
-  - name: plain
-    read_only: true
-    pick: all
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: zone, type: band, input: t}
-      - {name: clip, type: int}
-)", "edge.yaml");
+	auto s = ReadSchema(R"(
+[table pulse
+  (input t double)
+  (column zone band (input t) edge)
+  (column bit flags)
+  (pick or bit)]
+[table every
+  (input t double)
+  (column zone band (input t) edge)
+  (column clip int)
+  (pick all)]
+[table plain
+  (input t double)
+  (column zone band (input t))
+  (column clip int)
+  (pick all)]
+)", "edge.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	EXPECT_TRUE(s->tables()[0].edges);
 	EXPECT_TRUE(s->tables()[1].edges);
@@ -193,17 +172,12 @@ TEST(EdgeSchema, ABlankEdgeCellIsNoEdgeAndOnlyAnEdgeTakesOne)
 
 	// A plain band has no blank: its catch-all is written as the whole range.
 	relation_store plain = StoreFrom(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: t}
-      - {name: clip,  type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t))
+  (column clip int)
+  (order label)]
 )");
 	EXPECT_TRUE(Mentions(RefusalOf(LoadText(plain, 0, "label,zone,clip\n1,,11\n")), "column 'zone' is empty"));
 	cell const noEdgeRow[] = {cell::Integer(1), NoEdge(), cell::Integer(11)};
@@ -249,18 +223,13 @@ TEST(EdgeLayout, AnEdgeHoldsWhereACrossingCanEndNotOnlyInsideItsBand)
 	// Upward into 0.6..1 ends at 0.6 or above; a plain row covering 0.6..1
 	// before it leaves it no cell, so it is dead. Below 0.6 it never ends.
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label,  type: int, key: true, domain: rows}
-      - {name: zone,   type: band, input: t, edge: true}
-      - {name: window, type: band, input: t}
-      - {name: clip,   type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t) edge)
+  (column window band (input t))
+  (column clip int)
+  (order label)]
 )");
 	std::string const dead = RefusalOf(LoadText(store, 0, "label,zone,window,clip\n1,,0.6..1,9\n1,0.6..1,0..1,10\n1,,0..1,11\n"));
 	EXPECT_TRUE(Mentions(dead, "is never picked")) << dead;
@@ -277,20 +246,15 @@ tables:
 TEST(EdgeLayout, AnOverlapRefusalWithAnEdgeRowSaysWhereAnEdgeHolds)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-      - {name: f, type: flags}
-    columns:
-      - {name: label,  type: int, key: true, domain: rows}
-      - {name: near,   type: flags, input: f}
-      - {name: zone,   type: band, input: t, edge: true}
-      - {name: window, type: band, input: t}
-      - {name: clip,   type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input t double 0..1)
+  (input f flags)
+  (key label int (domain rows))
+  (column near flags (input f))
+  (column zone band (input t) edge)
+  (column window band (input t))
+  (column clip int)
+  (order label)]
 )");
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,near,zone,window,clip\n1,0,,0..1,9\n1,1,0.4..0.42,0..1,10\n", 1)), "(accepted)");
 	// Owner 1's edge holds wherever a crossing into 0.4..0.42 ends, which is
@@ -359,19 +323,14 @@ TEST(EdgePick, OnlyThePreviousValuesAnEdgeReadsAreChecked)
 	// u is a plain ranged input: its previous value is never looked at, so a NaN
 	// there is no refusal; t is read by the edge, so a NaN there is.
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-      - {name: u, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: t, edge: true}
-      - {name: level, type: band, input: u}
-      - {name: clip,  type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input t double 0..1)
+  (input u double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t) edge)
+  (column level band (input u))
+  (column clip int)
+  (order label)]
 )");
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,zone,level,clip\n1,0.4..0.5,0..1,10\n1,,0..1,11\n")), "(accepted)");
 	cell const keys[]     = {cell::Integer(1)};
@@ -388,24 +347,16 @@ tables:
 TEST(EdgePick, PickOrAndPickAllReadEdgesToo)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: pulse
-    read_only: true
-    pick: or
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: bit,  type: flags}
-    output: bit
-  - name: every
-    read_only: true
-    pick: all
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: clip, type: int}
+[table pulse
+  (input t double)
+  (column zone band (input t) edge)
+  (column bit flags)
+  (pick or bit)]
+[table every
+  (input t double)
+  (column zone band (input t) edge)
+  (column clip int)
+  (pick all)]
 )");
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "zone,bit\n0.4..0.42,1\n0..0.2,2\n,4\n")), "(accepted)");
 	ASSERT_EQ(RefusalOf(LoadText(store, 1, "zone,clip\n0.4..0.42,1\n0..0.2,2\n,4\n")), "(accepted)");
@@ -485,8 +436,8 @@ struct edge_fixture
 	counted_ptr<Binding const> binding;
 
 	// pivoted names the tables whose rows are loaded as pivoted CSV.
-	edge_fixture(std::string_view yaml, std::vector<std::string_view> const& rows, std::vector<uint32_t> const& pivoted = {})
-		: document(Parse(yaml)), store(std::move(document.tables))
+	edge_fixture(std::string_view source, std::vector<std::string_view> const& rows, std::vector<uint32_t> const& pivoted = {})
+		: document(Parse(source)), store(std::move(document.tables))
 	{
 		if (document.machines().empty())
 		{
@@ -511,9 +462,9 @@ struct edge_fixture
 		}
 	}
 
-	static schema_document Parse(std::string_view yaml)
+	static schema_document Parse(std::string_view source)
 	{
-		auto doc = DocumentFromYaml(yaml, "edge.yaml");
+		auto doc = ReadDocument(source, "edge.tabular");
 		EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 		return doc ? std::move(*doc) : schema_document{};
 	}
@@ -522,42 +473,25 @@ struct edge_fixture
 // The worked example: a grazer startles when threat crosses 0.5 upwards. The
 // startled state lasts one step; its entry emits the startle.
 constexpr std::string_view kStartle = R"(
-tables:
-  - name: startle
-    read_only: true
-    pick: best
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-      - {name: energy, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: rise,   type: band, input: threat, edge: true}
-      - {name: tired,  type: band, input: energy}
-      - {name: next,   type: hash}
-    order_by: {columns: [mode]}
-  - name: startle_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [graze, startled], initial: graze}
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-      - {name: energy, type: double, range: 0..1}
-    step:
-      - from:  startle
-        where: {mode: state.mode}
-        given: {threat: input.threat, energy: input.energy}
-        set:   {mode: next}
-    entry:
-      - from:  startle_enter
-        where: {mode: state.mode}
-        emit:  command
+[table startle
+  (input threat double 0..1)
+  (input energy double 0..1)
+  (key mode hash (domain rows))
+  (column rise band (input threat) edge)
+  (column tired band (input energy))
+  (column next hash)
+  (order mode)]
+[table startle_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members graze startled) (initial graze))
+  (input threat double 0..1)
+  (input energy double 0..1)]
+list,from,where,given,set,emit,overrides
+entry,startle_enter,mode=state.mode,,,command,
+step,startle,mode=state.mode,threat=input.threat energy=input.energy,mode=next,,
 )";
 
 constexpr std::string_view kStartleRows = R"(mode, rise, tired, next
@@ -585,10 +519,10 @@ int Startles(std::span<emitted const> results)
 
 std::string MachineRefusal(std::string_view given)
 {
-	std::string yaml(kStartle);
-	std::string const from = "given: {threat: input.threat, energy: input.energy}";
-	yaml.replace(yaml.find(from), from.size(), given);
-	return RefusalOf(DocumentFromYaml(yaml, "edge.yaml"));
+	std::string source(kStartle);
+	std::string const from = "threat=input.threat energy=input.energy";
+	source.replace(source.find(from), from.size(), given);
+	return RefusalOf(ReadDocument(source, "edge.tabular"));
 }
 
 }
@@ -699,73 +633,49 @@ TEST(MachineEdge, AValueThatIsNotReadLeavesThePreviousValueAtTheLastOneRead)
 
 TEST(MachineEdge, AnEdgeReadsAMachineInputThroughItsGetter)
 {
-	EXPECT_EQ(MachineRefusal("given: {threat: input.threat, energy: input.energy}"), "(accepted)");
-	std::string const literal = MachineRefusal("given: {threat: {literal: 0.6}, energy: input.energy}");
+	EXPECT_EQ(MachineRefusal("threat=input.threat energy=input.energy"), "(accepted)");
+	std::string const literal = MachineRefusal("threat=(literal 0.6) energy=input.energy");
 	EXPECT_TRUE(Mentions(literal, "input 'threat' is read by edge 'rise', which compares it with its value on the "
 		"previous step; it comes from a machine input's getter, and here from a literal")) << literal;
-	std::string const state = MachineRefusal("given: {threat: input.energy, energy: input.energy}");
+	std::string const state = MachineRefusal("threat=input.energy energy=input.energy");
 	EXPECT_EQ(state, "(accepted)") << "any getter's input will do";
 
 }
 
 TEST(MachineEdge, AnEdgeFromAStateOrAnEarlierClauseIsRefused)
 {
-	auto refused = DocumentFromYaml(R"(
-tables:
-  - name: level
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: value, type: double}
-    order_by: {columns: [mode]}
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: m
-    state:
-      - {name: mode, type: hash, members: [a], initial: a}
-      - {name: level, type: double, initial: 0}
-    step:
-      - from:  level
-        where: {mode: state.mode}
-      - from:  zone
-        where: {mode: state.mode}
-        given: {t: clause.0.value}
-        set:   {mode: next}
-)", "edge.yaml");
+	auto refused = ReadDocument(R"(
+[table level
+  (key mode hash (domain rows))
+  (column value double)
+  (order mode)]
+[table zone
+  (input t double 0..1)
+  (key mode hash (domain rows))
+  (column zone band (input t) edge)
+  (column next hash)
+  (order mode)]
+[machine m
+  (state mode hash (members a) (initial a))
+  (state level double (initial 0))]
+list,from,where,given,set,emit,overrides
+step,level,mode=state.mode,,,,
+step,zone,mode=state.mode,t=clause.0.value,mode=next,,
+)", "edge.tabular");
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "and here from column 'value' of clause 0")) << RefusalOf(refused);
-	auto fromState = DocumentFromYaml(R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: zone, type: band, input: t, edge: true}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: m
-    state:
-      - {name: mode, type: hash, members: [a], initial: a}
-      - {name: level, type: double, initial: 0}
-    step:
-      - from:  zone
-        where: {mode: state.mode}
-        given: {t: state.level}
-        set:   {mode: next}
-)", "edge.yaml");
+	auto fromState = ReadDocument(R"(
+[table zone
+  (input t double 0..1)
+  (key mode hash (domain rows))
+  (column zone band (input t) edge)
+  (column next hash)
+  (order mode)]
+[machine m
+  (state mode hash (members a) (initial a))
+  (state level double (initial 0))]
+list,from,where,given,set,emit,overrides
+step,zone,mode=state.mode,t=state.level,mode=next,,
+)", "edge.tabular");
 	EXPECT_TRUE(Mentions(RefusalOf(fromState), "and here from state column 'level'")) << RefusalOf(fromState);
 }
 
@@ -774,10 +684,10 @@ TEST(MachineEdge, PrepareProvesAnEdgeRowConditionalOverTheClausesDomain)
 	// Load proves the table's declared domain, [graze]; the machine's state
 	// closes the key over [graze, startled], and startled's only row is an
 	// edge: an orphan to Load, not total to Prepare.
-	std::string yaml(kStartle);
-	std::string const domain = "{name: mode,   type: hash, key: true, domain: rows}";
-	yaml.replace(yaml.find(domain), domain.size(), "{name: mode,   type: hash, key: true, domain: {members: [graze]}}");
-	auto doc = DocumentFromYaml(yaml, "edge.yaml");
+	std::string source(kStartle);
+	std::string const domain = "(key mode hash (domain rows))\n  (column rise";
+	source.replace(source.find(domain), domain.size(), "(key mode hash (domain (members graze)))\n  (column rise");
+	auto doc = ReadDocument(source, "edge.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "mode, rise, tired, next\ngraze, 0.5..1, 0..1, startled\ngraze, , 0..1, graze\n"
@@ -796,40 +706,24 @@ namespace
 // above (0..0.2), one entered only from below and ending high (0.6..1 inside
 // 0.8..1), and plain bands; an or table pulses on the same edges.
 constexpr std::string_view kWalker = R"(
-tables:
-  - name: walk
-    read_only: true
-    pick: best
-    inputs:
-      - {name: x, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: zone,   type: band, input: x, edge: true}
-      - {name: window, type: band, input: x}
-      - {name: next,   type: hash}
-    order_by: {columns: [mode]}
-  - name: pulse
-    read_only: true
-    pick: or
-    inputs:
-      - {name: x, type: double, range: 0..1}
-    columns:
-      - {name: zone, type: band, input: x, edge: true}
-      - {name: bit,  type: flags}
-    output: bit
-machines:
-  - name: walker
-    state:
-      - {name: mode, type: hash, members: [a, b, c, d], initial: a}
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from:  walk
-        where: {mode: state.mode}
-        given: {x: input.threat}
-        set:   {mode: next}
-      - from:  pulse
-        given: {x: input.threat}
+[table walk
+  (input x double 0..1)
+  (key mode hash (domain rows))
+  (column zone band (input x) edge)
+  (column window band (input x))
+  (column next hash)
+  (order mode)]
+[table pulse
+  (input x double 0..1)
+  (column zone band (input x) edge)
+  (column bit flags)
+  (pick or bit)]
+[machine walker
+  (state mode hash (members a b c d) (initial a))
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+step,walk,mode=state.mode,x=input.threat,mode=next,,
+step,pulse,,x=input.threat,,,
 )";
 
 constexpr std::string_view kWalkRows = R"(mode, zone, window, next
@@ -887,9 +781,9 @@ namespace
 
 // Walks the walker's threat at random and checks each step against PickBest
 // (walk) and PickOr (pulse) given the same value and previous value.
-void WalkParity(std::string_view yaml, uint64_t seed)
+void WalkParity(std::string_view source, uint64_t seed)
 {
-	edge_fixture f(yaml, {kWalkRows, kPulseRows});
+	edge_fixture f(source, {kWalkRows, kPulseRows});
 	ASSERT_TRUE(f.binding);
 	auto walk  = f.store.Version(0);
 	auto pulse = f.store.Version(1);
@@ -1002,30 +896,19 @@ TEST(EdgeParity, TwoInputsWalkedTogetherMatchPickBestStepByStep)
 // An edge row in a ranked group: when its edge does not hold the pick falls to
 // the group below, here the default.
 constexpr std::string_view kRanked = R"(
-tables:
-  - name: ranked
-    read_only: true
-    pick: best
-    inputs:
-      - {name: x, type: double, range: 0..1}
-      - {name: f, type: flags}
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: near, type: flags, input: f}
-      - {name: rise, type: band, input: x, edge: true}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-machines:
-  - name: ranker
-    state:
-      - {name: mode, type: hash, members: [a, b], initial: a}
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from:  ranked
-        where: {mode: state.mode}
-        given: {x: input.threat, f: {literal: 1}}
-        set:   {mode: next}
+[table ranked
+  (input x double 0..1)
+  (input f flags)
+  (key mode hash (domain rows))
+  (column near flags (input f))
+  (column rise band (input x) edge)
+  (column next hash)
+  (order mode)]
+[machine ranker
+  (state mode hash (members a b) (initial a))
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+step,ranked,mode=state.mode,x=input.threat f=(literal 1),mode=next,,
 )";
 
 constexpr std::string_view kRankedRows = R"(mode, near, rise, next
@@ -1077,24 +960,15 @@ TEST(EdgeParity, ARankedEdgeRowThatDoesNotHoldFallsToTheGroupBelow)
 // A pivoted or table whose cells column is an edge: the pivot only lays the
 // rows out, so the edge reads the same through PickOr and an or clause.
 constexpr std::string_view kPivotedPulse = R"(
-tables:
-  - name: pulse
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: x, type: double, range: 0..1}
-    columns:
-      - {name: bits, type: flags}
-      - {name: zone, type: band, input: x, edge: true}
-    pivot: {headers: bits, cells: zone}
-machines:
-  - name: pulser
-    inputs:
-      - {name: threat, type: double, range: 0..1}
-    step:
-      - from:  pulse
-        given: {x: input.threat}
+[table pulse
+  (input x double 0..1)
+  (column bits flags)
+  (column zone band (input x) edge)
+  (pick or bits)
+  (pivot bits zone)]
+[machine pulser (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+step,pulse,,x=input.threat,,,
 )";
 
 TEST(EdgeParity, APivotedOrTableWithAnEdgeCellsColumnPicksAndStepsAlike)
@@ -1186,11 +1060,11 @@ TEST(MachineEdge, StepsThatCrossEdgesAllocateNothing)
 namespace
 {
 
-std::string Cyclic(std::string_view yaml)
+std::string Cyclic(std::string_view source)
 {
-	std::string text(yaml);
-	std::string const from = "{name: x, type: double, range: 0..1}";
-	std::string const to   = "{name: x, type: double, range: 0..1, cyclic: true}";
+	std::string text(source);
+	std::string const from = "(input x double 0..1)";
+	std::string const to   = "(input x double 0..1 cyclic)";
 	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
 	{
 		text.replace(at, from.size(), to);
@@ -1199,44 +1073,39 @@ std::string Cyclic(std::string_view yaml)
 }
 
 constexpr std::string_view kStep = R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: x, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: x, edge: true}
-      - {name: clip,  type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input x double 0..1)
+  (key label int (domain rows))
+  (column zone band (input x) edge)
+  (column clip int)
+  (order label)]
 )";
 
 }
 
 TEST(CyclicSchema, ARangedDoubleInputMayWrapAndNoOtherInput)
 {
-	auto accepted = SchemaFromYaml(Cyclic(kStep), "edge.yaml");
+	auto accepted = ReadSchema(Cyclic(kStep), "edge.tabular");
 	ASSERT_TRUE(accepted.has_value()) << RefusalOf(accepted);
 	EXPECT_TRUE(accepted->tables()[0].inputs[0].cyclic);
-	auto linear = SchemaFromYaml(kStep, "edge.yaml");
+	auto linear = ReadSchema(kStep, "edge.tabular");
 	ASSERT_TRUE(linear.has_value()) << RefusalOf(linear);
 	EXPECT_FALSE(linear->tables()[0].inputs[0].cyclic);
 
 	std::string unranged(kStep);
-	std::string const from = "{name: x, type: double, range: 0..1}";
-	unranged.replace(unranged.find(from), from.size(), "{name: x, type: double, cyclic: true}");
-	std::string const noRange = RefusalOf(SchemaFromYaml(unranged, "edge.yaml"));
+	std::string const from = "(input x double 0..1)";
+	unranged.replace(unranged.find(from), from.size(), "(input x double cyclic)");
+	std::string const noRange = RefusalOf(ReadSchema(unranged, "edge.tabular"));
 	EXPECT_TRUE(Mentions(noRange, "input 'x' of table 'zone' is cyclic and has no range; a cyclic input's range is its period"))
 		<< noRange;
 
 	// The table input whose bands read a machine input wraps; the machine's
 	// own declaration would be accepted and ignored.
 	std::string machine(kStartle);
-	std::string const machineInputs = "    inputs:\n      - {name: threat, type: double, range: 0..1}\n      - {name: energy, type: double, range: 0..1}\n    step:";
+	std::string const machineInputs = "  (input threat double 0..1)\n  (input energy double 0..1)]";
 	machine.replace(machine.find(machineInputs), machineInputs.size(),
-		"    inputs:\n      - {name: threat, type: double, range: 0..1, cyclic: true}\n      - {name: energy, type: double, range: 0..1}\n    step:");
-	std::string const onMachine = RefusalOf(DocumentFromYaml(machine, "edge.yaml"));
+		"  (input threat double 0..1 cyclic)\n  (input energy double 0..1)]");
+	std::string const onMachine = RefusalOf(ReadDocument(machine, "edge.tabular"));
 	EXPECT_TRUE(Mentions(onMachine, "input 'threat' of the machine is cyclic; a table input whose bands read it declares that"))
 		<< onMachine;
 }
@@ -1301,18 +1170,13 @@ TEST(CyclicLayout, ACrossingCanEndAnywhereOnThePeriod)
 	// Up through 0.6..1 the short way ends past 1, below 0.6 once wrapped, so a
 	// plain row over 0.6..1 before the edge no longer leaves it no cell.
 	constexpr std::string_view kWindowed = R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: x, type: double, range: 0..1}
-    columns:
-      - {name: label,  type: int, key: true, domain: rows}
-      - {name: zone,   type: band, input: x, edge: true}
-      - {name: window, type: band, input: x}
-      - {name: clip,   type: int}
-    order_by: {columns: [label]}
+[table zone
+  (input x double 0..1)
+  (key label int (domain rows))
+  (column zone band (input x) edge)
+  (column window band (input x))
+  (column clip int)
+  (order label)]
 )";
 	constexpr std::string_view kRows = "label,zone,window,clip\n1,,0.6..1,9\n1,0.6..1,0..1,10\n1,,0..1,11\n";
 	relation_store linear = StoreFrom(kWindowed);
@@ -1329,11 +1193,11 @@ tables:
 TEST(CyclicMachine, AFootstepStepsOncePerPassOfThePhase)
 {
 	// kStartle with its edge on a cyclic phase: startled is the footstep.
-	std::string yaml(kStartle);
-	std::string const table = "      - {name: threat, type: double, range: 0..1}\n      - {name: energy, type: double, range: 0..1}\n    columns:";
-	yaml.replace(yaml.find(table), table.size(),
-		"      - {name: threat, type: double, range: 0..1, cyclic: true}\n      - {name: energy, type: double, range: 0..1}\n    columns:");
-	edge_fixture f(yaml, {"mode, rise, tired, next\ngraze, 0.5..0.55, 0..1, startled\ngraze, , 0..1, graze\nstartled, , 0..1, graze\n",
+	std::string source(kStartle);
+	std::string const table = "  (input threat double 0..1)\n  (input energy double 0..1)\n  (key mode";
+	source.replace(source.find(table), table.size(),
+		"  (input threat double 0..1 cyclic)\n  (input energy double 0..1)\n  (key mode");
+	edge_fixture f(source, {"mode, rise, tired, next\ngraze, 0.5..0.55, 0..1, startled\ngraze, , 0..1, graze\nstartled, , 0..1, graze\n",
 		kStartleEnterRows});
 	ASSERT_TRUE(f.binding);
 	edge_host host;

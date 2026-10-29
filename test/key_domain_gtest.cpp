@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/pick.h"
 #include "tabular/relation.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 #include "probe_closure.h"
 
@@ -33,9 +33,9 @@ std::string RefusalOf(tl::expected<T, ErrorContext> const& e)
 	return e ? std::string("(accepted)") : e.error().format();
 }
 
-relation_store StoreFrom(std::string_view yaml)
+relation_store StoreFrom(std::string_view source)
 {
-	auto s = SchemaFromYaml(yaml, "domain.yaml");
+	auto s = ReadSchema(source, "domain.tabular");
 	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
 	return relation_store(std::move(*s));
 }
@@ -208,28 +208,15 @@ TEST(KeyDomain, DomainsTakenFromOtherTablesFormNoCycle)
 
 TEST(KeyDomainYaml, TheThreeFormsRead)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: display
-    columns:
-      - {name: display, type: hash}
-  - name: by_rows
-    pick: best
-    columns:
-      - {name: k, type: int, key: true, domain: rows}
-    order_by: {columns: [k]}
-  - name: by_members
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: {members: [idle, walk]}}
-      - {name: n, type: int, key: true, domain: {members: [3, -1]}}
-    order_by: {columns: [mode, n]}
-  - name: by_column
-    pick: best
-    columns:
-      - {name: d, type: hash, key: true, domain: {table: display, column: display}}
-    order_by: {columns: [d]}
-)", "forms.yaml");
+	auto s = ReadSchema(R"(
+[table display (column display hash) (pick none)]
+[table by_rows (key k int (domain rows)) (order k)]
+[table by_members
+  (key mode hash (domain (members idle walk)))
+  (key n int (domain (members 3 -1)))
+  (order mode n)]
+[table by_column (key d hash (domain (from display display))) (order d)]
+)", "forms.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	EXPECT_EQ(s->tables()[1].domains[0].kind, domain_kind::Rows);
 	domain_def const& mode = s->tables()[2].domains[0];
@@ -253,35 +240,25 @@ TEST(KeyDomainYaml, AMalformedDomainIsRefused)
 {
 	auto with = [](std::string_view domain)
 	{
-		return SchemaFromYaml(std::string(R"(
-tables:
-  - name: display
-    columns:
-      - {name: display, type: hash}
-  - name: t
-    pick: best
-    columns:
-      - {name: k, type: hash, key: true, domain: )") + std::string(domain) + R"(}
-    order_by: {columns: [k]}
-)", "bad.yaml");
+		return ReadSchema(std::string(R"(
+[table display (column display hash) (pick none)]
+[table t
+  (key k hash )") + std::string(domain) + R"()
+  (order k)]
+)", "bad.tabular");
 	};
-	EXPECT_TRUE(Mentions(RefusalOf(with("row")), "has domain 'row'")) << RefusalOf(with("row"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("[a, b]")), "for a domain")) << RefusalOf(with("[a, b]"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("{members: [a], table: display, column: display}")), "one of the two"))
-		<< RefusalOf(with("{members: [a], table: display, column: display}"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("{table: display}")), "names a table and its column, both"))
-		<< RefusalOf(with("{table: display}"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("{members: [a], unique: true}")), "unknown key 'unique'"))
-		<< RefusalOf(with("{members: [a], unique: true}"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("{members: [a, a]}")), "twice")) << RefusalOf(with("{members: [a, a]}"));
-	EXPECT_TRUE(Mentions(RefusalOf(SchemaFromYaml(R"(
-tables:
-  - name: t
-    pick: best
-    columns:
-      - {name: k, type: int, key: true}
-    order_by: {columns: [k]}
-)", "none.yaml")), "declares no domain"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain row)")), "has domain 'row'")) << RefusalOf(with("(domain row)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (a b))")), "for a domain")) << RefusalOf(with("(domain (a b))"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) (from display display))")), "one of the two"))
+		<< RefusalOf(with("(domain (members a) (from display display))"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (from display))")), "names a table and its column, both"))
+		<< RefusalOf(with("(domain (from display))"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) unique)")), "unknown key 'unique'"))
+		<< RefusalOf(with("(domain (members a) unique)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a a))")), "twice")) << RefusalOf(with("(domain (members a a))"));
+	EXPECT_TRUE(Mentions(RefusalOf(ReadSchema(R"(
+[table t (key k int) (order k)]
+)", "none.tabular")), "declares no domain"));
 }
 
 // ---- Totality over the domain -----------------------------------------------
@@ -291,17 +268,13 @@ namespace
 
 // lookup(label int key with members 1 and 2, req ranks by mode, when, clip).
 constexpr std::string_view kMembers = R"(
-tables:
-  - name: lookup
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: {members: [1, 2]}}
-      - {name: req, type: flags, input: mode}
-      - {name: when, type: condition}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table lookup
+  (input mode flags)
+  (key label int (domain (members 1 2)))
+  (column req flags (input mode))
+  (column when condition)
+  (column clip int)
+  (order label)]
 )";
 
 struct lookup_row
@@ -378,14 +351,11 @@ tl::expected<void, ErrorContext> LoadTuples(relation_store& store, std::vector<i
 TEST(DomainTotality, KeysOverTheirRowsTogetherAreExactlyTheTuplesTheRowsName)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    pick: best
-    columns:
-      - {name: a, type: int, key: true, domain: rows}
-      - {name: b, type: int, key: true, domain: rows}
-      - {name: clip, type: int}
-    order_by: {columns: [a, b]}
+[table lookup
+  (key a int (domain rows))
+  (key b int (domain rows))
+  (column clip int)
+  (order a b)]
 )");
 	std::vector<run_note> report{run_note{}};
 	// A product of each column's values would demand (1, 2) and (2, 1), which
@@ -397,14 +367,11 @@ tables:
 TEST(DomainTotality, ARowsKeyBesideAMembersKeyDemandsEveryMemberForEachValueTheRowsName)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    pick: best
-    columns:
-      - {name: a, type: int, key: true, domain: rows}
-      - {name: b, type: int, key: true, domain: {members: [1, 2]}}
-      - {name: clip, type: int}
-    order_by: {columns: [a, b]}
+[table lookup
+  (key a int (domain rows))
+  (key b int (domain (members 1 2)))
+  (column clip int)
+  (order a b)]
 )");
 	auto loaded = LoadTuples(store, {1, 1, 11});
 	EXPECT_TRUE(Mentions(RefusalOf(loaded), "table 'lookup' key (1, 2) has no row with no script condition; no row has this key"))
@@ -417,15 +384,12 @@ tables:
 TEST(DomainTotality, RowsKeysAfterAMembersKeyProjectOutOfRowOrder)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    pick: best
-    columns:
-      - {name: a, type: int, key: true, domain: {members: [1, 2]}}
-      - {name: b, type: int, key: true, domain: rows}
-      - {name: c, type: int, key: true, domain: rows}
-      - {name: clip, type: int}
-    order_by: {columns: [a, b, c]}
+[table lookup
+  (key a int (domain (members 1 2)))
+  (key b int (domain rows))
+  (key c int (domain rows))
+  (column clip int)
+  (order a b c)]
 )");
 	// The rows name (b, c) = (5, 1) under a = 1 and (3, 9) under a = 2; each is
 	// demanded under both members, and (3, 9) sorts first.
@@ -496,17 +460,11 @@ namespace
 
 // kinds(kind) is read-only; clips(kind, clip) takes its keys from it.
 constexpr std::string_view kKinds = R"(
-tables:
-  - name: kinds
-    read_only: true
-    columns:
-      - {name: kind, type: int}
-  - name: clips
-    pick: best
-    columns:
-      - {name: kind, type: int, key: true, domain: {table: kinds, column: kind}}
-      - {name: clip, type: int}
-    order_by: {columns: [kind]}
+[table kinds (column kind int) (pick none)]
+[table clips
+  (key kind int (domain (from kinds kind)))
+  (column clip int)
+  (order kind)]
 )";
 
 tl::expected<void, ErrorContext> LoadInts(relation_store& store, uint32_t table, uint64_t owner,
@@ -567,20 +525,27 @@ TEST(DomainTotality, ARunEnteringTheDomainIsCheckedWhole)
 		<< RefusalOf(dead);
 }
 
+// kinds(kind) and clips(kind over kinds.kind, clip): clips is the mutable table when
+// kinds is read-only, and the other way round. Mutable tables cannot be declared
+// in a file, so the schema is built from commands.
+static relation_store ClipsOverKinds(bool mutableClips)
+{
+	static add_column const kinds[] = {{"kind", column_type::Int}};
+	static add_column const clips[] = {{"kind", column_type::Int, true, UINT32_MAX,
+	                                    key_domain{domain_kind::Column, {}, "kinds", "kind"}},
+	                                   {"clip", column_type::Int}};
+	static uint32_t const   byKind[] = {0};
+	static order_by const   order{byKind, false};
+	create_table const      tables[] = {{"kinds", kinds, nullptr, mutableClips},
+	                                    {"clips", clips, &order, !mutableClips, {}, pick_policy::Best}};
+	auto s = BuildSchema(tables);
+	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
+	return relation_store(std::move(*s));
+}
+
 TEST(DomainTotality, AMutableForeignTableRechecksOnInsert)
 {
-	relation_store store = StoreFrom(R"(
-tables:
-  - name: kinds
-    columns:
-      - {name: kind, type: int}
-  - name: clips
-    pick: best
-    columns:
-      - {name: kind, type: int, key: true, domain: {table: kinds, column: kind}}
-      - {name: clip, type: int}
-    order_by: {columns: [kind]}
-)");
+	relation_store store = ClipsOverKinds(false);
 	cell const two[] = {cell::Integer(2)};
 	auto refused = store.Insert(insert_row{0, 7, two});
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "table 'clips' key (2)")) << RefusalOf(refused);
@@ -594,20 +559,7 @@ tables:
 
 TEST(DomainTotality, AnInsertRefusedAfterItsOrphansWereNotedLeavesTheReportEmpty)
 {
-	relation_store store = StoreFrom(R"(
-tables:
-  - name: kinds
-    read_only: true
-    columns:
-      - {name: kind, type: int}
-  - name: clips
-    read_only: false
-    pick: best
-    columns:
-      - {name: kind, type: int, key: true, domain: {table: kinds, column: kind}}
-      - {name: clip, type: int}
-    order_by: {columns: [kind]}
-)");
+	relation_store store = ClipsOverKinds(true);
 	cell const one[]  = {cell::Integer(1), cell::Integer(10)};
 	cell const five[] = {cell::Integer(5), cell::Integer(50)};
 	ASSERT_EQ(RefusalOf(store.Insert(insert_row{1, 1, one})), "(accepted)") << "an orphan";
@@ -652,20 +604,13 @@ TEST(DomainTotality, AStrandedDependentRefusesEveryChangeToItsSourceThatBringsRo
 TEST(DomainTotality, AStrandedRunOfADependentNamesItsFirstRowNotTheSourceChange)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: kinds
-    read_only: true
-    columns:
-      - {name: kind, type: int}
-  - name: clips
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: kind, type: int, key: true, domain: {table: kinds, column: kind}}
-      - {name: window, type: band, input: t}
-      - {name: clip, type: int}
-    order_by: {columns: [kind]}
+[table kinds (column kind int) (pick none)]
+[table clips
+  (input t double 0..1)
+  (key kind int (domain (from kinds kind)))
+  (column window band (input t))
+  (column clip int)
+  (order kind)]
 )");
 	auto loadClip = [&](uint64_t owner, float lo, float hi)
 	{
@@ -693,22 +638,22 @@ namespace
 
 // rules(topic hash key over its rows, need ranks by live, when, answer):
 // mutable, so contributors insert.
-constexpr std::string_view kRules = R"(
-tables:
-  - name: rules
-    read_only: false
-    pick: best
-    inputs:
-      - {name: live, type: flags}
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: topic, type: int, key: true, domain: rows}
-      - {name: need, type: flags, input: live}
-      - {name: window, type: band, input: t}
-      - {name: when, type: condition}
-      - {name: answer, type: int}
-    order_by: {columns: [topic]}
-)";
+// Mutable tables cannot be declared in a file, so the schema is built from commands.
+relation_store RulesStore()
+{
+	static add_input const  inputs[] = {{"live", column_type::Flags}, {"t", column_type::Double, true, 0.0f, 1.0f}};
+	static add_column const columns[] = {{"topic", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+	                                     {"need", column_type::Flags, false, 0},
+	                                     {"window", column_type::Band, false, 1},
+	                                     {"when", column_type::Condition},
+	                                     {"answer", column_type::Int}};
+	static uint32_t const   byTopic[] = {0};
+	static order_by const   order{byTopic, false};
+	create_table const      rules{"rules", columns, &order, false, inputs, pick_policy::Best};
+	auto s = BuildSchema(std::span<create_table const>(&rules, 1));
+	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
+	return relation_store(std::move(*s));
+}
 
 tl::expected<void, ErrorContext> InsertRule(relation_store& store, uint64_t owner, int64_t topic, int64_t need,
 	float lo, float hi, closure when, int64_t answer, std::vector<run_note>* report = nullptr)
@@ -739,7 +684,7 @@ int64_t Answer(relation_store const& store, int64_t topic, int64_t live, double 
 
 TEST(MutableBest, AMutableBestTableIsPickedThroughAVersion)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 0, 0.0f, 1.0f, closure{}, 50)), "(accepted)");
 	ASSERT_EQ(RefusalOf(InsertRule(store, 2, 5, 1, 0.0f, 0.5f, closure{}, 51)), "(accepted)");
 	auto held = store.Version(0);
@@ -755,7 +700,7 @@ TEST(MutableBest, AMutableBestTableIsPickedThroughAVersion)
 
 TEST(MutableBest, AnInsertThatLeavesARunNotTotalIsRefusedAndReleased)
 {
-	relation_store store    = StoreFrom(kRules);
+	relation_store store    = RulesStore();
 	int            released = 0;
 	auto ranked = InsertRule(store, 1, 5, 1, 0.0f, 1.0f, MakeProbe(0, &released), 51);
 	EXPECT_TRUE(Mentions(RefusalOf(ranked), "table 'rules' key (5): t 0 has no row with no flags and no script condition"))
@@ -769,7 +714,7 @@ TEST(MutableBest, AnInsertThatLeavesARunNotTotalIsRefusedAndReleased)
 
 TEST(MutableBest, AnInsertedRowAnEarlierRowCoversIsRefused)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 0, 0.0f, 1.0f, closure{}, 50)), "(accepted)");
 	auto dead = InsertRule(store, 1, 5, 0, 0.25f, 0.5f, closure{}, 55);
 	EXPECT_TRUE(Mentions(RefusalOf(dead), "inserted row 0 is never picked; owner 1's row with key (5), flags 0, window 0..1 covers it"))
@@ -779,7 +724,7 @@ TEST(MutableBest, AnInsertedRowAnEarlierRowCoversIsRefused)
 
 TEST(MutableBest, TwoOwnersRowsWithEqualFlagsMayNotOverlap)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 0, 0.0f, 1.0f, closure{}, 50)), "(accepted)");
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 2, 0.0f, 0.5f, closure{}, 52)), "(accepted)");
 	auto clash = InsertRule(store, 2, 5, 2, 0.25f, 1.0f, closure{}, 62);
@@ -790,7 +735,7 @@ TEST(MutableBest, TwoOwnersRowsWithEqualFlagsMayNotOverlap)
 
 TEST(MutableBest, RetractThenReinsertRestoresTheVersion)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	// Every insert publishes a total version: owner 2 brings the default, and
 	// owner 1 ranked rows.
 	auto fill = [&](uint64_t owner)
@@ -829,7 +774,7 @@ TEST(MutableBest, RetractThenReinsertRestoresTheVersion)
 // before the sort) would be the median of three and sorted ahead of X.
 TEST(MutableBest, AnOwnersInsertsAreTriedInTheOrderTheyWereInserted)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	for (int64_t topic : {10, 11, 12, 13, 14, 15, 16, 17, 60, 61, 62, 63, 64, 65, 66, 67})
 	{
 		ASSERT_EQ(RefusalOf(InsertRule(store, 1, topic, 0, 0.0f, 1.0f, closure{}, topic)), "(accepted)");
@@ -844,7 +789,7 @@ TEST(MutableBest, AnOwnersInsertsAreTriedInTheOrderTheyWereInserted)
 
 TEST(MutableBest, ManyInsertsWithOneKeyKeepTheirInsertionOrder)
 {
-	relation_store store    = StoreFrom(kRules);
+	relation_store store    = RulesStore();
 	int            released = 0;
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 0, 0.0f, 1.0f, closure{}, 0)), "(accepted)");
 	// Scripted, so none closes a list and none is dead.
@@ -861,7 +806,7 @@ TEST(MutableBest, ManyInsertsWithOneKeyKeepTheirInsertionOrder)
 
 TEST(MutableBest, RetractIsUncheckedAndReports)
 {
-	relation_store store = StoreFrom(kRules);
+	relation_store store = RulesStore();
 	ASSERT_EQ(RefusalOf(InsertRule(store, 1, 5, 0, 0.0f, 1.0f, closure{}, 50)), "(accepted)");
 	ASSERT_EQ(RefusalOf(InsertRule(store, 2, 5, 4, 0.0f, 1.0f, closure{}, 54)), "(accepted)");
 	std::vector<run_note> report;

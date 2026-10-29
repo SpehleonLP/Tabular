@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/grid.h"
 #include "tabular/relation.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 
 #include <string>
 #include <string_view>
@@ -16,40 +16,33 @@ using namespace tabular;
 namespace
 {
 
-constexpr std::string_view kSchema = R"(
-tables:
-  - name: live
-    columns:
-      - {name: id, type: int}
-  - name: unique_live
-    columns:
-      - {name: id, type: int}
-    order_by: {columns: [id], unique: true}
-  - name: file
-    read_only: true
-    columns:
-      - {name: id, type: int}
-    order_by: {columns: [id], unique: true}
-  - name: array
-    grid:
-      rows: {name: r, type: int}
-      columns: {name: c, type: int}
-      cells: int
-  - name: ranked
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: id, type: int, key: true, domain: rows}
-      - {name: window, type: band, input: t}
-    order_by: {columns: [id]}
-)";
+// Mutable tables cannot be declared in a file, so the schema is built from
+// commands.
+tl::expected<schema, ErrorContext> BuildTables()
+{
+	static add_column const id[]     = {{"id", column_type::Int}};
+	static uint32_t const   byId[]   = {0};
+	static order_by const   uniqueId{byId, true};
+	static order_by const   plainId{byId, false};
+	static grid_shape const grid{{"r", column_type::Int}, {"c", column_type::Int}, column_type::Int};
+	static add_input const  inputs[] = {{"t", column_type::Double, true, 0.0f, 1.0f}};
+	static add_column const ranked[] = {{"id", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+	                                    {"window", column_type::Band, false, 0}};
+	create_table const      tables[] = {
+		{"live", id},
+		{"unique_live", id, &uniqueId},
+		{"file", id, &uniqueId, true},
+		{"array", {}, nullptr, true, {}, pick_policy::None, UINT32_MAX, nullptr, &grid},
+		{"ranked", ranked, &plainId, true, inputs, pick_policy::Best},
+	};
+	return BuildSchema(tables);
+}
 
 enum table_id : uint32_t { Live, UniqueLive, File, Array, Ranked };
 
 relation_store Store()
 {
-	auto s = SchemaFromYaml(kSchema, "generation.yaml");
+	auto s = BuildTables();
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }

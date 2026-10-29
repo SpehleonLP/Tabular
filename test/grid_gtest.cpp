@@ -3,7 +3,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 
 #include <string>
 #include <string_view>
@@ -296,21 +296,11 @@ TEST(Grid, AGridIsReadOnlyWhateverIsWritten)
 	ASSERT_FALSE(built.has_value());
 	EXPECT_TRUE(Mentions(built.error().message, "read-only")) << built.error().message;
 
-	auto yaml = SchemaFromYaml(R"(
-tables:
-  - name: g
-    read_only: false
-    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: int}
-)", "g.yaml");
-	ASSERT_FALSE(yaml.has_value());
-	EXPECT_TRUE(Mentions(yaml.error().format(), "read-only")) << yaml.error().format();
-
-	auto stated = SchemaFromYaml(R"(
-tables:
-  - name: g
-    read_only: true
-    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: int}
-)", "g.yaml");
+	// The file format has no read_only to state false, so a grid declared there is
+	// read-only by construction.
+	auto stated = ReadSchema(R"(
+[grid g (rows r int) (columns c int) (cells int)]
+)", "g.tabular");
 	EXPECT_TRUE(stated.has_value()) << (stated ? std::string() : stated.error().format());
 }
 
@@ -339,14 +329,12 @@ namespace
 {
 
 constexpr std::string_view kClipByKind = R"(
-tables:
-  - name: clip_by_kind
-    grid: {rows: {name: creature, type: hash}, columns: {name: kind, type: int}, cells: string}
+[grid clip_by_kind (rows creature hash) (columns kind int) (cells string)]
 )";
 
-relation_store YamlGridStore(std::string_view yaml)
+relation_store GridStoreFrom(std::string_view source)
 {
-	auto s = SchemaFromYaml(yaml, "grid.yaml");
+	auto s = ReadSchema(source, "grid.tabular");
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }
@@ -361,7 +349,7 @@ std::string GridError(relation_store& store, std::string_view text)
 
 TEST(GridCsv, LoadsADenseStringGridFromYamlAndCsv)
 {
-	relation_store store = YamlGridStore(kClipByKind);
+	relation_store store = GridStoreFrom(kClipByKind);
 	ASSERT_TRUE(store.definition().tables()[0].is_grid);
 	ASSERT_EQ(GridError(store, "creature,1,2\ngrendel, anim/g_walk.glb ,anim/g_run.glb\nnorn,anim/n_walk.glb,anim/n_run.glb\n"), "");
 	auto grid = store.Grid(0);
@@ -377,7 +365,7 @@ TEST(GridCsv, LoadsADenseStringGridFromYamlAndCsv)
 
 TEST(GridCsv, BlankCellsAreErrorsNamingLineAndHeader)
 {
-	relation_store store = YamlGridStore(kClipByKind);
+	relation_store store = GridStoreFrom(kClipByKind);
 	std::string error = GridError(store, "creature,1,2\ngrendel,a,b\nnorn,c,\n");
 	EXPECT_TRUE(Mentions(error, "'2'")) << error;
 	EXPECT_TRUE(Mentions(error, "grid.csv:3")) << error;
@@ -385,7 +373,7 @@ TEST(GridCsv, BlankCellsAreErrorsNamingLineAndHeader)
 
 TEST(GridCsv, RaggedLinesDuplicatesAndBadCellsAreRefused)
 {
-	relation_store store = YamlGridStore(kClipByKind);
+	relation_store store = GridStoreFrom(kClipByKind);
 	EXPECT_TRUE(Mentions(GridError(store, "creature,1,2\ngrendel,a\n"), "grid.csv:2"));
 	std::string dupRow = GridError(store, "creature,1\ngrendel,a\nnorn,b\ngrendel,c\n");
 	EXPECT_TRUE(Mentions(dupRow, "grid.csv:4")) << dupRow;
@@ -394,10 +382,8 @@ TEST(GridCsv, RaggedLinesDuplicatesAndBadCellsAreRefused)
 	EXPECT_TRUE(Mentions(dupColumn, "'1'")) << dupColumn;
 	EXPECT_TRUE(Mentions(GridError(store, "creature,x\ngrendel,a\n"), "'kind'")) << "an int axis key that is not an int";
 
-	relation_store ints = YamlGridStore(R"(
-tables:
-  - name: g
-    grid: {rows: {name: r, type: int}, columns: {name: c, type: int}, cells: double}
+	relation_store ints = GridStoreFrom(R"(
+[grid g (rows r int) (columns c int) (cells double)]
 )");
 	EXPECT_TRUE(Mentions(GridError(ints, "r,1\n1,fast\n"), "grid.csv:2"));
 	EXPECT_EQ(GridError(ints, "r,-1,2\n-5,0.5,1e3\n"), "");
@@ -410,28 +396,19 @@ tables:
 
 TEST(GridCsv, AGridIsNotLoadedAsRowsNorRowsAsAGrid)
 {
-	relation_store store = YamlGridStore(kClipByKind);
+	relation_store store = GridStoreFrom(kClipByKind);
 	EXPECT_FALSE(LoadCsv(store, csv_rows{0, 1, "creature\nx\n", "g.csv"}).has_value());
-	relation_store rows = YamlGridStore(R"(
-tables:
-  - name: t
-    read_only: true
-    columns:
-      - {name: x, type: int}
+	relation_store rows = GridStoreFrom(R"(
+[table t (column x int) (pick none)]
 )");
 	EXPECT_TRUE(Mentions(GridError(rows, "x,1\n1,2\n"), "not a grid"));
 }
 
 TEST(GridCsv, AxisKeysThatCollideAreRefused)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: g
-    grid:
-      rows: {name: r, type: hash}
-      columns: {name: c, type: hash}
-      cells: int
-)", "g.yaml");
+	auto s = ReadSchema(R"(
+[grid g (rows r hash) (columns c hash) (cells int)]
+)", "g.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto across = LoadGridCsv(store, csv_grid{0, 1, ",n26963,x\nn50336,1,2\n", "g.csv"});
@@ -440,14 +417,9 @@ tables:
 	EXPECT_TRUE(error.find("g.csv:2") != std::string::npos) << error;
 	EXPECT_TRUE(error.find("'n50336' has the same hash as 'n26963' on line 1") != std::string::npos) << error;
 
-	auto s2 = SchemaFromYaml(R"(
-tables:
-  - name: g
-    grid:
-      rows: {name: r, type: int}
-      columns: {name: c, type: int}
-      cells: hash
-)", "g.yaml");
+	auto s2 = ReadSchema(R"(
+[grid g (rows r int) (columns c int) (cells hash)]
+)", "g.tabular");
 	ASSERT_TRUE(s2.has_value()) << s2.error().format();
 	relation_store cells(std::move(*s2));
 	auto inCells = LoadGridCsv(cells, csv_grid{0, 1, ",1,2\n1,n26963,a\n2,b,n50336\n", "g.csv"});

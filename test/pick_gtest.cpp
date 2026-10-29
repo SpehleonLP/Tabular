@@ -2,7 +2,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "probe_closure.h"
 
 #include <array>
@@ -31,26 +31,21 @@ std::string RefusalOf(tl::expected<T, ErrorContext> const& e)
 	return e ? std::string("(accepted)") : e.error().format();
 }
 
-relation_store StoreFrom(std::string_view yaml)
+relation_store StoreFrom(std::string_view source)
 {
-	auto s = SchemaFromYaml(yaml, "pick.yaml");
+	auto s = ReadSchema(source, "pick.tabular");
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }
 
 // A lookup table: label (key), req (ranks by mode), clip.
 constexpr std::string_view kRanked = R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip int)
+  (order label)]
 )";
 
 // Rows of (label, req, clip).
@@ -86,18 +81,13 @@ int64_t BestClip(relation_store const& store, int64_t label, int64_t mode)
 
 // A guarded table: label (key), window (band over t), when (script), clip.
 constexpr std::string_view kGuarded = R"(
-tables:
-  - name: guarded
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: window, type: band, input: t}
-      - {name: when, type: condition}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table guarded
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column window band (input t))
+  (column when condition)
+  (column clip int)
+  (order label)]
 )";
 
 struct guarded_row
@@ -309,12 +299,12 @@ TEST(PickBest, AHeldVersionPicksItsOwnRows)
 
 TEST(PickBest, AWritableTableCannotBePicked)
 {
-	relation_store store = StoreFrom(R"(
-tables:
-  - name: live
-    columns:
-      - {name: x, type: int}
-)");
+	// A writable table cannot be declared in a file, so it is built from commands.
+	add_column const   columns[] = {{"x", column_type::Int}};
+	create_table const live{"live", columns};
+	auto               built = BuildSchema(std::span<create_table const>(&live, 1));
+	ASSERT_TRUE(built.has_value()) << built.error().format();
+	relation_store store(std::move(*built));
 	auto picked = PickBest(store, 0, pick_query{});
 	ASSERT_FALSE(picked.has_value());
 }
@@ -325,18 +315,13 @@ namespace
 // animation's phase CSV example (src/Animation/authoring-form-spec.md, Phase
 // tables), long-form: clip 1 = grendel_walk, 2 = grendel_run; footstep = 1, pivot = 2.
 constexpr std::string_view kPhase = R"(
-tables:
-  - name: phase
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: clip, type: int, key: true}
-      - {name: bits, type: flags}
-      - {name: window, type: band, input: t}
-    order_by: {columns: [clip]}
+[table phase
+  (input t double)
+  (key clip int)
+  (column bits flags)
+  (column window band (input t))
+  (pick or bits)
+  (order clip)]
 )";
 
 relation_store PhaseStore()
@@ -438,18 +423,14 @@ TEST(PickAll, ReturnsEveryHoldingRowInRowOrder)
 {
 	int released = 0;
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: all
-    read_only: true
-    pick: all
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: label, type: int, key: true}
-      - {name: window, type: band, input: t}
-      - {name: when, type: condition}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table all
+  (input t double)
+  (key label int)
+  (column window band (input t))
+  (column when condition)
+  (column clip int)
+  (pick all)
+  (order label)]
 )");
 	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(0, &released), 10},
 	                                {1, 0.5f, 1.0f, MakeProbe(0, &released), 11},
@@ -468,14 +449,11 @@ tables:
 TEST(PickAll, OrderAcrossOwnersSurvivesAnIdenticalReload)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: all
-    read_only: true
-    pick: all
-    columns:
-      - {name: label, type: int, key: true}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table all
+  (key label int)
+  (column clip int)
+  (pick all)
+  (order label)]
 )");
 	auto load = [&](uint64_t owner, int64_t clip)
 	{
@@ -508,19 +486,13 @@ TEST(PickPolicy, NanIsRefusedForARangedInputInEveryPolicy)
 {
 	auto store = [](char const* policy)
 	{
-		return StoreFrom(std::string(R"(
-tables:
-  - name: t
-    read_only: true
-    pick: )") + policy + R"(
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true}
-      - {name: window, type: band, input: t}
-      - {name: out, type: flags}
-    order_by: {columns: [label]}
-)" + (std::string_view(policy) == "or" ? "    output: out\n" : ""));
+		return StoreFrom(std::string(R"([table t
+  (input t double 0..1)
+  (key label int)
+  (column window band (input t))
+  (column out flags)
+  (order label)
+  (pick )") + policy + (std::string_view(policy) == "or" ? " out" : "") + ")]\n");
 	};
 	cell const keys[]   = {cell::Integer(1)};
 	cell const inputs[] = {cell::Real(std::nan(""))};
@@ -548,18 +520,13 @@ namespace
 // Two keys, and an order that runs on past them: a key run is (a, b), not
 // (a, b, req) and not (a).
 constexpr std::string_view kTwoKeys = R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: a, type: int, key: true, domain: rows}
-      - {name: b, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: int}
-    order_by: {columns: [a, b, req]}
+[table lookup
+  (input mode flags)
+  (key a int (domain rows))
+  (key b int (domain rows))
+  (column req flags (input mode))
+  (column clip int)
+  (order a b req)]
 )";
 
 tl::expected<void, ErrorContext> LoadTwoKeys(relation_store& store, std::vector<std::array<int64_t, 4>> const& rows,
@@ -614,17 +581,13 @@ TEST(PickBest, AKeyRunIsEveryKeyColumnAndNoMore)
 
 TEST(PickSchema, TwoKeysLeadTheOrderInColumnOrder)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    columns:
-      - {name: a, type: int, key: true, domain: rows}
-      - {name: b, type: int, key: true, domain: rows}
-      - {name: clip, type: int}
-    order_by: {columns: [b, a]}
-)", "two.yaml");
+	auto s = ReadSchema(R"(
+[table lookup
+  (key a int (domain rows))
+  (key b int (domain rows))
+  (column clip int)
+  (order b a)]
+)", "two.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "starts with its keys")) << s.error().format();
 }
@@ -664,20 +627,15 @@ namespace
 
 // label (key), req (ranks by mode), window (band over t in 0..1), when (script), clip.
 constexpr std::string_view kRankedBand = R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: window, type: band, input: t}
-      - {name: when, type: condition}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table lookup
+  (input mode flags)
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column window band (input t))
+  (column when condition)
+  (column clip int)
+  (order label)]
 )";
 
 struct band_row
@@ -765,17 +723,13 @@ TEST(PickBest, ADefaultWithAScriptConditionIsNotADefault)
 
 TEST(PickBest, AnUnrankedTableOfScriptedRowsIsRefused)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: rules
-    read_only: true
-    pick: best
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: when, type: condition}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
-)", "rules.yaml");
+	auto s = ReadSchema(R"(
+[table rules
+  (key label int (domain rows))
+  (column when condition)
+  (column clip int)
+  (order label)]
+)", "rules.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	cell const values[] = {cell::Integer(1), cell::Integer(10)};
@@ -1012,18 +966,13 @@ TEST(PickBest, SameFlagsShadowInTieOrder)
 TEST(PickBest, TwoBandsOnOneInputIntersect)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: twice
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: a, type: band, input: t}
-      - {name: b, type: band, input: t}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table twice
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column a band (input t))
+  (column b band (input t))
+  (column clip int)
+  (order label)]
 )");
 	auto load = [&](std::vector<std::array<float, 4>> const& rows)
 	{
@@ -1064,18 +1013,13 @@ TEST(PickBest, ADeadRowNamesOnlyTheRowsThatMeetIt)
 TEST(PickBest, AnOverlapWithAnOrderColumnPastTheKeysIsRefusedAsAnOverlap)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: prioritised
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: prio, type: int}
-      - {name: window, type: band, input: t}
-      - {name: clip, type: int}
-    order_by: {columns: [label, prio]}
+[table prioritised
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column prio int)
+  (column window band (input t))
+  (column clip int)
+  (order label prio)]
 )");
 	auto load = [&](int64_t prio, uint64_t owner, load_refusal* refusal)
 	{
@@ -1094,19 +1038,14 @@ tables:
 TEST(PickBest, TwoBandInputsAreCheckedTogether)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: plane
-    read_only: true
-    pick: best
-    inputs:
-      - {name: x, type: double, range: 0..1}
-      - {name: y, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: bx, type: band, input: x}
-      - {name: by, type: band, input: y}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
+[table plane
+  (input x double 0..1)
+  (input y double 0..1)
+  (key label int (domain rows))
+  (column bx band (input x))
+  (column by band (input y))
+  (column clip int)
+  (order label)]
 )");
 	auto load = [&](std::vector<std::array<float, 4>> const& rows)
 	{

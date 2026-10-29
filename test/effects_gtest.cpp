@@ -5,7 +5,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <cmath>
@@ -316,8 +316,8 @@ struct effects_fixture
 	counted_ptr<Machine const> machine;
 	counted_ptr<Binding const> binding;
 
-	effects_fixture(std::string_view yaml, std::vector<std::string_view> const& rows)
-		: document(Parse(yaml)), store(std::move(document.tables))
+	effects_fixture(std::string_view source, std::vector<std::string_view> const& rows)
+		: document(Parse(source)), store(std::move(document.tables))
 	{
 		// A refused document already failed the test; a run on it would crash it.
 		if (document.machines().empty())
@@ -349,9 +349,9 @@ struct effects_fixture
 		}
 	}
 
-	static schema_document Parse(std::string_view yaml)
+	static schema_document Parse(std::string_view source)
 	{
-		auto doc = DocumentFromYaml(yaml, "machine.yaml");
+		auto doc = ReadDocument(source, "machine.tabular");
 		EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 		return doc ? std::move(*doc) : schema_document{};
 	}
@@ -400,59 +400,36 @@ event Message(std::string_view type, std::span<cell const> arguments = {})
 // object is broken.
 
 constexpr std::string_view kGrazer = R"(
-tables:
-  - name: grazer_brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy,    type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: distance,  type: double, range: 0..10}
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: event,   type: hash, key: true, fallthrough: true}
-      - {name: energy,  type: band, input: energy}
-      - {name: near,    type: flags, input: food_near}
-      - {name: dist,    type: band, input: distance}
-      - {name: when,    type: condition}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, event]}
-  - name: grazer_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: grazer_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [idle, walk, eat, panic], initial: idle}
-    inputs:
-      - {name: energy,    type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: event,     type: hash}
-      - {name: distance,  type: double, range: 0..10}
-    step:
-      - from:  grazer_brain
-        where: {mode: state.mode, event: input.event}
-        given: {energy: input.energy, food_near: input.food_near, distance: input.distance}
-        set:   {mode: next}
-    exit:
-      - from:  grazer_exit
-        where: {mode: state.mode}
-        emit:  command
-    entry:
-      - from:  grazer_enter
-        where: {mode: state.mode}
-        emit:  command
+[table grazer_brain
+  (input energy double 0..1)
+  (input food_near flags)
+  (input distance double 0..10)
+  (key mode hash (domain rows))
+  (key event hash fallthrough)
+  (column energy band (input energy))
+  (column near flags (input food_near))
+  (column dist band (input distance))
+  (column when condition)
+  (column next hash)
+  (order mode event)]
+[table grazer_enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[table grazer_exit
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[machine grazer
+  (state mode hash (members idle walk eat panic) (initial idle))
+  (input energy double 0..1)
+  (input food_near flags)
+  (input event hash)
+  (input distance double 0..10)]
+list,from,where,given,set,emit,overrides
+entry,grazer_enter,mode=state.mode,,,command,
+step,grazer_brain,mode=state.mode event=input.event,energy=input.energy food_near=input.food_near distance=input.distance,mode=next,,
+exit,grazer_exit,mode=state.mode,,,command,
 )";
 
 constexpr std::string_view kBrainRows = R"(# grazer_brain
@@ -597,7 +574,7 @@ TEST(FallThroughKey, ABlankCellIsAllowedOnlyInAFallThroughKey)
 
 TEST(FallThroughKey, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 {
-	auto doc = DocumentFromYaml(kGrazer, "machine.yaml");
+	auto doc = ReadDocument(kGrazer, "machine.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	// walk keys on food_found and has no blank run.
@@ -626,9 +603,9 @@ TEST(FallThroughKey, ARunKeyedOnAValueWhoseOtherKeysLeftTheDomainIsAnOrphan)
 {
 	// mode closes over members without sleep: sleep's runs, blank or typed,
 	// are outside the domain, reported and unchecked.
-	std::string const tables = Replace(kGrazer, "{name: mode,    type: hash, key: true, domain: rows}",
-		"{name: mode,    type: hash, key: true, domain: {members: [idle, walk, eat, panic]}}");
-	auto doc = DocumentFromYaml(tables, "machine.yaml");
+	std::string const tables = Replace(kGrazer, "(key mode hash (domain rows))",
+		"(key mode hash (domain (members idle walk eat panic)))");
+	auto doc = ReadDocument(tables, "machine.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	std::vector<run_note> report;
@@ -653,7 +630,7 @@ namespace
 // The grazer with one edit, as a definition-build refusal.
 std::string BuildRefusal(std::string_view from, std::string_view to)
 {
-	return RefusalOf(DocumentFromYaml(Replace(kGrazer, from, to), "machine.yaml"));
+	return RefusalOf(ReadDocument(Replace(kGrazer, from, to), "machine.tabular"));
 }
 
 }
@@ -662,8 +639,8 @@ std::string BuildRefusal(std::string_view from, std::string_view to)
 // input is a getter's.
 TEST(FallThroughKey, AMachineDeclaresNoMessage)
 {
-	std::string const error = BuildRefusal("    step:\n      - from:  grazer_brain",
-		"    message: {type: event}\n    step:\n      - from:  grazer_brain");
+	std::string const error = BuildRefusal("  (input distance double 0..10)]",
+		"  (input distance double 0..10)\n  (message (type event))]");
 	EXPECT_TRUE(Mentions(error, "message")) << error;
 	EXPECT_NE(error, "(accepted)") << "an unknown key fails the document";
 }
@@ -672,8 +649,8 @@ TEST(FallThroughKey, AMachineDeclaresNoMessage)
 // through whatever it came from, so the key is open to the proof either way.
 TEST(FallThroughKey, AnyHashSourceMayFeedIt)
 {
-	std::string const yaml = Replace(kGrazer, "event: input.event}", "event: {literal: scared}}");
-	effects_fixture f(yaml, {kBrainRows, kEnterRows, kExitRows});
+	std::string const source = Replace(kGrazer, "event=input.event", "event=(literal scared)");
+	effects_fixture f(source, {kBrainRows, kEnterRows, kExitRows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
@@ -686,23 +663,19 @@ TEST(FallThroughKey, AnyHashSourceMayFeedIt)
 
 TEST(FallThroughKey, ItDeclaresNoOtherDomain)
 {
-	std::string const both = BuildRefusal("{name: event,   type: hash, key: true, fallthrough: true}",
-		"{name: event,   type: hash, key: true, fallthrough: true, domain: rows}");
+	std::string const both = BuildRefusal("(key event hash fallthrough)",
+		"(key event hash (domain rows) fallthrough)");
 	EXPECT_TRUE(Mentions(both, "column 'event' of table 'grazer_brain' falls through and declares a domain")) << both;
 }
 
 TEST(FallThroughKey, IsAHashKeyAndATableHasAtMostEight)
 {
-	std::string const flags = RefusalOf(DocumentFromYaml(R"(
-tables:
-  - name: t
-    read_only: true
-    pick: best
-    columns:
-      - {name: m, type: int, key: true, fallthrough: true}
-      - {name: v, type: int}
-    order_by: {columns: [m]}
-)", "t.yaml"));
+	std::string const flags = RefusalOf(ReadDocument(R"(
+[table t
+  (key m int fallthrough)
+  (column v int)
+  (order m)]
+)", "t.tabular"));
 	EXPECT_TRUE(Mentions(flags, "key 'm' of table 't' is a int; a fall-through key is a hash")) << flags;
 	// Several give way in key order (Part 4); a miss may try every
 	// combination of blanks, so their number is capped.
@@ -713,11 +686,10 @@ tables:
 		for (int k = 0; k < n; ++k)
 		{
 			std::string const name = "k" + std::to_string(k);
-			columns += "      - {name: " + name + ", type: hash, key: true, fallthrough: true}\n";
-			order += (k ? ", " : "") + name;
+			columns += "  (key " + name + " hash fallthrough)\n";
+			order += (k ? " " : "") + name;
 		}
-		return RefusalOf(DocumentFromYaml("tables:\n  - name: t\n    read_only: true\n    pick: best\n    columns:\n" + columns
-			+ "      - {name: v, type: int}\n    order_by: {columns: [" + order + "]}\n", "t.yaml"));
+		return RefusalOf(ReadDocument("[table t\n" + columns + "  (column v int)\n  (order " + order + ")]\n", "t.tabular"));
 	};
 	EXPECT_EQ(keys(2), "(accepted)");
 	EXPECT_EQ(keys(8), "(accepted)");
@@ -727,17 +699,13 @@ tables:
 
 TEST(FallThroughKey, OnlyABestTablesKeyFallsThrough)
 {
-	std::string const weighted = RefusalOf(DocumentFromYaml(R"(
-tables:
-  - name: t
-    read_only: true
-    pick: weighted
-    weight: w
-    columns:
-      - {name: a, type: hash, key: true, fallthrough: true}
-      - {name: w, type: double}
-    order_by: {columns: [a]}
-)", "t.yaml"));
+	std::string const weighted = RefusalOf(ReadDocument(R"(
+[table t
+  (key a hash fallthrough)
+  (column w double)
+  (pick weighted w)
+  (order a)]
+)", "t.tabular"));
 	EXPECT_TRUE(Mentions(weighted, "key 'a' of table 't' falls through, and only a best table's key falls through"))
 		<< weighted;
 	EXPECT_FALSE(Mentions(weighted, "declares a domain")) << "the author declared no domain: " << weighted;
@@ -752,30 +720,19 @@ namespace
 // once, and its inputs are the collision's payload, read by getters from the
 // message. Tabular sees an ordinary machine being stepped.
 constexpr std::string_view kCollision = R"(
-tables:
-  - name: contact_kind
-    read_only: true
-    pick: best
-    inputs:
-      - {name: ny,    type: double, range: -1..1}
-      - {name: speed, type: double, range: 0..50}
-    columns:
-      - {name: ny,    type: band, input: ny}
-      - {name: speed, type: band, input: speed}
-      - {name: kind,  type: hash}
-    suffix: command
-machines:
-  - name: on_collision
-    inputs:
-      - {name: ny,    type: double, range: -1..1}
-      - {name: speed, type: double, range: 0..50}
-    state:
-      - {name: contact, type: hash, members: [none, floor, wall, ceiling], initial: none}
-    step:
-      - from:  contact_kind
-        given: {ny: input.ny, speed: input.speed}
-        set:   {contact: kind}
-        emit:  command
+[table contact_kind
+  (input ny double -1..1)
+  (input speed double 0..50)
+  (column ny band (input ny))
+  (column speed band (input speed))
+  (column kind hash)
+  (suffix command)]
+[machine on_collision
+  (state contact hash (members none floor wall ceiling) (initial none))
+  (input ny double -1..1)
+  (input speed double 0..50)]
+list,from,where,given,set,emit,overrides
+step,contact_kind,,ny=input.ny speed=input.speed,contact=kind,command,
 )";
 
 constexpr std::string_view kContactRows = R"(ny,        speed,  kind,    command
@@ -819,28 +776,18 @@ namespace
 // event arrives, a value with no run of its own falls through to the blank
 // run, and Back's rows are tried in row order through script conditions.
 constexpr std::string_view kBench = R"(
-tables:
-  - name: bench_page
-    read_only: true
-    pick: best
-    columns:
-      - {name: page, type: hash, key: true, domain: rows}
-      - {name: kind, type: hash, key: true, fallthrough: true}
-      - {name: when, type: condition}
-      - {name: next_page, type: hash}
-    order_by: {columns: [page, kind]}
-    suffix: command
-machines:
-  - name: craft_bench
-    inputs:
-      - {name: event, type: hash}
-    state:
-      - {name: page, type: hash, members: [experiment, closed], initial: experiment}
-    step:
-      - from:  bench_page
-        where: {page: state.page, kind: input.event}
-        set:   {page: next_page}
-        emit:  command
+[table bench_page
+  (key page hash (domain rows))
+  (key kind hash fallthrough)
+  (column when condition)
+  (column next_page hash)
+  (order page kind)
+  (suffix command)]
+[machine craft_bench
+  (state page hash (members experiment closed) (initial experiment))
+  (input event hash)]
+list,from,where,given,set,emit,overrides
+step,bench_page,page=state.page kind=input.event,,page=next_page,command,
 )";
 
 constexpr std::string_view kBenchRows = R"(page,       kind, when,      next_page,  command
@@ -928,29 +875,16 @@ namespace
 // creation and at close, with no message in flight, and answers the neutral
 // value then (the host's rule), which those lists see.
 constexpr std::string_view kNudge = R"(
-tables:
-  - name: nudge
-    read_only: true
-    pick: best
-    inputs:
-      - {name: ny, type: double, range: -1..1}
-    columns:
-      - {name: ny, type: band, input: ny}
-    suffix: command
-machines:
-  - name: on_nudge
-    inputs:
-      - {name: ny, type: double, range: -1..1}
-    state:
-      - {name: mode, type: hash, members: [still], initial: still}
-    entry:
-      - from:  nudge
-        given: {ny: input.ny}
-        emit:  command
-    exit:
-      - from:  nudge
-        given: {ny: input.ny}
-        emit:  command
+[table nudge
+  (input ny double -1..1)
+  (column ny band (input ny))
+  (suffix command)]
+[machine on_nudge
+  (state mode hash (members still) (initial still))
+  (input ny double -1..1)]
+list,from,where,given,set,emit,overrides
+entry,nudge,,ny=input.ny,,command,
+exit,nudge,,ny=input.ny,,command,
 )";
 
 constexpr std::string_view kNudgeRows = R"(ny,         command
@@ -969,7 +903,7 @@ cell ReadNyCounted(void* data, void const* self, ErrorContext*)
 
 TEST(HandlerRules, CreateAndCloseReadThePayloadThroughItsGetter)
 {
-	auto doc = DocumentFromYaml(kNudge, "nudge.yaml");
+	auto doc = ReadDocument(kNudge, "nudge.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	csv_rows load;
@@ -1034,36 +968,22 @@ namespace
 // mood's fall-through key reads what the brain's fall-through key answered:
 // the brain's blank run answers 0, and 0 looks up mood's blank run itself.
 constexpr std::string_view kMoodChain = R"(
-tables:
-  - name: brain
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: event, type: hash, key: true, fallthrough: true}
-      - {name: next,  type: hash}
-    order_by: {columns: [mode, event]}
-  - name: mood
-    read_only: true
-    pick: best
-    columns:
-      - {name: kind, type: hash, key: true, fallthrough: true}
-      - {name: v,    type: int}
-    order_by: {columns: [kind]}
-machines:
-  - name: moody
-    inputs:
-      - {name: event, type: hash}
-    state:
-      - {name: mode, type: hash, members: [idle, panic], initial: idle}
-      - {name: mood, type: int, initial: 0}
-    step:
-      - from:  brain
-        where: {mode: state.mode, event: input.event}
-        set:   {mode: next}
-      - from:  mood
-        where: {kind: clause.0.event}
-        set:   {mood: v}
+[table brain
+  (key mode hash (domain rows))
+  (key event hash fallthrough)
+  (column next hash)
+  (order mode event)]
+[table mood
+  (key kind hash fallthrough)
+  (column v int)
+  (order kind)]
+[machine moody
+  (state mode hash (members idle panic) (initial idle))
+  (state mood int (initial 0))
+  (input event hash)]
+list,from,where,given,set,emit,overrides
+step,brain,mode=state.mode event=input.event,,mode=next,,
+step,mood,kind=clause.0.event,,mood=v,,
 )";
 
 constexpr std::string_view kMoodBrainRows = R"(mode,  event,  next
@@ -1140,21 +1060,16 @@ panic, ,       (abort run)
 
 TEST(MachineClose, CloseOnAFallThroughExitFallsThroughAndIsRecordedAsClose)
 {
-	std::string const yaml = Replace(Replace(kGrazer, R"(  - name: grazer_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]})", R"(  - name: grazer_exit
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: event, type: hash, key: true, fallthrough: true}
-    order_by: {columns: [mode, event]})"), R"(      - from:  grazer_exit
-        where: {mode: state.mode})", R"(      - from:  grazer_exit
-        where: {mode: state.mode, event: input.event})");
-	effects_fixture f(yaml, {kBrainRows, kEnterRows, kEventExitRows});
+	std::string const source = Replace(Replace(kGrazer, R"([table grazer_exit
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)])", R"([table grazer_exit
+  (key mode hash (domain rows))
+  (key event hash fallthrough)
+  (order mode event)
+  (suffix command)])"), "exit,grazer_exit,mode=state.mode,,,command,",
+		"exit,grazer_exit,mode=state.mode event=input.event,,,command,");
+	effects_fixture f(source, {kBrainRows, kEnterRows, kEventExitRows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
 	instance grazer = f.Create(host);
@@ -1191,50 +1106,28 @@ namespace
 // go moves mode; leave reads the state being left and writes data (an int);
 // enter reads the state entered and writes data too, after leave.
 constexpr std::string_view kDoor = R"(
-tables:
-  - name: go
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: code, type: int}
-    order_by: {columns: [mode]}
-    suffix: say
-  - name: enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: code, type: int}
-    order_by: {columns: [mode]}
-    suffix: say
-machines:
-  - name: door
-    state:
-      - {name: mode, type: hash, members: [a, b, c], initial: a}
-      - {name: left, type: int, initial: 0}
-      - {name: last, type: int, initial: 0}
-    step:
-      - from: go
-        where: {mode: state.mode}
-        set: {mode: next}
-    exit:
-      - from: leave
-        where: {mode: state.mode}
-        set: {left: code, last: code}
-        emit: say
-    entry:
-      - from: enter
-        where: {mode: state.mode}
-        set: {last: code}
-        emit: say
+[table go
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table leave
+  (key mode hash (domain rows))
+  (column code int)
+  (order mode)
+  (suffix say)]
+[table enter
+  (key mode hash (domain rows))
+  (column code int)
+  (order mode)
+  (suffix say)]
+[machine door
+  (state mode hash (members a b c) (initial a))
+  (state left int (initial 0))
+  (state last int (initial 0))]
+list,from,where,given,set,emit,overrides
+entry,enter,mode=state.mode,,last=code,say,
+step,go,mode=state.mode,,mode=next,,
+exit,leave,mode=state.mode,,left=code last=code,say,
 )";
 
 constexpr std::string_view kGoRows    = "mode,next\na,b\nb,c\nc,c\n";
@@ -1272,8 +1165,8 @@ TEST(MachineExit, ExitReadsTheStateBeingLeftAndEntryWritesLast)
 
 TEST(MachineExit, AnExitClauseMayNotSetAHashState)
 {
-	std::string const error = RefusalOf(DocumentFromYaml(Replace(kDoor, "set: {left: code, last: code}",
-		"set: {mode: mode, left: code}"), "machine.yaml"));
+	std::string const error = RefusalOf(ReadDocument(Replace(kDoor, "left=code last=code",
+		"mode=mode left=code"), "machine.tabular"));
 	EXPECT_TRUE(Mentions(error, "machine 'door' exit clause 0 (table 'leave')")) << error;
 	EXPECT_TRUE(Mentions(error, "an exit clause sets hash state column 'mode'")) << error;
 	EXPECT_TRUE(Mentions(error, "a transition belongs in the step list")) << error;
@@ -1287,44 +1180,21 @@ namespace
 // Every list emits: start on creation, tick every step (keyed on the mode the
 // step list moved to), leave and enter on a change.
 constexpr std::string_view kTalker = R"(
-tables:
-  - name: go
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: words
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: say
-machines:
-  - name: talker
-    state:
-      - {name: mode, type: hash, members: [a, b], initial: a}
-    create:
-      - from: words
-        where: {mode: {literal: start}}
-        emit: say
-    step:
-      - from: go
-        where: {mode: state.mode}
-        set: {mode: next}
-      - from: words
-        where: {mode: state.mode}
-        emit: say
-    exit:
-      - from: words
-        where: {mode: {literal: leave}}
-        emit: say
-    entry:
-      - from: words
-        where: {mode: state.mode}
-        emit: say
+[table go
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)]
+[table words
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix say)]
+[machine talker (state mode hash (members a b) (initial a))]
+list,from,where,given,set,emit,overrides
+create,words,mode=(literal start),,,say,
+entry,words,mode=state.mode,,,say,
+step,go,mode=state.mode,,mode=next,,
+step,words,mode=state.mode,,,say,
+exit,words,mode=(literal leave),,,say,
 )";
 
 constexpr std::string_view kTalkGo    = "mode,next\na,b\nb,a\n";
@@ -1366,23 +1236,14 @@ TEST(MachineResults, AHeldClauseEmitsNothing)
 	// The careful row's condition raises when the host is broken: the clause
 	// holds with that row as its answer's row, and its command is not sent.
 	effects_fixture f(R"(
-tables:
-  - name: say
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: when, type: condition}
-    order_by: {columns: [mode]}
-    suffix: words
-machines:
-  - name: speaker
-    state:
-      - {name: mode, type: hash, members: [a], initial: a}
-    step:
-      - from: say
-        where: {mode: state.mode}
-        emit: words
+[table say
+  (key mode hash (domain rows))
+  (column when condition)
+  (order mode)
+  (suffix words)]
+[machine speaker (state mode hash (members a) (initial a))]
+list,from,where,given,set,emit,overrides
+step,say,mode=state.mode,,,words,
 )", {"mode,when,words\na,cornered,(careful)\na,,(plain)\n"});
 	ASSERT_TRUE(f.binding);
 	host_object host;
@@ -1415,51 +1276,31 @@ namespace
 // clause reads t through a band and raises when the host is broken; a best
 // clause keyed on its answer cascades its hold.
 constexpr std::string_view kCounter = R"(
-tables:
-  - name: tally
-    read_only: true
-    pick: best
-    columns:
-      - {name: level, type: int, key: true, domain: rows}
-      - {name: next,  type: int}
-    order_by: {columns: [level]}
-  - name: phase
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: mode, type: hash, key: true}
-      - {name: t,    type: band, input: t}
-      - {name: when, type: condition}
-      - {name: bits, type: flags}
-    order_by: {columns: [mode]}
-  - name: lookup
-    read_only: true
-    pick: best
-    columns:
-      - {name: bits, type: flags, key: true, domain: rows}
-      - {name: next, type: int}
-    order_by: {columns: [bits]}
-machines:
-  - name: counter
-    state:
-      - {name: mode,  type: hash, members: [a], initial: a}
-      - {name: count, type: int, initial: 0}
-    inputs:
-      - {name: level, type: int}
-      - {name: t,     type: double, range: 0..1}
-    step:
-      - from: tally
-        where: {level: input.level}
-        set: {count: next}
-      - from: phase
-        where: {mode: state.mode}
-        given: {t: input.t}
-      - from: lookup
-        where: {bits: clause.1.bits}
-        set: {count: next}
+[table tally
+  (key level int (domain rows))
+  (column next int)
+  (order level)]
+[table phase
+  (input t double 0..1)
+  (key mode hash)
+  (column t band (input t))
+  (column when condition)
+  (column bits flags)
+  (pick or bits)
+  (order mode)]
+[table lookup
+  (key bits flags (domain rows))
+  (column next int)
+  (order bits)]
+[machine counter
+  (state mode hash (members a) (initial a))
+  (state count int (initial 0))
+  (input level int)
+  (input t double 0..1)]
+list,from,where,given,set,emit,overrides
+step,tally,level=input.level,,count=next,,
+step,phase,mode=state.mode,t=input.t,,,
+step,lookup,bits=clause.1.bits,,count=next,,
 )";
 
 constexpr std::string_view kTallyRows  = "level,next\n0,1\n1,2\n";
@@ -1619,21 +1460,16 @@ TEST(GrazerEffects, StepsThatEmitFallThroughExitAndRepeatReportsAllocateNothing)
 
 TEST(FallThroughKey, APivotedTablesBlankCellIsTheBlank)
 {
-	auto doc = DocumentFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: msg,   type: hash, key: true, fallthrough: true}
-      - {name: req,   type: flags, input: mode}
-      - {name: clip,  type: string}
-    order_by: {columns: [label, msg]}
-    pivot: {headers: req, cells: clip}
-)", "pivot.yaml");
+	auto doc = ReadDocument(R"(
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (key msg hash fallthrough)
+  (column req flags (input mode))
+  (column clip string)
+  (order label msg)
+  (pivot req clip)]
+)", "pivot.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	csv_rows rows;
@@ -1667,35 +1503,23 @@ TEST(MachineReport, AConditionIsAskedOncePerEvaluationAndItsOwnErrorIsReported)
 	// Each flaky condition fails the first time it is asked and holds after,
 	// so asking it again to build the report would see it answer.
 	effects_fixture f(R"(
-tables:
-  - name: choose
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: when, type: condition}
-      - {name: v,    type: int}
-    order_by: {columns: [mode]}
-  - name: bits
-    read_only: true
-    pick: or
-    output: flags
-    columns:
-      - {name: mode,  type: hash, key: true}
-      - {name: when,  type: condition}
-      - {name: flags, type: flags}
-    order_by: {columns: [mode]}
-machines:
-  - name: asker
-    state:
-      - {name: mode,  type: hash, members: [a], initial: a}
-      - {name: count, type: int, initial: 0}
-    step:
-      - from: choose
-        where: {mode: state.mode}
-        set: {count: v}
-      - from: bits
-        where: {mode: state.mode}
+[table choose
+  (key mode hash (domain rows))
+  (column when condition)
+  (column v int)
+  (order mode)]
+[table bits
+  (key mode hash)
+  (column when condition)
+  (column flags flags)
+  (pick or flags)
+  (order mode)]
+[machine asker
+  (state mode hash (members a) (initial a))
+  (state count int (initial 0))]
+list,from,where,given,set,emit,overrides
+step,choose,mode=state.mode,,count=v,,
+step,bits,mode=state.mode,,,,
 )", {"mode,when,v\na,flaky,1\na,,2\n", "mode,when,flags\na,flaky_or,1\na,,2\n"});
 	ASSERT_TRUE(f.binding);
 	host_object host;
@@ -1749,23 +1573,16 @@ TEST(FallThroughKey, PickBestFallsThroughToTheBlankRunToo)
 
 TEST(FallThroughKey, AColumnDomainFromOneHoldsItsValuesWithoutTheBlank)
 {
-	auto doc = DocumentFromYaml(R"(
-tables:
-  - name: a
-    read_only: true
-    pick: best
-    columns:
-      - {name: msg, type: hash, key: true, fallthrough: true}
-      - {name: v,   type: int}
-    order_by: {columns: [msg]}
-  - name: b
-    read_only: true
-    pick: best
-    columns:
-      - {name: msg, type: hash, key: true, domain: {table: a, column: msg}}
-      - {name: w,   type: int}
-    order_by: {columns: [msg]}
-)", "ab.yaml");
+	auto doc = ReadDocument(R"(
+[table a
+  (key msg hash fallthrough)
+  (column v int)
+  (order msg)]
+[table b
+  (key msg hash (domain (from a msg)))
+  (column w int)
+  (order msg)]
+)", "ab.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	auto load = [&](uint32_t table, uint64_t owner, std::string_view text)
@@ -1789,20 +1606,13 @@ TEST(FallThroughKey, AnOrdinaryKeyMayNotReadAnEarlierClausesFallThroughKey)
 {
 	// mood keys on what the brain's fall-through key answered: the brain
 	// answers 0 from its blank run, which no ordinary key can hold.
-	std::string const tables = Replace(kGrazer, "machines:\n", R"(  - name: mood
-    read_only: true
-    pick: best
-    columns:
-      - {name: kind, type: hash, key: true, domain: rows}
-      - {name: v,    type: int}
-    order_by: {columns: [kind]}
-machines:
-)");
-	std::string const reader = Replace(tables, "        set:   {mode: next}\n", R"(        set:   {mode: next}
-      - from:  mood
-        where: {kind: clause.0.event}
-)");
-	std::string const error = RefusalOf(DocumentFromYaml(reader, "machine.yaml"));
+	std::string const tables = Replace(kGrazer, "[machine grazer", R"([table mood
+  (key kind hash (domain rows))
+  (column v int)
+  (order kind)]
+[machine grazer)");
+	std::string const reader = Replace(tables, "mode=next,,\nexit,", "mode=next,,\nstep,mood,kind=clause.0.event,,,,\nexit,");
+	std::string const error = RefusalOf(ReadDocument(reader, "machine.tabular"));
 	EXPECT_TRUE(Mentions(error, "machine 'grazer' step clause 1 (table 'mood')")) << error;
 	EXPECT_TRUE(Mentions(error, "key 'kind' reads column 'event' of clause 0, the fall-through key of table 'grazer_brain'"))
 		<< error;
@@ -1810,12 +1620,9 @@ machines:
 
 	// Into a fall-through key the blank is a value it holds: 0 looks up the
 	// blank run itself.
-	std::string const intoFallThrough = Replace(Replace(tables, "      - {name: kind, type: hash, key: true, domain: rows}\n",
-		"      - {name: kind, type: hash, key: true, fallthrough: true}\n"), "        set:   {mode: next}\n", R"(        set:   {mode: next}
-      - from:  mood
-        where: {kind: clause.0.event}
-)");
-	EXPECT_EQ(RefusalOf(DocumentFromYaml(intoFallThrough, "machine.yaml")), "(accepted)");
+	std::string const intoFallThrough = Replace(Replace(tables, "(key kind hash (domain rows))",
+		"(key kind hash fallthrough)"), "mode=next,,\nexit,", "mode=next,,\nstep,mood,kind=clause.0.event,,,,\nexit,");
+	EXPECT_EQ(RefusalOf(ReadDocument(intoFallThrough, "machine.tabular")), "(accepted)");
 }
 
 // ---- Report memory per scripted row -----------------------------------------------------
@@ -1831,26 +1638,17 @@ TEST(MachineReport, EachScriptedRowAmongManyIsReportedOnce)
 	}
 	rows += "41,cornered,141\n41,,41\n";
 	effects_fixture f(R"(
-tables:
-  - name: tally
-    read_only: true
-    pick: best
-    columns:
-      - {name: level, type: int, key: true, domain: rows}
-      - {name: when,  type: condition}
-      - {name: next,  type: int}
-    order_by: {columns: [level]}
-machines:
-  - name: levels
-    state:
-      - {name: mode,  type: hash, members: [a], initial: a}
-      - {name: count, type: int, initial: 0}
-    inputs:
-      - {name: level, type: int}
-    step:
-      - from: tally
-        where: {level: input.level}
-        set: {count: next}
+[table tally
+  (key level int (domain rows))
+  (column when condition)
+  (column next int)
+  (order level)]
+[machine levels
+  (state mode hash (members a) (initial a))
+  (state count int (initial 0))
+  (input level int)]
+list,from,where,given,set,emit,overrides
+step,tally,level=input.level,,count=next,,
 )", {rows});
 	ASSERT_TRUE(f.binding);
 	host_object host;
@@ -1878,27 +1676,18 @@ machines:
 TEST(MachineReport, ANoRunOnAFallThroughKeyNamesTheValueNotTheBlank)
 {
 	effects_fixture f(R"(
-tables:
-  - name: poke
-    read_only: true
-    pick: best
-    columns:
-      - {name: level, type: int, key: true, domain: rows}
-      - {name: msg,   type: hash, key: true, fallthrough: true}
-      - {name: next,  type: int}
-    order_by: {columns: [level, msg]}
-machines:
-  - name: poker
-    state:
-      - {name: mode,  type: hash, members: [a], initial: a}
-      - {name: count, type: int, initial: 0}
-    inputs:
-      - {name: level, type: int}
-      - {name: event, type: hash}
-    step:
-      - from: poke
-        where: {level: input.level, msg: input.event}
-        set: {count: next}
+[table poke
+  (key level int (domain rows))
+  (key msg hash fallthrough)
+  (column next int)
+  (order level msg)]
+[machine poker
+  (state mode hash (members a) (initial a))
+  (state count int (initial 0))
+  (input level int)
+  (input event hash)]
+list,from,where,given,set,emit,overrides
+step,poke,level=input.level msg=input.event,,count=next,,
 )", {"level,msg,next\n0,,1\n0,poke,2\n"});
 	ASSERT_TRUE(f.binding);
 	host_object host;

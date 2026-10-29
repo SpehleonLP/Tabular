@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/pick.h"
 #include "tabular/relation.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <string>
@@ -31,26 +31,25 @@ bool Mentions(std::string const& message, std::string_view text)
 	return message.find(text) != std::string::npos;
 }
 
-constexpr std::string_view kSchema = R"(
-tables:
-  - name: display
-    read_only: false
-    pick: best
-    columns:
-      - {name: display, type: hash, key: true, domain: rows}
-      - {name: host, type: hash}
-    order_by: {columns: [display]}
-  - name: owner
-    read_only: false
-    pick: best
-    inputs:
-      - {name: live, type: flags}
-    columns:
-      - {name: display, type: hash, key: true, domain: {table: display, column: display}}
-      - {name: needs, type: flags, input: live}
-      - {name: object, type: hash}
-    order_by: {columns: [display]}
-)";
+// Mutable tables cannot be declared in a file, so the schema is built from
+// commands.
+tl::expected<schema, ErrorContext> BuildTables()
+{
+	static add_column const displayColumns[] = {{"display", column_type::Hash, true, UINT32_MAX, key_domain::Rows()},
+	                                            {"host", column_type::Hash}};
+	static uint32_t const   byDisplay[]      = {0};
+	static order_by const   order{byDisplay, false};
+	static add_input const  ownerInputs[]    = {{"live", column_type::Flags}};
+	static add_column const ownerColumns[]   = {
+		{"display", column_type::Hash, true, UINT32_MAX, key_domain{domain_kind::Column, {}, "display", "display"}},
+		{"needs", column_type::Flags, false, 0},
+		{"object", column_type::Hash}};
+	create_table const tables[] = {
+		{"display", displayColumns, &order, false, {}, pick_policy::Best},
+		{"owner", ownerColumns, &order, false, ownerInputs, pick_policy::Best},
+	};
+	return BuildSchema(tables);
+}
 
 enum table_id : uint32_t { Display, Owner };
 
@@ -101,7 +100,7 @@ int64_t OwnerOf(relation_store const& store, std::string_view display, int64_t l
 // Lifaundi in player mode with crafting installed, on the window.
 relation_store Booted()
 {
-	auto s = SchemaFromYaml(kSchema, "display.yaml");
+	auto s = BuildTables();
 	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
 	relation_store store(std::move(*s));
 	EXPECT_EQ(RefusalOf(AddOwner(store, Engine, "window", 0, "hand")), "(accepted)");

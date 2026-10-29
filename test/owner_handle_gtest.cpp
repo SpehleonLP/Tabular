@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/owner_handle.h"
 #include "tabular/relation.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 
 #include <string>
 #include <string_view>
@@ -15,25 +15,23 @@ namespace
 
 // A mutable table, a read-only one and a grid: one owner can hold rows in all
 // three kinds, and a handle's reach is what these tests are about.
-constexpr std::string_view kSchema = R"(
-tables:
-  - name: live
-    columns:
-      - {name: id, type: int}
-  - name: file
-    read_only: true
-    columns:
-      - {name: id, type: int}
-  - name: array
-    grid:
-      rows: {name: r, type: int}
-      columns: {name: c, type: int}
-      cells: int
-)";
+// The mutable table cannot be declared in a file, so the schema is built from
+// commands.
+tl::expected<schema, ErrorContext> BuildTables()
+{
+	static add_column const id[]  = {{"id", column_type::Int}};
+	static grid_shape const grid{{"r", column_type::Int}, {"c", column_type::Int}, column_type::Int};
+	create_table const      tables[] = {
+		{"live", id},
+		{"file", id, nullptr, true},
+		{"array", {}, nullptr, true, {}, pick_policy::None, UINT32_MAX, nullptr, &grid},
+	};
+	return BuildSchema(tables);
+}
 
 relation_store Store()
 {
-	auto s = SchemaFromYaml(kSchema, "handle.yaml");
+	auto s = BuildTables();
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }

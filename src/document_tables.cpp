@@ -110,9 +110,20 @@ struct reader
 	tl::expected<key_domain, ErrorContext> ReadDomain(sexpr const& domain, std::string_view column, column_type type)
 	{
 		constexpr char const* kShapes = "; a domain is (domain rows), (domain (members ..)) or (domain (from table column))";
-		if (domain.items.size() != 2)
+		if (domain.items.size() < 2)
 		{
-			return Refuse(label, domain.line, "the domain of column '", column, "' is not one thing", kShapes);
+			return Refuse(label, domain.line, "the domain of column '", column, "' is empty", kShapes);
+		}
+		if (domain.items.size() > 2)
+		{
+			sexpr const& extra = domain.items[2];
+			if (extra.what != sexpr::kind::List)
+			{
+				return Refuse(label, extra.line, "the domain of column '", column, "' has the unknown key '", extra.text,
+					"'", kShapes);
+			}
+			return Refuse(label, extra.line, "the domain of column '", column,
+				"' names members or a table's column, one of the two", kShapes);
 		}
 		sexpr const& what = domain.items[1];
 		if (IsAtom(what, "rows"))
@@ -144,8 +155,8 @@ struct reader
 		}
 		if (!IsAtom(what.items[0], "members"))
 		{
-			return Refuse(label, what.line, "the domain of column '", column, "' is a list headed '", what.items[0].text,
-				"'", kShapes);
+			return Refuse(label, what.line, "column '", column, "' has a list headed '", what.items[0].text,
+				"' for a domain", kShapes);
 		}
 		build.members.emplace_back();
 		std::vector<cell>& members = build.members.back();
