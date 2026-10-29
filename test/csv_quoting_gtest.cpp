@@ -21,18 +21,14 @@ namespace
 
 constexpr std::string_view kSchema = R"(
 [table spawn_points
-  (key package hash)
-  (column section int)
-  (column note string)
   (pick none)
   (order package section unique)]
+>package, section: int, note: string
 [table moods
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column mood string)
+  (input req flags)
   (order label)
-  (pivot req mood)]
+  (pivot req mood: string)]
+>label: int
 [grid distances (rows from hash) (columns to hash) (cells int)]
 )";
 
