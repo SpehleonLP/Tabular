@@ -1,6 +1,7 @@
 #include "tabular/schema_yaml.h"
 #include "csv_cells.h"
 #include "machine_internal.h"
+#include "document_internal.h"
 #include "Yaml/yaml_markup.h"
 #include "Yaml/yaml_parse.h"
 
@@ -521,26 +522,12 @@ tl::expected<schema, ErrorContext> BuildTables(document_yaml const& document, LF
 
 }
 
-// Everything a document's machine commands view: the parsed tree (where, given
-// and set are read from its nodes), the walked document, and per machine the
-// command arrays. Sized before any view into it is taken, so nothing moves.
-struct machine_storage
+// The parsed tree and the walked document: the machine commands' where, given
+// and set views point into the tree.
+struct yaml_holder
 {
-	std::vector<std::vector<cell>>                                 members;   // per state column
-	std::vector<add_state>                                         state;
-	std::vector<add_input>                                         inputs;
-	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> where;   // per clause
-	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> given;
-	std::array<std::vector<std::vector<set_state>>, kTriggerCount>   sets;
-	std::array<std::vector<add_clause>, kTriggerCount>             clauses;
-};
-
-struct DocumentStorage
-{
-	LF::Yaml::NodePtr            root;
-	document_yaml                document;
-	std::vector<machine_storage> machines;
-	std::vector<create_machine>  commands;
+	LF::Yaml::NodePtr root;
+	document_yaml     document;
 };
 
 namespace
@@ -796,45 +783,33 @@ tl::expected<void, ErrorContext> ReadMachine(machine_yaml const& in, LF::Yaml::N
 
 }
 
-schema_document::schema_document() = default;
-schema_document::~schema_document() = default;
-schema_document::schema_document(schema_document&&) noexcept = default;
-schema_document& schema_document::operator=(schema_document&&) noexcept = default;
-
-std::span<create_machine const> schema_document::machines() const
-{
-	if (!storage)
-	{
-		return {};
-	}
-	return storage->commands;
-}
-
 tl::expected<schema_document, ErrorContext> DocumentFromYaml(std::string_view text, std::string_view label)
 {
-	auto             held = std::make_unique<DocumentStorage>();
+	auto             held   = std::make_unique<DocumentStorage>();
+	auto             yaml   = std::make_shared<yaml_holder>();
+	held->keepalive = yaml;
 	TreeErrorContext errors;
-	held->root = LF::Yaml::ParseTree(text, errors, label);
-	if (held->root)
+	yaml->root = LF::Yaml::ParseTree(text, errors, label);
+	if (yaml->root)
 	{
-		LF::Yaml::ReadSet(&held->document, *held->root, kDocumentSet, errors);
+		LF::Yaml::ReadSet(&yaml->document, *yaml->root, kDocumentSet, errors);
 	}
 	// Any diagnostic fails the load, an unknown key included: a misspelled
 	// "uniqe" silently ignored is a table that is not unique.
-	if (errors.has_errors() || !held->root)
+	if (errors.has_errors() || !yaml->root)
 	{
 		return tl::make_unexpected(ErrorContext(errors.format()).with(std::string(label)));
 	}
-	auto tables = BuildTables(held->document, *held->root, label);
+	auto tables = BuildTables(yaml->document, *yaml->root, label);
 	if (!tables)
 	{
 		return tl::make_unexpected(std::move(tables.error()));
 	}
 
-	std::vector<machine_yaml> const& machines = held->document.machines;
+	std::vector<machine_yaml> const& machines = yaml->document.machines;
 	held->machines.resize(machines.size());
 	held->commands.resize(machines.size());
-	LF::Yaml::Node const* machineNodes = held->root->get("machines");
+	LF::Yaml::Node const* machineNodes = yaml->root->get("machines");
 	for (size_t m = 0; m < machines.size(); ++m)
 	{
 		auto read = ReadMachine(machines[m], *machineNodes->as_sequence().items[m], *tables, held->machines[m],

@@ -1,10 +1,9 @@
 #ifndef TABULAR_SCHEMA_YAML_H
 #define TABULAR_SCHEMA_YAML_H
 
+#include "tabular/document.h"
 #include "tabular/relation.h"
 
-#include <memory>
-#include <span>
 #include <string_view>
 
 namespace tabular
@@ -24,26 +23,6 @@ namespace tabular
 // and type is one of hash, flags, int, double, condition, command. A document
 // that also defines machines is read with DocumentFromYaml; this refuses one.
 tl::expected<schema, ErrorContext> SchemaFromYaml(std::string_view text, std::string_view label);
-
-struct DocumentStorage;
-struct create_machine;   // tabular/machine.h, which a caller reading machines() includes
-
-// Tables and the machines that read them, from one YAML document. The machine
-// commands are views into the document, valid while it lives; tables can be
-// moved out into a relation_store without disturbing them.
-struct schema_document
-{
-	schema_document();
-	~schema_document();
-	schema_document(schema_document&&) noexcept;
-	schema_document& operator=(schema_document&&) noexcept;
-
-	schema tables;
-
-	std::span<create_machine const> machines() const;
-
-	std::unique_ptr<DocumentStorage> storage;   // what machines() views
-};
 
 // A document of tables, as SchemaFromYaml reads them, and of machines:
 //

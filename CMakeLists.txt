@@ -38,6 +38,9 @@ set(TABULAR_SOURCES
 	src/instance.cpp
 	src/grid.cpp
 	src/schema_yaml.cpp
+	src/document.cpp
+	src/document_tables.cpp
+	src/document_machines.cpp
 	src/command_text.cpp
 	src/csv_text.cpp
 	src/sexpr.cpp
@@ -49,6 +52,7 @@ set(TABULAR_SOURCES
 
 # Headers are listed so IDEs show them in the project; the build does not need them.
 set(TABULAR_HEADERS
+	include/tabular/document.h
 	include/tabular/draw.h
 	include/tabular/grid.h
 	include/tabular/instance.h
@@ -60,6 +64,7 @@ set(TABULAR_HEADERS
 	include/tabular/schema_yaml.h
 	src/csv_cells.h
 	src/command_text.h
+	src/document_internal.h
 	src/document_sections.h
 	src/sexpr.h
 	src/csv_text.h
@@ -87,6 +92,7 @@ set(TABULAR_TEST_SOURCES
 	test/schema_yaml_gtest.cpp
 	test/sexpr_gtest.cpp
 	test/document_sections_gtest.cpp
+	test/document_gtest.cpp
 	test/rows_csv_gtest.cpp
 	test/csv_hash_gtest.cpp
 	test/csv_quoting_gtest.cpp
