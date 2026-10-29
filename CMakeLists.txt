@@ -39,6 +39,7 @@ set(TABULAR_SOURCES
 	src/grid.cpp
 	src/document.cpp
 	src/document_tables.cpp
+	src/document_header.cpp
 	src/document_machines.cpp
 	src/command_text.cpp
 	src/csv_text.cpp
@@ -64,6 +65,7 @@ set(TABULAR_HEADERS
 	src/command_text.h
 	src/document_internal.h
 	src/document_sections.h
+	src/document_header.h
 	src/sexpr.h
 	src/csv_text.h
 	src/float_text.h
@@ -90,6 +92,7 @@ set(TABULAR_TEST_SOURCES
 	test/sexpr_gtest.cpp
 	test/document_sections_gtest.cpp
 	test/document_gtest.cpp
+	test/document_header_gtest.cpp
 	test/rows_csv_gtest.cpp
 	test/csv_hash_gtest.cpp
 	test/csv_quoting_gtest.cpp

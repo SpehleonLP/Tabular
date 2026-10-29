@@ -1,4 +1,5 @@
 #include "document_internal.h"
+#include "document_header.h"
 #include "csv_cells.h"
 
 #include <deque>
@@ -8,10 +9,6 @@ namespace tabular::detail
 
 namespace
 {
-
-// In column_type's order: the index is the enumerator.
-constexpr std::string_view kTypeNames[] = {"hash", "flags", "int", "double", "condition", "command", "vec2", "string",
-	"band"};
 
 enum class option : uint8_t
 {
@@ -614,12 +611,9 @@ tl::expected<column_type, ErrorContext> TypeOf(sexpr const& item, std::string_vi
 {
 	if (item.what != sexpr::kind::List)
 	{
-		for (size_t t = 0; t < std::size(kTypeNames); ++t)
+		if (auto type = TypeNamed(item.text))
 		{
-			if (item.text == kTypeNames[t])
-			{
-				return static_cast<column_type>(t);
-			}
+			return *type;
 		}
 	}
 	return Refuse(label, item.line, "unknown type '", item.text, "'; a type is hash, flags, int, double, condition, command, vec2, string or band");
