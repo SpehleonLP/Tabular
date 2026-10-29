@@ -1540,3 +1540,77 @@ TEST(Document, AnExpandedRowRefusalNamesTheStarRowsLine)
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_EQ(Where(loaded.error()), "t.tabular:4") << loaded.error().format();
 }
+
+TEST(Document, AFragmentAppendsRowsInSectionOrder)
+{
+	EXPECT_EQ(CompiledOf("[table t (pick none)]\nk: int, v: int\n1, 10\n"
+		"[fragment t]\nk, v\n2, 20\n"
+		"[table u (pick none)]\nk: int\n"
+		"[fragment t]\nv, k\n30, 3\n"),
+		"k,v\n1,10\n2,20\n3,30\n");
+	EXPECT_EQ(CompiledOf("[table t (pick none)]\nk: int, v: int\n[fragment t]\nk, v\n2, 20\n"), "k,v\n2,20\n")
+		<< "a table with no rows of its own takes a fragment's";
+}
+
+TEST(Document, AFragmentConstantCopiesPerListedValue)
+{
+	EXPECT_EQ(CompiledOf("[table t (pick none) (order k mode)]\n>k: int, >mode, v: int\n"
+		"[fragment t (mode idle walk)]\nk, v\n1, 10\n2, 20\n"),
+		"k,mode,v\n1,idle,10\n1,walk,10\n2,idle,20\n2,walk,20\n");
+	EXPECT_EQ(CompiledOf("[table b (domain mode idle walk) (order mode)]\n>mode, next\n[fragment b (mode *)]\nnext\nrest\n"),
+		"mode,next\nidle,rest\nwalk,rest\n") << "(mode *) copies per value as a * cell does";
+	std::string const both = RefusalOf("[table t (pick none) (order k mode)]\n>k: int, >mode, v: int\n"
+		"[fragment t (mode idle)]\nmode, k, v\nwalk, 1, 10\n");
+	EXPECT_TRUE(Mentions(both, "'mode'")) << both;
+	EXPECT_TRUE(Mentions(both, "t.tabular:3")) << both;
+	std::string const unknown = RefusalOf("[table t (pick none)]\nk: int\n[fragment t (nope 1)]\nk\n1\n");
+	EXPECT_TRUE(Mentions(unknown, "'nope'")) << unknown;
+}
+
+TEST(Document, AFragmentLeavesOutColumnsBlankThenDefaulted)
+{
+	constexpr std::string_view kFile = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next = mode, command\n"
+		"idle, , , (stand)\n"
+		"[fragment t]\nmode\nwalk\n";
+	EXPECT_EQ(CompiledOf(kFile), "mode,hp,next,command\nidle,0..1,idle,(stand)\nwalk,0..1,walk,\n");
+	auto d = ReadDocument(kFile, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(store.RowCount(0), 2u);
+}
+
+TEST(Document, AFragmentHeaderNamesOnlyDeclaredColumns)
+{
+	for (std::string_view header : {"k, nope", "k, v: int", ">k, v", "k, v = 1", "k, k"})
+	{
+		std::string const refused = RefusalOf(cc(std::string("[table t (pick none)]\nk: int, v: int\n[fragment t]\n"),
+			header, "\n1, 2\n"));
+		EXPECT_TRUE(Mentions(refused, "fragment")) << header << ": " << refused;
+		EXPECT_TRUE(Mentions(refused, "t.tabular:4")) << header << ": " << refused;
+	}
+}
+
+TEST(Document, AFragmentBeforeItsTableIsRefused)
+{
+	std::string const before = RefusalOf("[fragment t]\nk\n1\n[table t (pick none)]\nk: int\n");
+	EXPECT_TRUE(Mentions(before, "'t'")) << before;
+	EXPECT_TRUE(Mentions(before, "t.tabular:1")) << before;
+	std::string const unknown = RefusalOf("[table t (pick none)]\nk: int\n[fragment u]\nk\n1\n");
+	EXPECT_TRUE(Mentions(unknown, "'u'")) << unknown;
+	std::string const grid = RefusalOf("[grid g (rows r int) (columns c int) (cells int)]\n,1\n1,2\n[fragment g]\nr\n1\n");
+	EXPECT_TRUE(Mentions(grid, "grid")) << grid;
+	std::string const pivot = RefusalOf("[table p (input req flags) (order label) (pivot req clip: string)]\n>label: int, None\n"
+		"[fragment p]\nlabel\n1\n");
+	EXPECT_TRUE(Mentions(pivot, "pivot")) << pivot;
+}
+
+TEST(Document, AFragmentRowRefusalNamesItsOwnLine)
+{
+	auto d = ReadDocument("[table t (pick none)]\nk: int, v: int\n1, 10\n[fragment t]\nk, v\n# a note\n2, many\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:7") << loaded.error().format();
+}

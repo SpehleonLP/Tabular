@@ -61,6 +61,13 @@ struct column_fill
 	uint32_t    key  = UINT32_MAX;  // Key: the key's header position
 };
 
+struct compiled_row
+{
+	std::vector<std::string_view> cells;
+	uint32_t                      line = 0;      // the line the author wrote it on
+	bool                          copy = false;  // one of a `*` row's copies
+};
+
 struct table_build
 {
 	std::string_view              name;
@@ -96,6 +103,14 @@ struct table_build
 	// domain is another table's column takes no `*`.
 	std::vector<std::vector<std::string_view>> starMembers;
 	std::vector<bool>                          foreignDomain;
+	// Rows its [fragment ..] sections add after its own, in section order.
+	std::vector<compiled_row>                  fragmentRows;
+	csv_text const*                            body     = nullptr;   // its own rows; null for a grid
+	std::string_view                           text;                 // its section's body, as written
+	bool                                       ownRows  = false;     // its body has rows, not just a header
+	uint32_t                                   table    = 0;
+	uint32_t                                   bodyLine = 0;
+	bool                                       isGrid   = false;
 };
 
 // Whether a body has any row. A table's first record is its header, so it needs
@@ -636,13 +651,6 @@ void AppendCell(std::string& out, std::string_view text, bool first)
 	out += '"';
 }
 
-struct compiled_row
-{
-	std::vector<std::string_view> cells;
-	uint32_t                      line = 0;      // the line the author wrote it on
-	bool                          copy = false;  // one of a `*` row's copies
-};
-
 bool IsStar(std::string_view cell)
 {
 	return cell == "*";
@@ -828,7 +836,8 @@ bool Answered(table_build const& build, std::span<compiled_row const> earlier, c
 }
 
 // The one place a table's rows are rewritten into the plain CSV the loaders
-// read: the header becomes bare names, `*` rows become their copies, blank
+// read: the header becomes bare names, fragments' rows follow the table's own,
+// `*` rows become their copies, blank
 // cells take their column's fill, and every record keeps the file line it came
 // from.
 tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text const& body, std::string_view label,
@@ -853,6 +862,11 @@ tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text 
 		{
 			row.cells[c] = body.cell(c, r);
 		}
+	}
+	for (compiled_row const& fragment : build.fragmentRows)
+	{
+		compiled_row& row = written.emplace_back(fragment);
+		row.cells.resize(std::max(row.cells.size(), fillWidth));
 	}
 	auto values = StarValues(build, written, label);
 	if (!values)
@@ -950,6 +964,178 @@ tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view la
 std::string_view OptionHead(sexpr const& item)
 {
 	return item.what == sexpr::kind::List ? HeadOf(item) : item.text;
+}
+
+// `[fragment t (col v ..)..]`: rows for a table declared above it. Its header
+// names the table's columns, bare; a bracket constant sets a column on every
+// row, one copy per value it lists.
+tl::expected<void, ErrorContext> ReadFragment(section const& section, std::deque<table_build>& builds,
+	std::deque<csv_text>& bodies, DocumentStorage& storage, std::string_view label)
+{
+	sexpr const& header = section.header;
+	if (header.items.size() < 2)
+	{
+		return Refuse(label, header.line, "[fragment] names the table it adds rows to");
+	}
+	auto name = NameOf(header.items[1], storage, label, "a fragment's table");
+	if (!name)
+	{
+		return tl::make_unexpected(std::move(name.error()));
+	}
+	auto const found = std::find_if(builds.rbegin(), builds.rend(), [&](table_build const& b) { return b.name == *name; });
+	if (found == builds.rend())
+	{
+		return Refuse(label, header.line, "fragment of '", *name,
+			"' names no table declared above it; a [fragment ..] follows the [table ..] it adds rows to");
+	}
+	table_build& table = *found;
+	if (table.isGrid || table.pivoted)
+	{
+		return Refuse(label, header.line, "fragment of '", *name, "' adds rows to a ", table.isGrid ? "grid" : "pivot",
+			", which is written whole in its own section");
+	}
+	auto positionOf = [&](std::string_view column) -> size_t
+	{
+		auto const at = std::find(table.headerNames.begin(), table.headerNames.end(), column);
+		return at == table.headerNames.end() ? SIZE_MAX : static_cast<size_t>(at - table.headerNames.begin());
+	};
+
+	struct constant
+	{
+		size_t                        at = SIZE_MAX;
+		std::vector<std::string_view> values;
+		uint32_t                      line = 0;
+	};
+	std::vector<constant> constants;
+	for (size_t i = 2; i < header.items.size(); ++i)
+	{
+		sexpr const& option = header.items[i];
+		if (option.what != sexpr::kind::List || option.items.size() < 2)
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' has '", OptionHead(option),
+				"' where a constant (column value ..) belongs");
+		}
+		auto column = NameOf(option.items[0], storage, label, "a fragment constant's column");
+		if (!column)
+		{
+			return tl::make_unexpected(std::move(column.error()));
+		}
+		constant& c = constants.emplace_back();
+		c.at        = positionOf(*column);
+		c.line      = option.line;
+		if (c.at == SIZE_MAX)
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column,
+				"', which table '", *name, "' does not declare");
+		}
+		if (std::any_of(constants.begin(), constants.end() - 1, [&](constant const& o) { return o.at == c.at; }))
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column, "' twice");
+		}
+		for (size_t v = 1; v < option.items.size(); ++v)
+		{
+			auto value = NameOf(option.items[v], storage, label, "a fragment constant's value");
+			if (!value)
+			{
+				return tl::make_unexpected(std::move(value.error()));
+			}
+			c.values.push_back(*value);
+		}
+		bool const star = std::any_of(c.values.begin(), c.values.end(), IsStar);
+		if (star && (c.values.size() != 1 || c.at >= table.columns.size() || !table.columns[c.at].key))
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column,
+				"' to '*' among other values or on a column that is not a key; (key *) alone copies per key value");
+		}
+	}
+
+	auto read = csv_text::Read(section.body, label, section.body_line);
+	if (!read)
+	{
+		return tl::make_unexpected(std::move(read.error()));
+	}
+	bodies.push_back(std::move(*read));
+	csv_text const& body = bodies.back();
+	if (body.rows() == 0)
+	{
+		return {};
+	}
+	uint32_t const      headerLine = body.line_of_row(0);
+	size_t const        width      = body.used_width(0);
+	std::vector<size_t> positions;
+	for (size_t h = 0; h < width; ++h)
+	{
+		auto cell = ParseHeaderCell(body.cell(h, 0));
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("fragment of '", *name, "'").with(Place(label, headerLine)));
+		}
+		if (cell->what != header_cell::mark::None || cell->fallthrough || cell->type || cell->fallback)
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' has the header cell '", cell->text,
+				"'; a fragment's header names the table's columns, bare, and the table declares them");
+		}
+		size_t const at = positionOf(cell->name);
+		if (at == SIZE_MAX)
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' names column '", cell->name, "', which table '",
+				*name, "' does not declare");
+		}
+		if (std::find(positions.begin(), positions.end(), at) != positions.end())
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' names column '", cell->name, "' twice");
+		}
+		auto const constant = std::find_if(constants.begin(), constants.end(), [at](auto const& c) { return c.at == at; });
+		if (constant != constants.end())
+		{
+			return Refuse(label, constant->line, "fragment of '", *name, "' sets column '", cell->name,
+				"' in its bracket and names it in its header too");
+		}
+		positions.push_back(at);
+	}
+	// The suffix is the table's last column, so a fragment that names it last
+	// runs it to the row's end as the table does.
+	bool const suffixLast = !table.suffix.empty() && !positions.empty()
+		&& positions.back() == table.headerNames.size() - 1;
+	for (size_t r = 1; r < body.rows(); ++r)
+	{
+		uint32_t const line = body.line_of_row(r);
+		if (body.used_width(r) > width && !suffixLast)
+		{
+			return Refuse(label, line, "a row of the fragment of '", *name, "' has more cells than its header names");
+		}
+		std::vector<std::string_view> cells(table.headerNames.size());
+		for (size_t h = 0; h < width && h < body.width(r); ++h)
+		{
+			cells[positions[h]] = body.cell(h, r);
+		}
+		for (size_t extra = width; suffixLast && extra < body.width(r); ++extra)
+		{
+			cells.push_back(body.cell(extra, r));
+		}
+		// One copy per value of each constant, the first constant varying slowest.
+		std::vector<size_t> at(constants.size(), 0);
+		while (true)
+		{
+			compiled_row& row = table.fragmentRows.emplace_back();
+			row.cells         = cells;
+			row.line          = line;
+			for (size_t c = 0; c < constants.size(); ++c)
+			{
+				row.cells[constants[c].at] = constants[c].values[at[c]];
+			}
+			size_t c = constants.size();
+			while (c > 0 && ++at[c - 1] == constants[c - 1].values.size())
+			{
+				at[--c] = 0;
+			}
+			if (c == 0)
+			{
+				break;
+			}
+		}
+	}
+	return {};
 }
 
 }
@@ -1063,21 +1249,15 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 	std::vector<uint32_t>     headerLines;   // per table, the line its bracket opens on
 
 	size_t tableCount = 0;
-	size_t rowsCount  = 0;
 	for (section const& section : sections)
 	{
 		std::string_view const head = section.header.items[0].text;
 		if (section.header.items[0].what == sexpr::kind::Atom && (head == "table" || head == "grid"))
 		{
 			++tableCount;
-			rowsCount += HasRows(section.body, head == "grid") ? 1 : 0;
 		}
 	}
 	storage.table_names = shared_array<std::string>(tableCount);
-	storage.rows           = shared_array<section_rows>(rowsCount);
-	storage.compiled       = shared_array<std::string>(rowsCount);
-	storage.compiled_lines = shared_array<shared_array<uint32_t>>(rowsCount);
-	size_t rowsAt       = 0;
 
 	for (size_t s = 0; s < sections.size(); ++s)
 	{
@@ -1085,16 +1265,26 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		sexpr const&   header  = section.header;
 		if (header.items[0].what != sexpr::kind::Atom)
 		{
-			return Refuse(label, header.line, "a bracket starts with table, grid or machine");
+			return Refuse(label, header.line, "a bracket starts with table, grid, fragment or machine");
 		}
 		std::string_view const head = header.items[0].text;
 		if (head == "machine")
 		{
 			continue;
 		}
+		if (head == "fragment")
+		{
+			auto added = ReadFragment(section, builds, bodies, storage, label);
+			if (!added)
+			{
+				return tl::make_unexpected(std::move(added.error()));
+			}
+			continue;
+		}
 		if (head != "table" && head != "grid")
 		{
-			return Refuse(label, header.line, "unknown bracket '", head, "'; a file declares [table ..], [grid ..] and [machine ..]");
+			return Refuse(label, header.line, "unknown bracket '", head,
+				"'; a file declares [table ..], [grid ..], [fragment ..] and [machine ..]");
 		}
 		bool const isGrid = head == "grid";
 		if (header.items.size() < 2)
@@ -1197,27 +1387,41 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		commands.push_back(create_table{build.name, build.columns, build.ordered ? &build.order : nullptr, true,
 			build.inputs, build.pick, build.outputColumn, build.pivoted ? &build.pivot : nullptr,
 			isGrid ? &build.grid : nullptr, build.suffix, build.weightColumn});
-		if (HasRows(section.body, isGrid))
+		build.table    = static_cast<uint32_t>(commands.size() - 1);
+		build.isGrid   = isGrid;
+		build.text     = section.body;
+		build.bodyLine = section.body_line;
+		build.body     = isGrid ? nullptr : &bodies.back();
+		build.ownRows  = HasRows(section.body, isGrid);
+	}
+	// Fragments add to tables above them, so a table compiles once the whole
+	// file is read, and only then is it known which tables have rows.
+	auto const hasRows = [](table_build const& b) { return b.ownRows || !b.fragmentRows.empty(); };
+	size_t const rowsCount = static_cast<size_t>(std::count_if(builds.begin(), builds.end(), hasRows));
+	storage.rows           = shared_array<section_rows>(rowsCount);
+	storage.compiled       = shared_array<std::string>(rowsCount);
+	storage.compiled_lines = shared_array<shared_array<uint32_t>>(rowsCount);
+	size_t rowsAt          = 0;
+	for (table_build const& build : builds)
+	{
+		if (!hasRows(build))
 		{
-			uint32_t const table = static_cast<uint32_t>(commands.size() - 1);
-			if (isGrid)
-			{
-				storage.rows[rowsAt] = section_rows{table, section.body, section.body_line};
-			}
-			else
-			{
-				std::string&            text  = storage.compiled[rowsAt];
-				shared_array<uint32_t>& lines = storage.compiled_lines[rowsAt];
-				auto compiled = CompileBody(build, bodies.back(), label, text, lines);
-				if (!compiled)
-				{
-					return tl::make_unexpected(std::move(compiled.error()));
-				}
-				storage.rows[rowsAt] = section_rows{table, text, section.body_line,
-					std::span<uint32_t const>(lines.begin(), lines.size())};
-			}
-			++rowsAt;
+			continue;
 		}
+		if (build.isGrid)
+		{
+			storage.rows[rowsAt++] = section_rows{build.table, build.text, build.bodyLine};
+			continue;
+		}
+		std::string&            text     = storage.compiled[rowsAt];
+		shared_array<uint32_t>& lines    = storage.compiled_lines[rowsAt];
+		auto                    compiled = CompileBody(build, *build.body, label, text, lines);
+		if (!compiled)
+		{
+			return tl::make_unexpected(std::move(compiled.error()));
+		}
+		storage.rows[rowsAt++] = section_rows{build.table, text, build.bodyLine,
+			std::span<uint32_t const>(lines.begin(), lines.size())};
 	}
 
 	uint32_t refused = UINT32_MAX;
