@@ -247,14 +247,16 @@ TEST(KeyDomainYaml, AMalformedDomainIsRefused)
   (order k)]
 )", "bad.tabular");
 	};
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain row)")), "has domain 'row'")) << RefusalOf(with("(domain row)"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (a b))")), "for a domain")) << RefusalOf(with("(domain (a b))"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain row)")), "has the unknown domain 'row'")) << RefusalOf(with("(domain row)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (a b))")), "unknown domain form 'a'")) << RefusalOf(with("(domain (a b))"));
 	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) (from display display))")), "one of the two"))
 		<< RefusalOf(with("(domain (members a) (from display display))"));
 	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (from display))")), "names a table and its column, both"))
 		<< RefusalOf(with("(domain (from display))"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) unique)")), "unknown key 'unique'"))
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) unique)")), "unknown option 'unique'"))
 		<< RefusalOf(with("(domain (members a) unique)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain rows (members a))")), "is rows and has more after it"))
+		<< RefusalOf(with("(domain rows (members a))"));
 	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a a))")), "twice")) << RefusalOf(with("(domain (members a a))"));
 	EXPECT_TRUE(Mentions(RefusalOf(ReadSchema(R"(
 [table t (key k int) (order k)]

@@ -446,7 +446,7 @@ TEST(PickWeightedSchema, TheWeightColumnIsRequiredAndMustBeADouble)
   (pick weighted)
   (order kind)]
 )");
-	EXPECT_TRUE(Mentions(none, "weight")) << none;
+	EXPECT_TRUE(Mentions(none, "(pick weighted ..) names the column it reads")) << none;
 
 	std::string const notDouble = SchemaRefusal(R"(
 [table loot
@@ -482,7 +482,7 @@ TEST(PickWeightedSchema, OnlyAWeightedTableNamesAWeight)
 	// A table with no pick would otherwise return before the check and leave the
 	// weight written and never read.
 	static add_column const unpickedColumns[] = {{"kind", column_type::Int, true}, {"w", column_type::Double}};
-	create_table            unpickedTable{"lookup", unpickedColumns, &order, true};
+	create_table            unpickedTable{"lookup", unpickedColumns, &order, false};
 	unpickedTable.weight = 1;
 	std::string const unpicked = BuildRefusal(unpickedTable);
 	EXPECT_TRUE(Mentions(unpicked, "weight")) << unpicked;

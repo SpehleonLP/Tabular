@@ -114,25 +114,32 @@ struct reader
 		{
 			return Refuse(label, domain.line, "the domain of column '", column, "' is empty", kShapes);
 		}
+		sexpr const& what = domain.items[1];
+		// What the domain says comes before how many words follow it, so
+		// (domain rows (members a)) is refused for the rows it also names.
+		if (IsAtom(what, "rows"))
+		{
+			if (domain.items.size() > 2)
+			{
+				return Refuse(label, domain.items[2].line, "the domain of column '", column,
+					"' is rows and has more after it; rows takes nothing", kShapes);
+			}
+			return key_domain::Rows();
+		}
 		if (domain.items.size() > 2)
 		{
 			sexpr const& extra = domain.items[2];
 			if (extra.what != sexpr::kind::List)
 			{
-				return Refuse(label, extra.line, "the domain of column '", column, "' has the unknown key '", extra.text,
+				return Refuse(label, extra.line, "the domain of column '", column, "' has the unknown option '", extra.text,
 					"'", kShapes);
 			}
 			return Refuse(label, extra.line, "the domain of column '", column,
 				"' names members or a table's column, one of the two", kShapes);
 		}
-		sexpr const& what = domain.items[1];
-		if (IsAtom(what, "rows"))
-		{
-			return key_domain::Rows();
-		}
 		if (what.what != sexpr::kind::List || what.items.empty())
 		{
-			return Refuse(label, domain.line, "column '", column, "' has domain '", what.text, "'", kShapes);
+			return Refuse(label, domain.line, "column '", column, "' has the unknown domain '", what.text, "'", kShapes);
 		}
 		if (IsAtom(what.items[0], "from"))
 		{
@@ -155,8 +162,8 @@ struct reader
 		}
 		if (!IsAtom(what.items[0], "members"))
 		{
-			return Refuse(label, what.line, "column '", column, "' has a list headed '", what.items[0].text,
-				"' for a domain", kShapes);
+			return Refuse(label, what.line, "column '", column, "' has the unknown domain form '", what.items[0].text,
+				"'", kShapes);
 		}
 		build.members.emplace_back();
 		std::vector<cell>& members = build.members.back();

@@ -501,7 +501,7 @@ TEST(MachineDefinition, TheGrazerIsWellFormed)
 	EXPECT_EQ(RefusalOf(CheckMachine(m, doc->tables)), "(accepted)");
 }
 
-TEST(MachineDefinition, SchemaFromYamlRefusesADocumentWithMachines)
+TEST(MachineDefinition, ReadSchemaRefusesADocumentWithMachines)
 {
 	std::string const error = RefusalOf(ReadSchema(std::string(kGrazerTables) + std::string(kGrazerMachine), "g.tabular"));
 	EXPECT_TRUE(Mentions(error, "read it with ReadDocument")) << error;
@@ -614,7 +614,7 @@ TEST(MachineDefinition, ASourceIsOneOfTheFourShapes)
 	EXPECT_TRUE(Mentions(literal, "'message' has the source '(literal (a))'; a literal is (literal <text>)")) << literal;
 }
 
-TEST(MachineDefinition, CommandStructsAreCheckedWithoutYaml)
+TEST(MachineDefinition, CommandStructsAreCheckedWithoutAFile)
 {
 	auto doc = Document(kGrazerTables, "");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);

@@ -347,7 +347,7 @@ std::string GridError(relation_store& store, std::string_view text)
 
 }
 
-TEST(GridCsv, LoadsADenseStringGridFromYamlAndCsv)
+TEST(GridCsv, LoadsADenseStringGridFromAFileAndCsv)
 {
 	relation_store store = GridStoreFrom(kClipByKind);
 	ASSERT_TRUE(store.definition().tables()[0].is_grid);

@@ -4,6 +4,7 @@
 #include "tabular/document.h"
 #include "cityhash/src/city.h"
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -344,7 +345,7 @@ TEST(SuffixSchema, ASuffixNamingADeclaredColumnIsRefused)
 	EXPECT_TRUE(Mentions(s.error().format(), "command")) << s.error().format();
 }
 
-TEST(SuffixSchema, AnEmptySuffixNameIsRefused)
+TEST(SuffixSchema, AQuotedSuffixNameIsRefused)
 {
 	constexpr std::string_view schema = R"(
 [table blank
@@ -354,6 +355,18 @@ TEST(SuffixSchema, AnEmptySuffixNameIsRefused)
 )";
 	auto s = ReadSchema(schema, "blank.tabular");
 	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "the suffix's name")) << s.error().format();
+	EXPECT_TRUE(Mentions(s.error().format(), "is quoted or holds whitespace; a declared name is a bare word"))
+		<< s.error().format();
+}
+
+TEST(SuffixSchema, TheBuilderRefusesAGridWithASuffixTheReaderNeverPasses)
+{
+	static grid_shape const shape{{"r", column_type::Int}, {"c", column_type::Int}, column_type::Int};
+	create_table            table{"array", {}, nullptr, true, {}, pick_policy::None, UINT32_MAX, nullptr, &shape, "command"};
+	auto                    s = BuildSchema(std::span<create_table const>(&table, 1));
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "grid 'array' has axes and cells")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "suffix")) << s.error().format();
 }
 
