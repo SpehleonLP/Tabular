@@ -80,7 +80,7 @@ Each command adopts the closures it is given whether it succeeds or not. A refus
 
 A versioned table is immutable once built and refcounted. Versioned tables are read-only tables, mutable `best` tables, and mutable tables that some best table's key domain reads from. Every change builds a whole new version, checks it, and only then swaps it in. A refusal leaves the current version untouched. `Version(table)` gives a reader a `counted_ptr<TableVersion const>` whose row numbers stay valid as long as it is held. `Generation(table)` changes exactly when the rows change.
 
-Within equal order keys, a versioned table sorts rows by owner id and then by position within that owner's load. The result therefore does not depend on which owner wrote last.
+Within equal order keys, a versioned table sorts rows by owner id and then by position within that owner's load. The result therefore does not depend on which owner wrote last. `LoadIndexOf(table, row)` returns a read-only table's row's position in its load, so a front end that finds a row at fault after the load can name the line its author wrote (with `section_rows::record_lines`).
 
 ### Ordering and lookups
 

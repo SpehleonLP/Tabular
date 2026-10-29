@@ -950,6 +950,19 @@ uint64_t relation_store::OwnerOf(uint32_t table, size_t row) const
 	return _storage->RowsOf(table).owners[row];
 }
 
+tl::expected<size_t, ErrorContext> relation_store::LoadIndexOf(uint32_t table, size_t row) const
+{
+	table_def const& def = _storage->definition.tables()[table];
+	if (!def.read_only || def.is_grid)
+	{
+		return tl::make_unexpected(ErrorContext("table '", def.name,
+			"' is not a read-only table, so its rows have no place in a load"));
+	}
+	// A load replaces every row its owner had, so the index within the owner's
+	// rows is the index within the one load that brought them.
+	return _storage->RowsOf(table).ownerRows[row];
+}
+
 uint64_t relation_store::Generation(uint32_t table) const
 {
 	if (GridVersion const* grid = _storage->GridOf(table))

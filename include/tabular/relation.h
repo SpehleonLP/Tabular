@@ -503,6 +503,10 @@ public:
 
 	size_t   RowCount(uint32_t table) const;
 	uint64_t OwnerOf(uint32_t table, size_t row) const;
+	// A read-only table's row's index among the rows of the load that brought
+	// it, so a front end can name the line its author wrote for a row it finds
+	// at fault after the load. Refused for any other table.
+	tl::expected<size_t, ErrorContext> LoadIndexOf(uint32_t table, size_t row) const;
 
 	// A value column's cell. Condition, Command and String columns are read
 	// with Holds, CommandAt and StringAt instead.

@@ -744,6 +744,32 @@ TEST(Document, RowsLoadFromTheFile)
 	EXPECT_EQ(store.Value(0, **picked, 1)->i, 20);
 }
 
+// The store sorts rows by their order, so the line of a row found at fault
+// after the load is reached through its place in the load.
+TEST(Document, ARowsLoadIndexNamesItsLine)
+{
+	auto d = ReadDocument("[table lookup (order label)]\n"
+		">label: int, v: int\n"
+		"3, 30\n"
+		"# a note\n"
+		"1, 10\n"
+		"2, 20\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 7, condition_reader())), "");
+	ASSERT_EQ(d->rows().size(), 1u);
+	std::span<uint32_t const> const lines = d->rows()[0].record_lines;
+	ASSERT_EQ(lines.size(), 4u);
+
+	uint32_t const want[] = {5, 6, 3};   // labels 1, 2, 3 in row order
+	for (size_t row = 0; row < 3; ++row)
+	{
+		auto index = store.LoadIndexOf(0, row);
+		ASSERT_TRUE(index.has_value()) << index.error().format();
+		EXPECT_EQ(lines[*index + 1], want[row]) << "row " << row;
+	}
+}
+
 TEST(Document, PivotAndGridBodiesLoad)
 {
 	auto d = ReadDocument(R"(
@@ -1038,8 +1064,8 @@ constexpr std::string_view kHosted =
 	"[messages]\n"
 	"message,from,p1,p2\n"
 	"Eat,,amount: int,\n"
-	"[table t (key mode hash (domain rows)) (column next hash) (order mode)]\n"
-	"mode,next\n"
+	"[table t (order mode)]\n"
+	">mode, next\n"
 	"a,b\n"
 	"b,a\n"
 	"[machine m (state mode hash (members a b) (initial a))]\n"
