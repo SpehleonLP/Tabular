@@ -394,7 +394,8 @@ struct laid_pick
 // lies inside every plain band of its rows; an edge row's crossing is tested
 // here, from the table inputs given and their previous values, before its
 // script, as a pick tests bands before scripts.
-laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout, size_t g,
+template<typename Layout>
+laid_pick TryGroup(TableVersion const& version, Layout const& layout, size_t g,
 	std::span<float const> point, std::span<cell const> given, std::span<cell const> before, void const* self,
 	ErrorContext& error)
 {
@@ -445,7 +446,7 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 {
 	TableVersion const&        version = *clause.version;
 	table_def const&           def     = version_access::Def(version);
-	detail::run_layout const&  layout  = clause.runs.layout;
+	detail::frozen_layout const& layout = clause.runs.layout;
 	detail::run_span const     run     = clause.runs.runs[tuple];
 	for (size_t a = 0; a < layout.dims; ++a)
 	{

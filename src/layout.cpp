@@ -138,16 +138,19 @@ run_span LayOut(std::span<interval const> domain, std::span<interval const> boxe
 	return span;
 }
 
-size_t FindGroup(run_layout const& layout, run_span run, uint32_t flags)
+frozen_runs Freeze(kept_runs const& kept)
 {
-	auto const begin = layout.groupFlags.begin() + run.first;
-	auto const end   = begin + run.count;
-	auto       found = std::lower_bound(begin, end, flags);
-	if (found == end || *found != flags)
-	{
-		return SIZE_MAX;
-	}
-	return static_cast<size_t>(found - layout.groupFlags.begin());
+	run_layout const& l = kept.layout;
+	frozen_runs out;
+	out.layout.dims       = l.dims;
+	out.layout.groupFlags = immutable_array<uint32_t>::FromArray(l.groupFlags.data(), l.groupFlags.size());
+	out.layout.cutStart   = immutable_array<uint32_t>::FromArray(l.cutStart.data(), l.cutStart.size());
+	out.layout.cuts       = immutable_array<float>::FromArray(l.cuts.data(), l.cuts.size());
+	out.layout.cellStart  = immutable_array<uint32_t>::FromArray(l.cellStart.data(), l.cellStart.size());
+	out.layout.listStart  = immutable_array<uint32_t>::FromArray(l.listStart.data(), l.listStart.size());
+	out.layout.lists      = immutable_array<uint32_t>::FromArray(l.lists.data(), l.lists.size());
+	out.runs              = immutable_array<run_span>::FromArray(kept.runs.data(), kept.runs.size());
+	return out;
 }
 
 std::optional<std::vector<float>> FirstOpen(run_layout const& layout, std::span<interval const> domain, size_t group)

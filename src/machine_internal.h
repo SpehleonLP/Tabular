@@ -103,7 +103,7 @@ struct prepared_clause
 	counted_ptr<TableVersion const> version;
 	size_t                          tupleCount = 0;
 	immutable_array<int64_t>        tuples;
-	kept_runs                       runs;      // best
+	frozen_runs                     runs;      // best
 	immutable_array<row_span>       rowRuns;   // or, weighted
 	// What a step feeds a best layout: per axis, the table input it reads, and
 	// the input the ranking flags column reads (UINT32_MAX for none).

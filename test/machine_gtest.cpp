@@ -205,7 +205,6 @@ TEST(GrazerMachine, TheRunDirectoryNamesVersionRowsOfEachTuplesRun)
 	ASSERT_TRUE(machine.has_value()) << RefusalOf(machine);
 	detail::prepared_clause const& step = Inside(*machine).lists[size_t(trigger::Step)][0];
 	ASSERT_EQ(step.runs.runs.size(), step.tupleCount);
-	EXPECT_TRUE(step.runs.layout.closed.empty() && step.runs.layout.listed.empty()) << "proof-only arrays are dropped";
 	size_t listedRows = 0;
 	for (size_t t = 0; t < step.tupleCount; ++t)
 	{

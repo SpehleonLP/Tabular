@@ -1090,11 +1090,17 @@ tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def cons
 	detail::check_subject const subject{clause.table, t, rows, standing, "row", "", "", false, "the clause's domain"};
 	if (t.pick == pick_policy::Best)
 	{
-		auto proved = detail::CheckBest(subject, domains, nullptr, report, &out.runs);
+		detail::kept_runs kept;
+		auto proved = detail::CheckBest(subject, domains, nullptr, report, &kept);
 		if (!proved)
 		{
 			return tl::make_unexpected(std::move(proved.error()));
 		}
+		// Proof only: a step reads cuts, groups and lists, never closed or
+		// listed, and the vectors grew by appending, so they hold up to twice
+		// what they use. A prepared clause keeps exact-size copies for the
+		// machine's life.
+		out.runs = detail::Freeze(kept);
 		std::vector<uint32_t> axes;
 		detail::LayoutAxes(t, axes);
 		out.axisInputs = immutable_array<uint32_t>::FromArray(axes.data(), axes.size());
@@ -1146,19 +1152,6 @@ tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def cons
 		}
 	}
 
-	// Proof only: a step reads cuts, groups and lists, never these.
-	std::vector<uint8_t>().swap(out.runs.layout.closed);
-	std::vector<uint8_t>().swap(out.runs.layout.listed);
-	// The layout grew by appending, so its vectors hold up to twice what they
-	// use, and a prepared clause keeps them for the machine's life.
-	detail::run_layout& kept = out.runs.layout;
-	kept.groupFlags.shrink_to_fit();
-	kept.cutStart.shrink_to_fit();
-	kept.cuts.shrink_to_fit();
-	kept.cellStart.shrink_to_fit();
-	kept.listStart.shrink_to_fit();
-	kept.lists.shrink_to_fit();
-	out.runs.runs.shrink_to_fit();
 	return out;
 }
 

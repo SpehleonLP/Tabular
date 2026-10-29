@@ -6,6 +6,9 @@
 // by reading it, and a machine's Prepare keeps it as the compiled pick. Not a
 // public header.
 
+#include "Support/shared_array.hpp"
+
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -91,6 +94,30 @@ struct kept_runs
 	std::vector<run_span> runs;
 };
 
+// What a prepared clause keeps of kept_runs for its life: the same arrays,
+// exact-size and immutable, without the proof-only ones. Steps read it through
+// the same member names, so FindGroup and the pick take either.
+struct frozen_layout
+{
+	size_t                    dims = 0;
+	immutable_array<uint32_t> groupFlags;
+	immutable_array<uint32_t> cutStart;
+	immutable_array<float>    cuts;
+	immutable_array<uint32_t> cellStart;
+	immutable_array<uint32_t> listStart;
+	immutable_array<uint32_t> lists;
+};
+
+struct frozen_runs
+{
+	frozen_layout             layout;
+	immutable_array<run_span> runs;
+};
+
+// Copies kept's arrays at their exact sizes; a Prepare-time cost, paid once
+// per clause.
+frozen_runs Freeze(kept_runs const& kept);
+
 // Empties layout, keeping its allocations: no runs, the "one end" entries at 0.
 void Clear(run_layout& layout);
 
@@ -106,7 +133,18 @@ run_span LayOut(std::span<interval const> domain, std::span<interval const> boxe
 
 // The group of run whose rows have flags, as an index into the layout, or
 // SIZE_MAX when no row of the run has them.
-size_t FindGroup(run_layout const& layout, run_span run, uint32_t flags);
+template<typename Layout>
+size_t FindGroup(Layout const& layout, run_span run, uint32_t flags)
+{
+	auto const begin = layout.groupFlags.begin() + run.first;
+	auto const end   = begin + run.count;
+	auto       found = std::lower_bound(begin, end, flags);
+	if (found == end || *found != flags)
+	{
+		return SIZE_MAX;
+	}
+	return static_cast<size_t>(found - layout.groupFlags.begin());
+}
 
 // The lowest input of domain that group's lists leave open (no list there ends
 // in a row that is not conditional), or none. A missing group (SIZE_MAX) closes
