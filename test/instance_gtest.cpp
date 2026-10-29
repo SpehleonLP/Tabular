@@ -1,13 +1,13 @@
 #include <gtest/gtest.h>
 #include "../src/machine_internal.h"
 #include "Support/allocationtestingsupport.h"
+#include "tabular/document.h"
 #include "tabular/draw.h"
 #include "tabular/instance.h"
 #include "tabular/machine.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <array>

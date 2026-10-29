@@ -256,7 +256,7 @@ struct table_def
 	pick_policy                  pick      = pick_policy::None;
 	uint32_t                     output    = UINT32_MAX;
 	uint32_t                     ranking   = UINT32_MAX;   // the Flags column with an input
-	uint32_t                     key_count = 0;            // columns with key: true
+	uint32_t                     key_count = 0;            // key columns
 	uint32_t                     pivot_headers = UINT32_MAX;
 	uint32_t                     pivot_cells   = UINT32_MAX;
 	bool                         is_grid       = false;

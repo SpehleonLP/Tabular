@@ -40,7 +40,7 @@ struct DocumentStorage
 	std::vector<section_rows>    rows;
 	// Every table's name, by table number, so rows can be refused a store built
 	// from another schema.
-	std::vector<std::string>     tableNames;
+	std::vector<std::string>     table_names;
 	std::vector<machine_storage> machines;
 	std::vector<create_machine>  commands;
 	// A machine body's cells, which its clauses' names view; a deque keeps each

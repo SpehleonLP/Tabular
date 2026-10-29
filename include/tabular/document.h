@@ -44,22 +44,30 @@ struct schema_document
 	std::unique_ptr<DocumentStorage> storage;   // what machines() and rows() view
 };
 
-// A .tabular file. Bracket lines are s-expressions that declare:
+// A .tabular file. A line starting with `[` declares a table, a grid or a
+// machine with s-expressions, and the CSV lines beneath it are its rows (a
+// machine's, its clauses). A line starting with `#` is a note. This exact text
+// is read by Document.TheHeaderCommentsExampleIsAValidFile:
 //
-//   [table spawn_points
-//     (key package hash (domain rows))     # (key|column name type [(domain ..)] [fallthrough] [(input t)] [edge])
-//     (column x double)
-//     (input t double 0..1 cyclic)         # range and cyclic optional
-//     (pick best)                          # none given: best; also all, none, (or out), (weighted w)
-//     (order package unique)
-//     (suffix command) (pivot headers cells)]
-//   package,x                              # the CSV body under a bracket: its rows
-//   meadow,1.5
+//   [table grazer_brain
+//     (key mode hash (domain (members idle walk)))
+//     (column next hash)
+//     (order mode)
+//     (suffix command)]
+//   mode,next,command
+//   idle,walk,go
+//   walk,idle,stop
 //
 //   [grid g (rows r int) (columns c int) (cells int)]
-//   [machine grazer (state mode hash (members idle walk) (initial idle)) (input event hash)]
-//   list,from,where,given,set,emit,overrides      # a machine's body: its clauses
-//   step,grazer_brain,mode=state.mode kind=input.event,,mode=next,,
+//
+//   [machine grazer (state mode hash (members idle walk) (initial idle))]
+//   list,from,where,given,set,emit,overrides
+//   step,grazer_brain,mode=state.mode,,mode=next,command,
+//
+// A table takes (key|column name type [(domain rows|(members ..)|(from t c))]
+// [fallthrough] [(input t)] [edge]), (input name type [lo..hi] [cyclic]),
+// (pick none|best|all), (pick or col), (pick weighted col), (order cols.. [unique]),
+// (suffix name) and (pivot headers cells); with no (pick) it is best.
 //
 // Every table a file declares is read-only: a reload loads a new version.
 // label names the source in errors; an error's message carries no position, and

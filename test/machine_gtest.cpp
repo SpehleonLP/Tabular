@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 #include "../src/machine_internal.h"
 #include "../src/relation_internal.h"
+#include "tabular/document.h"
 #include "tabular/machine.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <algorithm>

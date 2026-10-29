@@ -91,7 +91,7 @@ tl::expected<void, ErrorContext> LoadDocumentRows(relation_store& store, schema_
 	{
 		// The rows were read for the document's own schema; a store built from
 		// another would take them into the wrong table, or past its end.
-		std::string const& declared = document.storage->tableNames[body.table];
+		std::string const& declared = document.storage->table_names[body.table];
 		if (body.table >= tables.size() || tables[body.table].name != declared)
 		{
 			return tl::make_unexpected(ErrorContext("the document's table '", declared, "' (number ", body.table,

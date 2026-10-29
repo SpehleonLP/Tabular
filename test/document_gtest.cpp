@@ -996,3 +996,57 @@ TEST(Document, ADomainCycleNamesALine)
 	EXPECT_TRUE(Mentions(s.error().format(), "cycle")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular:2")) << s.error().format();
 }
+
+TEST(Document, AnUnclosedQuoteInABodyDoesNotSwallowTheNextSection)
+{
+	auto d = ReadDocument("[table t (key k hash (domain rows)) (order k)]\nk\n\"open\n[table u (column v int) (pick none)]\n", "t.tabular");
+	ASSERT_FALSE(d.has_value());
+	EXPECT_EQ(Where(d.error()), "t.tabular:3") << d.error().format();
+}
+
+TEST(Document, ATableWithOnlyAHeaderLineHasNoRows)
+{
+	constexpr std::string_view headerOnly = "[table t (key k hash (domain rows)) (column v int) (order k)]\nk,v\n# a note\n,\n\n";
+	auto s = ReadSchema(headerOnly, "t.tabular");
+	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
+	auto d = ReadDocument(headerOnly, "t.tabular");
+	ASSERT_TRUE(d.has_value());
+	EXPECT_TRUE(d->rows().empty());
+
+	// A comment is a row whose first unquoted character is '#': a comma before
+	// it makes a row, as csv_text reads it.
+	auto row = ReadSchema("[table t (key k hash (domain rows)) (column v int) (order k)]\nk,v\n,# x\n", "t.tabular");
+	EXPECT_FALSE(row.has_value());
+}
+
+TEST(Document, AGridsHeaderLineIsPartOfItsBody)
+{
+	auto d = ReadDocument("[grid g (rows r int) (columns c int) (cells int)]\nr,1\n", "g.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->rows().size(), 1u);
+	EXPECT_FALSE(ReadSchema("[grid g (rows r int) (columns c int) (cells int)]\nr,1\n", "g.tabular").has_value());
+}
+
+// The example in document.h's header comment, as written there.
+TEST(Document, TheHeaderCommentsExampleIsAValidFile)
+{
+	constexpr std::string_view example = R"([table grazer_brain
+  (key mode hash (domain (members idle walk)))
+  (column next hash)
+  (order mode)
+  (suffix command)]
+mode,next,command
+idle,walk,go
+walk,idle,stop
+
+[grid g (rows r int) (columns c int) (cells int)]
+
+[machine grazer (state mode hash (members idle walk) (initial idle))]
+list,from,where,given,set,emit,overrides
+step,grazer_brain,mode=state.mode,,mode=next,command,
+)";
+	auto d = ReadDocument(example, "example.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->machines().size(), 1u);
+	EXPECT_EQ(d->rows().size(), 1u);
+}

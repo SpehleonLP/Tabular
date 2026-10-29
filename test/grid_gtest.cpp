@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
+#include "tabular/document.h"
 #include "tabular/grid.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 
 #include <string>
 #include <string_view>

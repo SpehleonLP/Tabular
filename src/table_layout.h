@@ -34,7 +34,7 @@ inline char const* TypeName(column_type type)
 	return "unknown type";
 }
 
-// Whether column of def is its fall-through key (fallthrough: true): its 0 is
+// Whether column of def is its fall-through key (`fallthrough` in a file): its 0 is
 // the blank run's, not a value.
 inline bool IsFallThroughKey(table_def const& def, uint32_t column)
 {

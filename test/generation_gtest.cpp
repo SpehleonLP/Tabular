@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
+#include "tabular/document.h"
 #include "tabular/grid.h"
 #include "tabular/relation.h"
-#include "tabular/document.h"
 
 #include <string>
 #include <string_view>

@@ -140,3 +140,18 @@ TEST(DocumentSections, HeaderErrorsUseTheFileLabel)
 	ASSERT_FALSE(sections.has_value());
 	EXPECT_EQ(sections.error().context[0], "t.tabular:2") << sections.error().format();
 }
+
+TEST(DocumentSections, AFileEndingInsideAQuoteIsRefusedNamingTheQuotesLine)
+{
+	// Without the check the quote swallows [table u ...] as a continuation line.
+	std::string_view const text =
+		"[table t (key k hash)]\n"
+		"k\n"
+		"\"never closed\n"
+		"[table u (key k hash)]\n"
+		"k\n";
+	auto sections = SplitSections(text, "t.tabular");
+	ASSERT_FALSE(sections.has_value());
+	ASSERT_EQ(sections.error().context.size(), 1u);
+	EXPECT_EQ(sections.error().context[0], "t.tabular:3") << sections.error().format();
+}

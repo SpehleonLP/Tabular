@@ -3,10 +3,11 @@
 
 // The tree form of a bracket line's s-expression. Not a public header.
 //
-// command_text.h's lexer stays as it is: it checks the shape of a command that
-// runs across CSV cells. This reads one declaration into a tree, which is a
-// different job, but the lexical rules are the same (parentheses, double-quoted
-// strings with \" and \\ escapes, atoms split on whitespace).
+// command_text.h's lexer is separate on purpose: it lexes incrementally across
+// the CSV cells of one command, so a command may run on past a cell's end. This
+// reads one declaration whole into a tree. The lexical rules are the same
+// (parentheses, double-quoted strings with \" and \\ escapes, atoms split on
+// whitespace).
 
 #include "Errors/errorcontext.h"
 

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
+#include "tabular/document.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 #include "probe_closure.h"
 
@@ -204,9 +204,9 @@ TEST(KeyDomain, DomainsTakenFromOtherTablesFormNoCycle)
 	EXPECT_TRUE(Mentions(RefusalOf(own), "cycle: 'a' -> 'a'")) << RefusalOf(own);
 }
 
-// ---- YAML -------------------------------------------------------------------
+// ---- File -------------------------------------------------------------------
 
-TEST(KeyDomainYaml, TheThreeFormsRead)
+TEST(KeyDomainFile, TheThreeFormsRead)
 {
 	auto s = ReadSchema(R"(
 [table display (column display hash) (pick none)]
@@ -236,7 +236,7 @@ TEST(KeyDomainYaml, TheThreeFormsRead)
 	EXPECT_EQ(d.column, 0u);
 }
 
-TEST(KeyDomainYaml, AMalformedDomainIsRefused)
+TEST(KeyDomainFile, AMalformedDomainIsRefused)
 {
 	auto with = [](std::string_view domain)
 	{

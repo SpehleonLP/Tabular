@@ -1,11 +1,11 @@
 #include "budgets.h"
 
+#include "tabular/document.h"
 #include "tabular/instance.h"
 #include "tabular/machine.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 #include "Support/strings.h"
 #include "cityhash/src/city.h"
 

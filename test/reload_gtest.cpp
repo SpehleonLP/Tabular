@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 #include "Support/allocationtestingsupport.h"
+#include "tabular/document.h"
 #include "tabular/instance.h"
 #include "tabular/machine.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <cstdint>

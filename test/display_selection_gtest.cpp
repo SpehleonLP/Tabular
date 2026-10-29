@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
+#include "tabular/document.h"
 #include "tabular/pick.h"
 #include "tabular/relation.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <string>

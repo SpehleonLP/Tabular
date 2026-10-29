@@ -84,8 +84,8 @@ Within equal order keys, a versioned table sorts rows by owner id and then by po
 
 ### Ordering and lookups
 
-- `order_by {columns, unique}` sets the row order. A unique order refuses a duplicate key instead of overwriting it, so two contributors claiming one key becomes a visible error.
-- `Find(table, keyColumn, value | text)` is an index lookup on `key: true` columns. It is not a scan.
+- `(order cols.. [unique])` sets the row order. A unique order refuses a duplicate key instead of overwriting it, so two contributors claiming one key becomes a visible error.
+- `Find(table, keyColumn, value | text)` is an index lookup on key columns. It is not a scan.
 - `FindOrdered(table, prefix)` binary-searches the leading order columns.
 
 The store is single-threaded. A `Load` or `Retract` that races with a `Version()` call from another thread is a data race.
@@ -112,7 +112,7 @@ Each key of a `best` table must declare a **domain**: the key values the table p
 - `members`: a literal list.
 - `{table, column}`: the distinct values another table's column currently holds. Domains that depend on each other in a cycle are refused.
 - `rows`: the key tuples the table's own rows name.
-- **fall-through** (`fallthrough: true` on the column, in place of a domain): an open hash key. A value no run is keyed on falls through to the blank run (key 0). Up to eight per table; a miss retries with fall-through keys blanked in key order, the first fall-through key being the lowest bit, so `(sub, kind)` tries `(0, kind)`, then `(sub, 0)`, then `(0, 0)`. The run with every fall-through key blank is required.
+- **fall-through** (`fallthrough` on the column, in place of a domain): an open hash key. A value no run is keyed on falls through to the blank run (key 0). Up to eight per table; a miss retries with fall-through keys blanked in key order, the first fall-through key being the lowest bit, so `(sub, kind)` tries `(0, kind)`, then `(sub, 0)`, then `(0, 0)`. The run with every fall-through key blank is required.
 
 A change that brings rows is refused unless the version it would publish meets all of these conditions:
 
@@ -132,7 +132,7 @@ The proof is computed on a flat **run layout** (`src/layout.h`). Each run is gro
 
 ### Grids
 
-A grid table (`grid: {rows, columns, cells}`) is a dense 2D array keyed by `Hash` or `Int` on each axis. Every cell must be filled. Its cells hold one value type, `String` or `Command`. It is loaded whole by one owner and read through `GridVersion` with `RowOf`, `ColumnOf` and `At`.
+A grid (`[grid g (rows r type) (columns c type) (cells type)]`) is a dense 2D array keyed by `Hash` or `Int` on each axis. Every cell must be filled. Its cells hold one value type, `String` or `Command`. It is loaded whole by one owner and read through `GridVersion` with `RowOf`, `ColumnOf` and `At`.
 
 ---
 
@@ -160,7 +160,7 @@ list,from,where,given,set,emit,overrides
 step,grazer_brain,mode=state.mode,energy=input.energy,mode=next,,
 ```
 
-With no `(pick ..)` a table is `best`. A table takes `(key|column name type ..)`, `(input name type [lo..hi] [cyclic])`, `(pick none|best|all|(or col)|(weighted col))`, `(order cols.. [unique])`, `(suffix name)` and `(pivot headers cells)`. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
+With no `(pick ..)` a table is `best`. A table takes `(key|column name type ..)`, `(input name type [lo..hi] [cyclic])`, `(pick none|best|all)`, `(pick or col)` or `(pick weighted col)`, `(order cols.. [unique])`, `(suffix name)` and `(pivot headers cells)`. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
 
 Column types are `hash`, `flags`, `int`, `double`, `condition`, `command`, `vec2`, `string` and `band`.
 
@@ -230,7 +230,7 @@ An instance's own messages never come back into its own machine; the host routes
 A hierarchical state machine is an outer join, and can be written two ways that compile to the same thing:
 
 - **One table**, with fall-through on the substate key: a substate with no row of its own falls through to the superstate's blank row.
-- **Two tables**, with `overrides: <n>` on the second clause. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as it uses `domain: rows` (a `members:` domain is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. The two **give way level by level**: at each blanking of the base's fall-through keys the override is tried first, then the base, so the more specific row wins and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the substate's `(rest, sleep, _)`; that is the one-table order with keys `(super, sub, kind)`. So the override falls through on each of the base's fall-through keys, from the same source, and its own fall-through keys give way first. Overrides are hierarchy within a package: a package can't see another's tables.
+- **Two tables**, with the `overrides` cell of the second clause set to `<n>`. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as it uses `(domain rows)` (a `(domain (members ..))` domain is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. The two **give way level by level**: at each blanking of the base's fall-through keys the override is tried first, then the base, so the more specific row wins and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the substate's `(rest, sleep, _)`; that is the one-table order with keys `(super, sub, kind)`. So the override falls through on each of the base's fall-through keys, from the same source, and its own fall-through keys give way first. Overrides are hierarchy within a package: a package can't see another's tables.
 
 **Entry and exit run per column.** An entry or exit clause runs only when a state column its `where:` reads changed. Clauses that read one another, and an override with its base, run as one group. Creation, `Rebind` and `Close` run their lists whole.
 

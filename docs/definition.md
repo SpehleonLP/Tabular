@@ -231,7 +231,8 @@ through an input, and only a best table ranks:
 - a table with no pick that declares `inputs` (or a band or ranking column that would need
   one) is refused: it is written and never read;
 - an all or an or table with a ranking column (a flags column reading an input) is refused;
-- an all, or or weighted table, or a grid, declared writable (`read_only: false`) is refused.
+- an all, or or weighted table, or a grid, declared writable is refused by the builder
+  (`create_table::read_only` false); a file cannot declare one, since every file table is read-only.
   A best table may be mutable (2026-10-18): the display relations are engine data that
   contributors insert into and that a pick must always answer (R2). No case is known for a
   mutable table of the other picks, and lifting the refusal later breaks no file.
@@ -340,7 +341,7 @@ refuses a document with machines rather than drop them). It holds:
 
 A **source** is a state column (`state.mode`), a machine input (`input.energy`), a value column
 of the row an earlier clause of the same list picked (`clause.0.mood`), or a literal
-(`{literal: scared}`, read as a cell of the target's type; a literal is a scalar). A literal
+(`(literal scared)`, read as a cell of the target's type). A literal
 given to a ranged double input must be finite and inside the range (R12: a pick's clamp has no
 place for NaN, and a constant outside the range is a mistake, not a value to clamp). A clause
 may name only earlier
@@ -598,7 +599,7 @@ compile to one internal table (owner, 2026-10-19).
   replaces that clause's in the results; an override with no emit replaces only the columns it
   sets, so the overridden clause's command goes out with the override's state. The override
   table's own load still checks it total over its declared domain, so a partial override
-  declares its keys `domain: rows` (its domain is the keys it has); one declaring `members:`
+  declares its keys `(domain rows)` (its domain is the keys it has); one declaring `(domain (members ..))`
   must have a run for every member. Provenance records the overridden clause as `Answered`
   with its own row; the override's entry, next, shows the replacement. The override runs only when the clause it overrides
   answered (a hold stands: there is nothing to coalesce onto), and keys on the state that
@@ -760,7 +761,7 @@ compiled the other way fails to link rather than reading another layout.
   probability, and nothing is tested before drawing. When a roll needs a condition, an
   earlier table in the DAG computes a key for it. This restriction can be lifted later
   without breaking files; adding it later could not.
-  Built (2026-10-18): `pick: weighted` with `weight: <double column>`. The schema refuses a
+  Built (2026-10-18): `(pick weighted w)`, w a double column. The schema refuses a
   condition column and any declared input (a band or a ranking flags column can only read an
   input, so refusing inputs refuses them), a missing weight or one that is not a double, a
   `weight` on a table that is not weighted, and a weighted table that is not read-only or
@@ -826,7 +827,7 @@ largest float below `hi`, so the top value is in the top band), and a band reach
 input's range is refused. A pick given NaN for a ranged input is refused, in every policy: a
 clamp has no place for NaN (owner, 2026-10-18).
 
-**Cyclic inputs (owner, 2026-10-19).** A ranged double input may declare `cyclic: true`
+**Cyclic inputs (owner, 2026-10-19).** A ranged double input may declare `cyclic`
 (`add_input::cyclic`): its range is a period, as an animation phase's `0..1` is. A pick wraps
 the input into `[lo, hi)` instead of clamping it, so 1.52 on `0..1` is 0.52 and 7 is 0, and a
 value that is not finite is refused, since a period has no place for an infinity either. A band
@@ -1037,11 +1038,13 @@ script and every input point lies in one row of its cell, so each clause tries e
 a *row evaluated* is a clause run, and a scripted row adds its host condition's own cost. Steps
 run 1,000 instances × 50 ticks, inputs varying per instance and tick from a table.
 
+The three "build a definition" rows were measured on 2026-10-28 with the file reader, with the machine's load average around 1.4; the others are earlier measurements.
+
 | Benchmark | Measured | Budget |
 |---|---|---|
-| build a definition: grazer | 194 to 258 us | 1200 us |
-| build a definition: per row | 0.85 to 0.89 us | 1.8 us |
-| build a definition: brain machine | 207,100 bytes | 260000 bytes |
+| build a definition: grazer | 67.45 us | 1200 us |
+| build a definition: per row | 0.68 us | 1.8 us |
+| build a definition: brain machine | 207,300 bytes | 260000 bytes |
 | bind: grazer | 0.89 to 0.91 us | 1.8 us |
 | bind: brain | 71 to 73 us | 150 us |
 | bind: grazer binding | 993 bytes | 1300 bytes |
@@ -1102,7 +1105,7 @@ changed through the table's generation counter (see Generation).
 2. **File front end** (built: `tabular/document.h`): a `.tabular` file of bracket declarations
    becomes those commands. `[table name ..]` takes `(key|column name type ..)` (a key's `(domain ..)`,
    `fallthrough`, `(input t)` and `edge`; see Key domains), `(input name type [lo..hi] [cyclic])`,
-   `(pick none|best|all|(or col)|(weighted col))`, `(order cols.. [unique])`, `(suffix name)` (the
+   `(pick none|best|all)`, `(pick or col)`, `(pick weighted col)`, `(order cols.. [unique])`, `(suffix name)` (the
    trailing command column, see Suffix) and `(pivot headers cells)`; types are hash, flags, int,
    double, condition, command, vec2, string, band. `[grid g (rows r type) (columns c type) (cells type)]`
    is a grid. `[machine ..]` declares state and inputs, and its CSV body is the clauses. A CSV body

@@ -71,11 +71,14 @@ struct table_build
 	grid_shape                    grid;
 };
 
-// Whether a body has any row: a line that is not blank, not a comment, and not
-// nothing but separators (a spreadsheet's empty row).
-bool HasRows(std::string_view body)
+// Whether a body has any row. A table's first record is its header, so it needs
+// a second; a grid's header is part of the grid, so one record is rows. A
+// record is skipped as csv_text skips it: blank, nothing but separators (a
+// spreadsheet's empty row), or a first unquoted character of '#'.
+bool HasRows(std::string_view body, bool headerIsData)
 {
-	size_t at = 0;
+	size_t records = 0;
+	size_t at      = 0;
 	while (at < body.size())
 	{
 		size_t end = body.find('\n', at);
@@ -84,14 +87,15 @@ bool HasRows(std::string_view body)
 			end = body.size();
 		}
 		std::string_view const line = body.substr(at, end - at);
-		size_t const first = line.find_first_not_of(", \t\r");
-		if (first != std::string_view::npos && line[first] != '#')
+		size_t const first = line.find_first_not_of(" \t\r");
+		size_t const data  = line.find_first_not_of(", \t\r");
+		if (first != std::string_view::npos && line[first] != '#' && data != std::string_view::npos)
 		{
-			return true;
+			++records;
 		}
 		at = end + 1;
 	}
-	return false;
+	return records > (headerIsData ? 0u : 1u);
 }
 
 // `(key name type ...)` and its kin: the option's head word, for refusals.
@@ -599,10 +603,9 @@ tl::expected<std::string_view, ErrorContext> DeclaredName(sexpr const& item, Doc
 	{
 		return name;
 	}
-	if (item.what == sexpr::kind::String || name->find_first_of(" \t\r\n") != std::string_view::npos)
+	if (item.what == sexpr::kind::String)
 	{
-		return Refuse(label, item.line, what, " '", *name,
-			"' is quoted or holds whitespace; a declared name is a bare word, since a clause cell cannot refer to any other");
+		return Refuse(label, item.line, what, " '", *name, "' is quoted; a declared name is a bare word");
 	}
 	return name;
 }
@@ -715,7 +718,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			return tl::make_unexpected(std::move(name.error()));
 		}
 		build.name = *name;
-		storage.tableNames.push_back(std::string(*name));
+		storage.table_names.push_back(std::string(*name));
 		headerLines.push_back(header.line);
 		if (isGrid)
 		{
@@ -781,7 +784,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		commands.push_back(create_table{build.name, build.columns, build.ordered ? &build.order : nullptr, true,
 			build.inputs, build.pick, build.outputColumn, build.pivoted ? &build.pivot : nullptr,
 			isGrid ? &build.grid : nullptr, build.suffix, build.weightColumn});
-		if (HasRows(section.body))
+		if (HasRows(section.body, isGrid))
 		{
 			storage.rows.push_back(section_rows{static_cast<uint32_t>(commands.size() - 1), section.body, section.body_line});
 		}

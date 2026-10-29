@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
+#include "tabular/document.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <span>
@@ -356,7 +356,7 @@ TEST(SuffixSchema, AQuotedSuffixNameIsRefused)
 	auto s = ReadSchema(schema, "blank.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "the suffix's name")) << s.error().format();
-	EXPECT_TRUE(Mentions(s.error().format(), "is quoted or holds whitespace; a declared name is a bare word"))
+	EXPECT_TRUE(Mentions(s.error().format(), "is quoted; a declared name is a bare word"))
 		<< s.error().format();
 }
 

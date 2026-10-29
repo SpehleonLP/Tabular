@@ -99,9 +99,11 @@ tl::expected<bracket_end, ErrorContext> FindClose(std::string_view text, size_t 
 }
 
 // csv_text's quoting rule: a '"' opens a quoted cell only at a cell's start, and
-// inside one a doubled quote is a quote. Returns the quote state at the line's end.
-bool ScanCsvLine(std::string_view line, bool inQuote)
+// inside one a doubled quote is a quote. Returns the quote state at the line's end;
+// opened says a quote opened on this line and is the one still open, if any.
+bool ScanCsvLine(std::string_view line, bool inQuote, bool& opened)
 {
+	opened = false;
 	bool atCellStart = !inQuote;
 	for (size_t i = 0; i < line.size(); ++i)
 	{
@@ -127,6 +129,7 @@ bool ScanCsvLine(std::string_view line, bool inQuote)
 		else if (c == '"' && atCellStart)
 		{
 			inQuote     = true;
+			opened      = true;
 			atCellStart = false;
 		}
 		else if (!IsBlank(c))
@@ -148,6 +151,7 @@ tl::expected<std::vector<section>, ErrorContext> SplitSections(std::string_view 
 	uint32_t line     = 1;
 	size_t   bodyFrom = 0;
 	bool     inQuote  = false;
+	uint32_t quoteLine = 0;
 	if (text.starts_with("\xEF\xBB\xBF"))
 	{
 		pos      = 3;
@@ -233,9 +237,18 @@ tl::expected<std::vector<section>, ErrorContext> SplitSections(std::string_view 
 				continue;
 			}
 		}
-		inQuote = ScanCsvLine(row, inQuote);
+		bool opened = false;
+		inQuote     = ScanCsvLine(row, inQuote, opened);
+		if (opened)
+		{
+			quoteLine = line;
+		}
 		pos     = eol == std::string_view::npos ? text.size() : eol + 1;
 		++line;
+	}
+	if (inQuote)
+	{
+		return tl::make_unexpected(ErrorContext("a quoted cell is never closed; the file ends inside it").with(at(quoteLine)));
 	}
 	closeBody(text.size());
 	return sections;
