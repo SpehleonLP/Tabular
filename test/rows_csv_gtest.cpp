@@ -519,3 +519,31 @@ TEST(RowsCsv, ALoadFillsTheReportWithItsOrphans)
 	EXPECT_FALSE(LoadCsv(store, bad).has_value());
 	EXPECT_TRUE(report.empty()) << "a refused load, refused before the store sees it, leaves the report empty too";
 }
+
+TEST(RowsCsv, RecordLinesNameTheSourceLineOfARefusedRow)
+{
+	relation_store store = Store();
+	uint32_t const lines[] = {10, 40, 41};
+	csv_rows rows{0, 1,
+		"package,section,mask,x,on_spawn\n"
+		"a,1,0,0,()\n"
+		"b,notanumber,0,0,()\n", "spawn.csv"};
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "spawn.csv:41")) << loaded.error().format();
+}
+
+TEST(RowsCsv, RecordLinesOfTheWrongCountAreRefused)
+{
+	relation_store store = Store();
+	uint32_t const lines[] = {10, 40};
+	csv_rows rows{0, 1,
+		"package,section,mask,x,on_spawn\n"
+		"a,1,0,0,()\n"
+		"b,2,0,0,()\n", "spawn.csv"};
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(store.RowCount(0), 0u);
+}

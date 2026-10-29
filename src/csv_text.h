@@ -16,6 +16,7 @@
 #include <expected/include/tl/expected.hpp>
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,11 @@ public:
 	// the author can find.
 	static tl::expected<csv_text, ErrorContext> Read(std::string_view text, std::string_view label,
 		uint32_t first_line = 1);
+	// The same, except that record i (blank and comment rows are not records)
+	// starts on record_lines[i]: text compiled from a file names the lines the
+	// author wrote. Refused when the text has another number of records.
+	static tl::expected<csv_text, ErrorContext> Read(std::string_view text, std::string_view label,
+		std::span<uint32_t const> record_lines);
 
 	size_t rows() const { return _rows.size(); }
 	// The cells row has, padding included.

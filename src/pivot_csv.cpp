@@ -154,7 +154,8 @@ tl::expected<void, ErrorContext> LoadPivotedCsv(relation_store& store, csv_rows 
 	uint32_t const               valueCount = layout.valueCount;
 	column_def const&            cells      = def.columns[def.pivot_cells];
 
-	auto read = csv_text::Read(command.text, command.label, command.first_line);
+	auto read = command.record_lines.empty() ? csv_text::Read(command.text, command.label, command.first_line)
+		: csv_text::Read(command.text, command.label, command.record_lines);
 	if (!read)
 	{
 		return tl::make_unexpected(std::move(read.error()));

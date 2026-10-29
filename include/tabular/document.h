@@ -15,13 +15,16 @@ namespace tabular
 struct DocumentStorage;
 struct create_machine;   // tabular/machine.h, which a caller reading machines() includes
 
-// One table's CSV body from the file, kept for loading. text views into the
-// document's own copy of the file; first_line is the file line text starts on.
+// One table's CSV body, kept for loading. text views into the document; a
+// grid's is its section of the file, from first_line on. A table's is its
+// body compiled to plain CSV, record i of which came from the file line
+// record_lines[i].
 struct section_rows
 {
-	uint32_t         table = 0;
-	std::string_view text;
-	uint32_t         first_line = 1;
+	uint32_t                  table = 0;
+	std::string_view          text;
+	uint32_t                  first_line = 1;
+	std::span<uint32_t const> record_lines;
 };
 
 // Tables, the machines that read them, and the row text of the tables, from one

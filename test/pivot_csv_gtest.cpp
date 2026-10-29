@@ -335,3 +335,18 @@ TEST(PivotCsv, APivotedLoadFillsTheReportWithItsOrphans)
 	ASSERT_EQ(report[0].key.size(), 1u);
 	EXPECT_EQ(report[0].key[0].i, 2);
 }
+
+TEST(PivotCsv, RecordLinesNameTheSourceLine)
+{
+	relation_store store = StoreFrom(kLookup);
+	uint32_t const lines[] = {10, 40, 41};
+	csv_rows rows{0, 1,
+		"label,None,Injured\n"
+		"1,c1_none,c1_injured\n"
+		"notanumber,c2_none,c2_injured\n", "lookup.csv"};
+	rows.pivoted      = true;
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "lookup.csv:41")) << loaded.error().format();
+}
