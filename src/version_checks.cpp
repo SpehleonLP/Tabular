@@ -414,13 +414,12 @@ bool Meets(interval const* a, interval const* b, size_t dims)
 }
 
 
-std::vector<cell> KeyCells(std::span<int64_t const> tuple)
+immutable_array<cell> KeyCells(std::span<int64_t const> tuple)
 {
-	std::vector<cell> key;
-	key.reserve(tuple.size());
-	for (int64_t v : tuple)
+	shared_array<cell> key(tuple.size());
+	for (size_t i = 0; i < tuple.size(); ++i)
 	{
-		key.push_back(cell::Integer(v));
+		key[i] = cell::Integer(tuple[i]);
 	}
 	return key;
 }

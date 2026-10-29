@@ -322,9 +322,9 @@ enum class run_status : uint8_t
 
 struct run_note
 {
-	uint32_t          table  = 0;
-	run_status        status = run_status::Orphan;
-	std::vector<cell> key;   // the run's key values, in key column order
+	uint32_t              table  = 0;
+	run_status            status = run_status::Orphan;
+	immutable_array<cell> key;   // the run's key values, in key column order
 };
 
 struct insert_row

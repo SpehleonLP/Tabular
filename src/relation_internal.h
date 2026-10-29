@@ -159,15 +159,15 @@ struct TableVersion::Data
 
 struct GridVersion::Data
 {
-	table_def                                 def;
-	uint64_t                                  owner      = 0;
-	uint64_t                                  generation = 0;
-	uint32_t                                  rows       = 0;
-	uint32_t                                  columns    = 0;
-	std::vector<std::pair<int64_t, uint32_t>> rowKeys;      // (key, position), sorted by key
-	std::vector<std::pair<int64_t, uint32_t>> columnKeys;
-	std::vector<cell>                         values;       // value grid: rows * columns, row-major
-	std::vector<counted_string>               strings;      // String or Command grid
+	table_def                                     def;
+	uint64_t                                      owner      = 0;
+	uint64_t                                      generation = 0;
+	uint32_t                                      rows       = 0;
+	uint32_t                                      columns    = 0;
+	immutable_array<std::pair<int64_t, uint32_t>> rowKeys;      // (key, position), sorted by key
+	immutable_array<std::pair<int64_t, uint32_t>> columnKeys;
+	immutable_array<cell>                         values;       // value grid: rows * columns, row-major
+	immutable_array<counted_string>               strings;      // String or Command grid
 };
 
 namespace detail

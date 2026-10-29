@@ -218,7 +218,7 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	for (size_t list = 0; list < kTriggerCount; ++list)
 	{
 		data->answerStart[list] = answers;
-		std::vector<detail::resolved_clause> const& clauses = def.lists[list];
+		shared_array<detail::resolved_clause> const& clauses = def.lists[list];
 		sites.clear();
 		starts.clear();
 		rankStarts.clear();
@@ -236,8 +236,8 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 			}
 			bits += 1 + clauses[i].inputs.size() + scripted;
 			data->emitters += clauses[i].emit != UINT32_MAX ? 1 : 0;
-			data->maxKeys   = std::max(data->maxKeys, clauses[i].keys.size());
-			data->maxInputs = std::max(data->maxInputs, clauses[i].inputs.size());
+			data->maxKeys   = std::max(data->maxKeys, size_t(clauses[i].keys.size()));
+			data->maxInputs = std::max(data->maxInputs, size_t(clauses[i].inputs.size()));
 			data->maxAxes   = std::max(data->maxAxes, pc.runs.layout.dims);
 		}
 		data->sites[list]       = immutable_array<uint64_t>::FromArray(sites.data(), sites.size());
@@ -929,7 +929,7 @@ void Emit(instance& subject, trigger list)
 	size_t&                     count   = instance_access::EmittedCount(subject);
 	machine_access::Data const&       machine = machine_access::Of(*binding.machine);
 	std::vector<clause_answer> const& answers = instance_access::Answers(subject);
-	std::vector<resolved_clause> const& clauses = machine.def.lists[size_t(list)];
+	shared_array<resolved_clause> const& clauses = machine.def.lists[size_t(list)];
 	for (size_t i = 0; i < clauses.size(); ++i)
 	{
 		clause_answer const& answer = answers[binding.answerStart[size_t(list)] + i];
@@ -1185,7 +1185,7 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	migrated.reserve(to.state.size());
 	for (detail::state_column const& column : to.state)
 	{
-		migrated.push_back(Migrated(column, from.state, current));
+		migrated.push_back(Migrated(column, std::span<detail::state_column const>(from.state.begin(), from.state.size()), current));
 	}
 	std::vector<std::optional<cell>> carried;
 	carried.reserve(to.inputs.size());

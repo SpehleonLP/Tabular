@@ -46,9 +46,9 @@ bool IsScalarValue(column_type type)
 		|| type == column_type::Double;
 }
 
-tl::expected<std::vector<input_def>, ErrorContext> ResolveInputs(create_machine const& m)
+tl::expected<shared_array<input_def>, ErrorContext> ResolveInputs(create_machine const& m)
 {
-	std::vector<input_def> out;
+	shared_array<input_def> out(m.inputs.size());
 	for (uint32_t i = 0; i < m.inputs.size(); ++i)
 	{
 		add_input const& in = m.inputs[i];
@@ -56,9 +56,9 @@ tl::expected<std::vector<input_def>, ErrorContext> ResolveInputs(create_machine 
 		{
 			return tl::make_unexpected(ErrorContext("input ", i, " needs a name"));
 		}
-		for (input_def const& earlier : out)
+		for (uint32_t e = 0; e < i; ++e)
 		{
-			if (earlier.name == in.name)
+			if (out[e].name == in.name)
 			{
 				return tl::make_unexpected(ErrorContext("input '", in.name, "' is declared twice"));
 			}
@@ -85,14 +85,14 @@ tl::expected<std::vector<input_def>, ErrorContext> ResolveInputs(create_machine 
 			return tl::make_unexpected(ErrorContext("input '", in.name,
 				"' of the machine is cyclic; a table input whose bands read it declares that"));
 		}
-		out.push_back(input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi});
+		out[i] = input_def{std::string(in.name), in.type, in.ranged, in.lo, in.hi};
 	}
 	return out;
 }
 
-tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machine const& m)
+tl::expected<shared_array<state_column>, ErrorContext> ResolveState(create_machine const& m)
 {
-	std::vector<state_column> out;
+	shared_array<state_column> out(m.state.size());
 	for (uint32_t i = 0; i < m.state.size(); ++i)
 	{
 		add_state const& in = m.state[i];
@@ -100,14 +100,17 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 		{
 			return tl::make_unexpected(ErrorContext("state column ", i, " needs a name"));
 		}
-		for (state_column const& earlier : out)
+		for (uint32_t e = 0; e < i; ++e)
 		{
-			if (earlier.name == in.name)
+			if (out[e].name == in.name)
 			{
 				return tl::make_unexpected(ErrorContext("state column '", in.name, "' is declared twice"));
 			}
 		}
-		state_column column{std::string(in.name), in.type, {}, in.initial};
+		state_column& column = out[i];
+		column.name    = std::string(in.name);
+		column.type    = in.type;
+		column.initial = in.initial;
 		if (in.type == column_type::Int || in.type == column_type::Double)
 		{
 			if (!in.members.empty())
@@ -115,7 +118,6 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 				return tl::make_unexpected(ErrorContext("state column '", in.name, "' is an ", TypeName(in.type),
 					" and lists members; only a hash state column has members"));
 			}
-			out.push_back(std::move(column));
 			continue;
 		}
 		if (in.type != column_type::Hash)
@@ -128,14 +130,15 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 			return tl::make_unexpected(ErrorContext("hash state column '", in.name,
 				"' lists no members; its value is always one of them"));
 		}
-		for (cell const& member : in.members)
+		column.members = shared_array<int64_t>(in.members.size());
+		for (size_t m = 0; m < in.members.size(); ++m)
 		{
-			if (!Fits32(member.i))
+			if (!Fits32(in.members[m].i))
 			{
 				return tl::make_unexpected(ErrorContext("state column '", in.name,
-					"' lists a member that is not a 32-bit hash: ", member.i));
+					"' lists a member that is not a 32-bit hash: ", in.members[m].i));
 			}
-			column.members.push_back(member.i);
+			column.members[m] = in.members[m].i;
 		}
 		std::sort(column.members.begin(), column.members.end());
 		auto twice = std::adjacent_find(column.members.begin(), column.members.end());
@@ -148,7 +151,6 @@ tl::expected<std::vector<state_column>, ErrorContext> ResolveState(create_machin
 			return tl::make_unexpected(ErrorContext("state column '", in.name, "' starts at ", in.initial.i,
 				", which is not one of its members"));
 		}
-		out.push_back(std::move(column));
 	}
 	return out;
 }
@@ -488,7 +490,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 			keyColumns.push_back(col);
 		}
 	}
-	out.keys.resize(keyColumns.size());
+	out.keys = shared_array<resolved_source>(keyColumns.size());
 	std::vector<uint8_t> bound(keyColumns.size(), 0);
 	for (clause_bind const& b : c.where)
 	{
@@ -554,7 +556,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 	}
 
 	// given: exactly one source per table input, in input order.
-	out.inputs.resize(t.inputs.size());
+	out.inputs = shared_array<resolved_source>(t.inputs.size());
 	bound.assign(t.inputs.size(), 0);
 	for (clause_bind const& b : c.given)
 	{
@@ -626,6 +628,8 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 	// set: each a value column into a state column of its type. Two clauses
 	// writing one column are ordered by position; one clause writing a column
 	// twice has no order, so it is refused.
+	out.sets = shared_array<std::pair<uint32_t, uint32_t>>(c.set.size());
+	uint32_t written = 0;
 	for (set_state const& s : c.set)
 	{
 		uint32_t state = UINT32_MAX;
@@ -641,9 +645,9 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 			return tl::make_unexpected(ErrorContext("set writes state column '", s.state,
 				"', which the machine does not declare"));
 		}
-		for (auto const& earlierSet : out.sets)
+		for (uint32_t e = 0; e < written; ++e)
 		{
-			if (earlierSet.second == state)
+			if (out.sets[e].second == state)
 			{
 				return tl::make_unexpected(ErrorContext("set writes state column '", s.state, "' twice"));
 			}
@@ -670,7 +674,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 			return tl::make_unexpected(ErrorContext("set writes ", TypeName(def.state[state].type), " state column '",
 				s.state, "' from column '", s.column, "', a ", TypeName(type)));
 		}
-		out.sets.emplace_back(*column, state);
+		out.sets[written++] = {*column, state};
 	}
 
 	if (!c.emit.empty())
@@ -723,7 +727,7 @@ tl::expected<resolved_clause, ErrorContext> ResolveClause(add_clause const& c, u
 // their columns, so a step never runs a reader whose source it skipped; a
 // group keying on no state column runs on any change of state, as every
 // clause did before.
-void EnteredOn(machine_def const& def, std::vector<resolved_clause>& clauses)
+void EnteredOn(machine_def const& def, shared_array<resolved_clause>& clauses)
 {
 	std::vector<uint32_t> group(clauses.size());
 	for (uint32_t i = 0; i < clauses.size(); ++i)
@@ -768,20 +772,22 @@ void EnteredOn(machine_def const& def, std::vector<resolved_clause>& clauses)
 			}
 		}
 	}
-	std::vector<uint32_t> every;
+	std::vector<uint32_t> hashed;
 	for (uint32_t s = 0; s < def.state.size(); ++s)
 	{
 		if (def.state[s].type == column_type::Hash)
 		{
-			every.push_back(s);
+			hashed.push_back(s);
 		}
 	}
+	// One buffer for every clause that runs on any change.
+	immutable_array<uint32_t> const every = immutable_array<uint32_t>::FromArray(hashed.data(), hashed.size());
 	for (uint32_t i = 0; i < clauses.size(); ++i)
 	{
 		std::vector<uint32_t> on = columns[root(i)];
 		std::sort(on.begin(), on.end());
 		on.erase(std::unique(on.begin(), on.end()), on.end());
-		clauses[i].enteredOn = on.empty() ? every : std::move(on);
+		clauses[i].enteredOn = on.empty() ? every : immutable_array<uint32_t>::FromArray(on.data(), on.size());
 	}
 }
 
@@ -819,9 +825,11 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 	for (size_t list = 0; list < kTriggerCount; ++list)
 	{
 		std::span<add_clause const> clauses = ListOf(definition, list);
+		def.lists[list] = shared_array<resolved_clause>(clauses.size());
 		for (uint32_t i = 0; i < clauses.size(); ++i)
 		{
-			auto clause = ResolveClause(clauses[i], i, def, def.lists[list], tables);
+			// Only the clauses before this one are resolved; a clause reads no later one.
+			auto clause = ResolveClause(clauses[i], i, def, std::span<resolved_clause const>(def.lists[list].begin(), i), tables);
 			if (!clause)
 			{
 				return tl::make_unexpected(std::move(clause.error()).with(ClausePlace(def.name, list, i, clauses[i].table)));
@@ -859,7 +867,7 @@ tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& def
 			{
 				def.lists[list][clause->overrides].overriddenBy = i;
 			}
-			def.lists[list].push_back(std::move(*clause));
+			def.lists[list][i] = std::move(*clause);
 		}
 	}
 	EnteredOn(def, def.lists[size_t(trigger::Entry)]);
@@ -951,7 +959,7 @@ tl::expected<void, ErrorContext> ClauseDomain(machine_def const& def, resolved_c
 			closed = def.state[from.index].type == column_type::Hash;
 			if (closed)
 			{
-				values = def.state[from.index].members;
+				values.assign(def.state[from.index].members.begin(), def.state[from.index].members.end());
 			}
 			break;
 		case source_kind::Literal:
@@ -1141,6 +1149,16 @@ tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def cons
 	// Proof only: a step reads cuts, groups and lists, never these.
 	std::vector<uint8_t>().swap(out.runs.layout.closed);
 	std::vector<uint8_t>().swap(out.runs.layout.listed);
+	// The layout grew by appending, so its vectors hold up to twice what they
+	// use, and a prepared clause keeps them for the machine's life.
+	detail::run_layout& kept = out.runs.layout;
+	kept.groupFlags.shrink_to_fit();
+	kept.cutStart.shrink_to_fit();
+	kept.cuts.shrink_to_fit();
+	kept.cellStart.shrink_to_fit();
+	kept.listStart.shrink_to_fit();
+	kept.lists.shrink_to_fit();
+	out.runs.runs.shrink_to_fit();
 	return out;
 }
 
@@ -1220,16 +1238,18 @@ tl::expected<counted_ptr<Machine const>, ErrorContext> Prepare(create_machine co
 	watch_list watch;
 	for (size_t list = 0; list < kTriggerCount; ++list)
 	{
-		std::vector<resolved_clause> const& clauses = data->def.lists[list];
-		for (size_t i = 0; i < clauses.size(); ++i)
+		shared_array<resolved_clause> const& clauses = data->def.lists[list];
+		data->lists[list] = shared_array<detail::prepared_clause>(clauses.size());
+		for (uint32_t i = 0; i < clauses.size(); ++i)
 		{
-			auto proved = ProveClause(data->def, clauses[i], data->lists[list], store, watch, report);
+			auto proved = ProveClause(data->def, clauses[i],
+				std::span<detail::prepared_clause const>(data->lists[list].begin(), i), store, watch, report);
 			if (!proved)
 			{
 				return refuse(std::move(proved.error()).with(
 					detail::ClausePlace(data->def.name, list, i, tables.tables()[clauses[i].table].name)));
 			}
-			data->lists[list].push_back(std::move(*proved));
+			data->lists[list][i] = std::move(*proved);
 		}
 	}
 	data->watched = immutable_array<detail::watched_table>::FromArray(watch.tables.data(), watch.tables.size());

@@ -20,18 +20,18 @@ bool IsTextGrid(column_type cells)
 // Sorted (key, position) pairs; on a clash, the two positions.
 struct sorted_keys
 {
-	std::vector<std::pair<int64_t, uint32_t>> keys;
-	size_t                                    clash   = SIZE_MAX;
-	size_t                                    earlier = SIZE_MAX;
+	shared_array<std::pair<int64_t, uint32_t>> keys;
+	size_t                                     clash   = SIZE_MAX;
+	size_t                                     earlier = SIZE_MAX;
 };
 
 sorted_keys SortKeys(std::span<cell const> in)
 {
 	sorted_keys out;
-	out.keys.reserve(in.size());
+	out.keys = shared_array<std::pair<int64_t, uint32_t>>(in.size());
 	for (uint32_t i = 0; i < in.size(); ++i)
 	{
-		out.keys.push_back({in[i].i, i});
+		out.keys[i] = {in[i].i, i};
 	}
 	std::sort(out.keys.begin(), out.keys.end());
 	for (size_t i = 1; i < out.keys.size(); ++i)
@@ -46,7 +46,7 @@ sorted_keys SortKeys(std::span<cell const> in)
 	return out;
 }
 
-tl::expected<uint32_t, ErrorContext> Find(std::vector<std::pair<int64_t, uint32_t>> const& keys, cell key,
+tl::expected<uint32_t, ErrorContext> Find(immutable_array<std::pair<int64_t, uint32_t>> const& keys, cell key,
 	column_def const& axis, table_def const& def)
 {
 	auto found = std::lower_bound(keys.begin(), keys.end(), std::pair<int64_t, uint32_t>{key.i, 0});
@@ -241,15 +241,16 @@ tl::expected<void, ErrorContext> relation_store::LoadGrid(load_grid const& comma
 	next.columnKeys = std::move(columnKeys.keys);
 	if (text)
 	{
-		next.strings.reserve(given);
-		for (string_in s : command.strings)
+		shared_array<counted_string> strings(given);
+		for (size_t i = 0; i < given; ++i)
 		{
-			next.strings.push_back(counted_string::MakeShared(s.text));
+			strings[i] = counted_string::MakeShared(command.strings[i].text);
 		}
+		next.strings = std::move(strings);
 	}
 	else
 	{
-		next.values.assign(command.values.begin(), command.values.end());
+		next.values = immutable_array<cell>::FromArray(command.values.data(), command.values.size());
 	}
 	_storage->grids[command.table] = Storage::NewGrid(std::move(next));
 	return {};
