@@ -91,6 +91,11 @@ struct table_build
 	// Per header cell, what a blank cell compiles to; empty for a pivot, whose
 	// blank is a cell with no row.
 	std::vector<column_fill>      fills;
+	// Per column, for a key: the members its (domain ..) lists, which a `*`
+	// copies its row for; with none, the rows' own values are. A key whose
+	// domain is another table's column takes no `*`.
+	std::vector<std::vector<std::string_view>> starMembers;
+	std::vector<bool>                          foreignDomain;
 };
 
 // Whether a body has any row. A table's first record is its header, so it needs
@@ -562,6 +567,8 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 		}
 	}
 	std::vector<bool> given(build.columns.size(), false);
+	build.starMembers.resize(build.columns.size());
+	build.foreignDomain.resize(build.columns.size());
 	for (sexpr const* option : build.domains)
 	{
 		auto name = NameOf(option->items[1], in.storage, label, "a domain's key");
@@ -591,6 +598,11 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 			return tl::make_unexpected(std::move(domain.error()));
 		}
 		build.columns[c].domain = *domain;
+		build.foreignDomain[c]  = domain->kind == domain_kind::Column;
+		for (size_t m = 2; domain->kind == domain_kind::Members && m < option->items.size(); ++m)
+		{
+			build.starMembers[c].push_back(option->items[m].text);
+		}
 	}
 	return {};
 }
@@ -624,75 +636,269 @@ void AppendCell(std::string& out, std::string_view text, bool first)
 	out += '"';
 }
 
+struct compiled_row
+{
+	std::vector<std::string_view> cells;
+	uint32_t                      line = 0;      // the line the author wrote it on
+	bool                          copy = false;  // one of a `*` row's copies
+};
+
+bool IsStar(std::string_view cell)
+{
+	return cell == "*";
+}
+
+// The values each key's `*` copies a row for: its domain's members, or else the
+// distinct values the rows name for it, in the order they first appear.
+tl::expected<std::vector<std::vector<std::string_view>>, ErrorContext> StarValues(table_build const& build,
+	std::span<compiled_row const> rows, std::string_view label)
+{
+	std::vector<std::vector<std::string_view>> values(build.columns.size());
+	for (size_t c = 0; c < build.columns.size(); ++c)
+	{
+		if (!build.columns[c].key)
+		{
+			continue;
+		}
+		auto const star = std::find_if(rows.begin(), rows.end(),
+			[c](compiled_row const& row) { return c < row.cells.size() && IsStar(row.cells[c]); });
+		if (star == rows.end())
+		{
+			continue;
+		}
+		std::string_view const name = build.columns[c].name;
+		if (c < build.foreignDomain.size() && build.foreignDomain[c])
+		{
+			return Refuse(label, star->line, "key '", name, "' of table '", build.name,
+				"' has '*', and its domain is another table's column; '*' copies its row for each member, so list its members with (domain ",
+				name, " a b ..)");
+		}
+		if (c < build.starMembers.size() && !build.starMembers[c].empty())
+		{
+			values[c] = build.starMembers[c];
+			continue;
+		}
+		for (compiled_row const& row : rows)
+		{
+			std::string_view const value = c < row.cells.size() ? row.cells[c] : std::string_view();
+			if (!value.empty() && !IsStar(value) && std::find(values[c].begin(), values[c].end(), value) == values[c].end())
+			{
+				values[c].push_back(value);
+			}
+		}
+		if (values[c].empty())
+		{
+			return Refuse(label, star->line, "key '", name, "' of table '", build.name,
+				"' has '*' and no value for it to stand for; list its members with (domain ", name, " a b ..)");
+		}
+	}
+	return values;
+}
+
+// Each `*` row as its copies, where it is written: one per value of each
+// starred key, the first starred key varying slowest.
+void Expand(compiled_row const& row, std::span<std::vector<std::string_view> const> values,
+	std::vector<compiled_row>& out)
+{
+	std::vector<size_t> stars;
+	for (size_t c = 0; c < row.cells.size() && c < values.size(); ++c)
+	{
+		if (IsStar(row.cells[c]) && !values[c].empty())
+		{
+			stars.push_back(c);
+		}
+	}
+	if (stars.empty())
+	{
+		out.push_back(row);
+		return;
+	}
+	std::vector<size_t> at(stars.size(), 0);
+	while (true)
+	{
+		compiled_row copy = row;
+		copy.copy         = true;
+		for (size_t s = 0; s < stars.size(); ++s)
+		{
+			copy.cells[stars[s]] = values[stars[s]][at[s]];
+		}
+		out.push_back(std::move(copy));
+		size_t s = stars.size();
+		while (s > 0 && ++at[s - 1] == values[stars[s - 1]].size())
+		{
+			at[--s] = 0;
+		}
+		if (s == 0)
+		{
+			return;
+		}
+	}
+}
+
+// A blank cell takes its column's fill, after expansion, so a default naming a
+// key takes the copy's key.
+tl::expected<void, ErrorContext> Fill(table_build const& build, compiled_row& row, std::string_view label)
+{
+	using kind = column_fill::kind;
+	std::vector<std::string_view>& cells = row.cells;
+	size_t const suffixAt = build.suffix.empty() ? SIZE_MAX : build.headerNames.size() - 1;
+	// The suffix runs to the row's end, so it is blank only if all of it is.
+	bool const suffixBlank = suffixAt < cells.size()
+		&& std::all_of(cells.begin() + suffixAt, cells.end(), [](std::string_view c) { return c.empty(); });
+	for (size_t c = 0; c < cells.size() && c < build.fills.size(); ++c)
+	{
+		column_fill const& fill = build.fills[c];
+		if (!cells[c].empty() || fill.what == kind::Blank || (c == suffixAt && !suffixBlank))
+		{
+			continue;
+		}
+		switch (fill.what)
+		{
+		case kind::Text:
+		case kind::Range:
+			cells[c] = fill.text;
+			break;
+		case kind::Key:
+			cells[c] = fill.key < cells.size() ? cells[fill.key] : std::string_view();
+			break;
+		case kind::Unranged:
+			return Refuse(label, row.line, "column '", build.headerNames[c], "' of table '", build.name,
+				"' is blank, and its input '", build.inputs[build.columns[c].input].name,
+				"' has no range for a blank band to stand for; write the band, or give the input a range");
+		case kind::Blank:
+			break;
+		}
+	}
+	return {};
+}
+
+// Whether a row answers every input it is picked with: no condition, no edge,
+// and every band its input's whole range.
+bool Unconditional(table_build const& build, compiled_row const& row)
+{
+	for (size_t c = 0; c < build.columns.size() && c < row.cells.size(); ++c)
+	{
+		add_column const&      column = build.columns[c];
+		std::string_view const cell   = row.cells[c];
+		if (column.type == column_type::Condition || (column.type == column_type::Band && column.edge))
+		{
+			if (!cell.empty())
+			{
+				return false;
+			}
+		}
+		else if (column.type == column_type::Band)
+		{
+			add_input const& input = build.inputs[column.input];
+			float            lo    = 0;
+			float            hi    = 0;
+			if (!input.ranged || !ParseRange(cell, lo, hi) || lo != input.lo || hi != input.hi)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// A copy an earlier unconditional row with the same keys and ranking flags
+// already answers would be a dead row: the `*` yields to the key's own row.
+bool Answered(table_build const& build, std::span<compiled_row const> earlier, compiled_row const& copy)
+{
+	for (compiled_row const& row : earlier)
+	{
+		bool same = true;
+		for (size_t c = 0; same && c < build.columns.size(); ++c)
+		{
+			add_column const& column  = build.columns[c];
+			bool const        ranking = column.type == column_type::Flags && column.input != UINT32_MAX;
+			if (column.key || ranking)
+			{
+				std::string_view const a = c < row.cells.size() ? row.cells[c] : std::string_view();
+				std::string_view const b = c < copy.cells.size() ? copy.cells[c] : std::string_view();
+				same = a == b;
+			}
+		}
+		if (same && Unconditional(build, row))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // The one place a table's rows are rewritten into the plain CSV the loaders
-// read: the header becomes bare names, blank cells take their column's fill,
-// and every record keeps the file line it came from.
+// read: the header becomes bare names, `*` rows become their copies, blank
+// cells take their column's fill, and every record keeps the file line it came
+// from.
 tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text const& body, std::string_view label,
 	std::string& text, shared_array<uint32_t>& lines)
 {
-	using kind = column_fill::kind;
 	// A row shorter than the header still takes the fills it has cells for.
 	size_t fillWidth = 0;
 	for (size_t h = 0; h < build.fills.size(); ++h)
 	{
-		if (build.fills[h].what != kind::Blank)
+		if (build.fills[h].what != column_fill::kind::Blank)
 		{
 			fillWidth = h + 1;
 		}
 	}
-	size_t const suffixAt = build.suffix.empty() ? SIZE_MAX : build.headerNames.size() - 1;
-
-	lines = shared_array<uint32_t>(body.rows());
-	std::vector<std::string_view> cells;
-	for (size_t r = 0; r < body.rows(); ++r)
+	std::vector<compiled_row> written;
+	for (size_t r = 1; r < body.rows(); ++r)
 	{
-		lines[r] = body.line_of_row(r);
-		if (r == 0)
-		{
-			for (size_t h = 0; h < build.headerNames.size(); ++h)
-			{
-				text += h == 0 ? "" : ",";
-				AppendCell(text, build.headerNames[h], h == 0);
-			}
-			text += '\n';
-			continue;
-		}
-		cells.assign(std::max(body.width(r), fillWidth), std::string_view());
+		compiled_row& row = written.emplace_back();
+		row.line          = body.line_of_row(r);
+		row.cells.assign(std::max(body.width(r), fillWidth), std::string_view());
 		for (size_t c = 0; c < body.width(r); ++c)
 		{
-			cells[c] = body.cell(c, r);
+			row.cells[c] = body.cell(c, r);
 		}
-		// The suffix runs to the row's end, so it is blank only if all of it is.
-		bool const suffixBlank = suffixAt < cells.size()
-			&& std::all_of(cells.begin() + suffixAt, cells.end(), [](std::string_view c) { return c.empty(); });
-		for (size_t c = 0; c < cells.size() && c < build.fills.size(); ++c)
+	}
+	auto values = StarValues(build, written, label);
+	if (!values)
+	{
+		return tl::make_unexpected(std::move(values.error()));
+	}
+	std::vector<compiled_row> expanded;
+	for (compiled_row const& row : written)
+	{
+		Expand(row, *values, expanded);
+	}
+	std::vector<compiled_row> kept;
+	for (compiled_row& row : expanded)
+	{
+		auto filled = Fill(build, row, label);
+		if (!filled)
 		{
-			column_fill const& fill = build.fills[c];
-			if (!cells[c].empty() || fill.what == kind::Blank || (c == suffixAt && !suffixBlank))
-			{
-				continue;
-			}
-			switch (fill.what)
-			{
-			case kind::Text:
-			case kind::Range:
-				cells[c] = fill.text;
-				break;
-			case kind::Key:
-				cells[c] = fill.key < cells.size() ? cells[fill.key] : std::string_view();
-				break;
-			case kind::Unranged:
-				return Refuse(label, lines[r], "column '", build.headerNames[c], "' of table '", build.name,
-					"' is blank, and its input '", build.inputs[build.columns[c].input].name,
-					"' has no range for a blank band to stand for; write the band, or give the input a range");
-			case kind::Blank:
-				break;
-			}
+			return filled;
 		}
-		for (size_t c = 0; c < cells.size(); ++c)
+		// A pivot's cells are its columns' flag headers, so no copy of one is
+		// judged dead here; the loader judges every row.
+		if (row.copy && !build.pivoted && Answered(build, kept, row))
+		{
+			continue;
+		}
+		kept.push_back(std::move(row));
+	}
+
+	lines = shared_array<uint32_t>(kept.size() + (body.rows() > 0 ? 1 : 0));
+	if (body.rows() > 0)
+	{
+		lines[0] = body.line_of_row(0);
+		for (size_t h = 0; h < build.headerNames.size(); ++h)
+		{
+			text += h == 0 ? "" : ",";
+			AppendCell(text, build.headerNames[h], h == 0);
+		}
+		text += '\n';
+	}
+	for (size_t r = 0; r < kept.size(); ++r)
+	{
+		lines[r + 1] = kept[r].line;
+		for (size_t c = 0; c < kept[r].cells.size(); ++c)
 		{
 			text += c == 0 ? "" : ",";
-			AppendCell(text, cells[c], c == 0);
+			AppendCell(text, kept[r].cells[c], c == 0);
 		}
 		text += '\n';
 	}

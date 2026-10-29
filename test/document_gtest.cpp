@@ -1430,3 +1430,113 @@ TEST(Document, ABlankEdgeIsStillNoEdge)
 	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
 	EXPECT_EQ(store.RowCount(0), 1u) << "the loader reads a blank edge cell as no edge";
 }
+
+namespace
+{
+
+// The compiled rows of a file's one table, or its refusal.
+std::string CompiledOf(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	if (!d)
+	{
+		return "refused: " + d.error().format();
+	}
+	return d->rows().empty() ? std::string("no rows") : std::string(d->rows()[0].text);
+}
+
+// What a best pick of table 0 answers in column 2, keyed on mode with one
+// double input.
+int64_t Picked(relation_store const& store, std::string_view mode, double hp)
+{
+	cell const keys[]   = {cell::Integer(Hash(mode))};
+	cell const inputs[] = {cell::Real(hp)};
+	auto       picked   = PickBest(store, 0, pick_query{keys, inputs});
+	EXPECT_TRUE(picked.has_value() && picked->has_value()) << mode << " " << hp;
+	return picked.has_value() && picked->has_value() ? store.Value(0, **picked, 2)->i : 0;
+}
+
+}
+
+TEST(Document, AStarRowIsCopiedPerKeyValueWhereItIsWritten)
+{
+	constexpr std::string_view kTable = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\n"
+		"*, 0..0.5, flee\n"
+		"idle, 0..1, idle\n"
+		"walk, 0..1, walk\n";
+	EXPECT_EQ(CompiledOf(kTable), "mode,hp,next\nidle,0..0.5,flee\nwalk,0..0.5,flee\nidle,0..1,idle\nwalk,0..1,walk\n");
+	auto d = ReadDocument(kTable, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(Picked(store, "idle", 0.25), Hash("flee")) << "the * row is first, so it beats idle's own row";
+	EXPECT_EQ(Picked(store, "walk", 0.25), Hash("flee"));
+	EXPECT_EQ(Picked(store, "idle", 0.75), Hash("idle"));
+}
+
+TEST(Document, ABottomStarRowYieldsToAKeysOwnUnconditionalRow)
+{
+	constexpr std::string_view kTable = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\n"
+		"idle, , idle\n"
+		"walk, 0..0.5, walk\n"
+		"*, , rest\n";
+	EXPECT_EQ(CompiledOf(kTable), "mode,hp,next\nidle,0..1,idle\nwalk,0..0.5,walk\nwalk,0..1,rest\n")
+		<< "idle's copy is dropped: idle's own row answers every input first";
+	auto d = ReadDocument(kTable, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(Picked(store, "idle", 0.75), Hash("idle"));
+	EXPECT_EQ(Picked(store, "walk", 0.25), Hash("walk"));
+	EXPECT_EQ(Picked(store, "walk", 0.75), Hash("rest")) << "walk's own row is conditional, so the * row is its fallback";
+}
+
+TEST(Document, AStarRowAfterAConditionalRowIsNotDropped)
+{
+	EXPECT_EQ(CompiledOf("[table t (order mode)]\n>mode, when, next\nidle, (near), idle\n*, , rest\n"),
+		"mode,when,next\nidle,(near),idle\nidle,,rest\n") << "a condition";
+	EXPECT_EQ(CompiledOf("[table t (input x double 0..1) (order mode)]\n>mode, ^x, next\nidle, 0..1, idle\n*, , rest\n"),
+		"mode,x,next\nidle,0..1,idle\nidle,,rest\n") << "an edge";
+	EXPECT_EQ(CompiledOf("[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\nidle, 0..1, idle\n"
+		"walk, 0..0.75, walk\n*, , rest\n"),
+		"mode,hp,next\nidle,0..1,idle\nwalk,0..0.75,walk\nwalk,0..1,rest\n") << "a band short of the range; a whole range written out is unconditional";
+	EXPECT_EQ(CompiledOf("[table t (input m flags) (order mode)]\n>mode, m: flags, next\nidle, A, idle\n*, , rest\n"),
+		"mode,m,next\nidle,A,idle\nidle,,rest\n") << "other ranking flags";
+}
+
+TEST(Document, AStarUsesDomainMembersOverRowValues)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain mode idle walk eat) (order mode)]\n>mode, next\nwalk, idle\n*, rest\n"),
+		"mode,next\nwalk,idle\nidle,rest\neat,rest\n");
+}
+
+TEST(Document, TwoStarsGiveTheProductTheFirstKeySlowest)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain a x y) (domain b p q) (order a b)]\n>a, >b, v: int\n*, *, 1\n"),
+		"a,b,v\nx,p,1\nx,q,1\ny,p,1\ny,q,1\n");
+}
+
+TEST(Document, AStarOnAnotherTablesDomainIsRefused)
+{
+	std::string const refused = RefusalOf(
+		"[table kinds (pick none)]\n>kind\n[table t (domain kind kinds.kind) (order kind)]\n>kind, v: int\n*, 1\n");
+	EXPECT_TRUE(Mentions(refused, "'kind'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "members")) << refused;
+	EXPECT_TRUE(Mentions(refused, "t.tabular:5")) << refused;
+}
+
+TEST(Document, AStarDefaultTakesTheExpandedKey)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain mode idle walk) (order mode)]\n>mode, next = mode\n*,\n"),
+		"mode,next\nidle,idle\nwalk,walk\n") << "next = mode reads the copy's mode, not '*'";
+}
+
+TEST(Document, AnExpandedRowRefusalNamesTheStarRowsLine)
+{
+	auto d = ReadDocument("[table t (domain mode idle walk) (order mode)]\n>mode, n: int\n# a note\n*, many\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:4") << loaded.error().format();
+}
