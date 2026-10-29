@@ -8,6 +8,7 @@
 #include "tabular/machine.h"
 #include "csv_text.h"
 #include "document_sections.h"
+#include "Support/shared_array.hpp"
 
 #include <array>
 #include <deque>
@@ -15,39 +16,38 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace tabular
 {
 
-// Everything a machine's commands view, sized before any view into it is taken,
-// so nothing moves.
+// Everything a machine's commands view. Each array is sized once, from a count
+// taken before it is filled, so no view into it moves.
 struct machine_storage
 {
-	std::vector<std::vector<cell>>                                   members;   // per state column
-	std::vector<add_state>                                           state;
-	std::vector<add_input>                                           inputs;
-	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> where;   // per clause
-	std::array<std::vector<std::vector<clause_bind>>, kTriggerCount> given;
-	std::array<std::vector<std::vector<set_state>>, kTriggerCount>   sets;
-	std::array<std::vector<add_clause>, kTriggerCount>               clauses;
+	shared_array<shared_array<cell>>                                     members;   // per state column
+	shared_array<add_state>                                              state;
+	shared_array<add_input>                                              inputs;
+	std::array<shared_array<shared_array<clause_bind>>, kTriggerCount> where;     // per clause
+	std::array<shared_array<shared_array<clause_bind>>, kTriggerCount> given;
+	std::array<shared_array<shared_array<set_state>>, kTriggerCount>   sets;
+	std::array<shared_array<add_clause>, kTriggerCount>                clauses;
 };
 
 struct DocumentStorage
 {
-	std::string                  text;    // the file, which every view below points into
-	std::string                  label;
-	std::vector<section_rows>    rows;
+	std::string                    text;    // the file, which every view below points into
+	std::string                    label;
+	shared_array<section_rows>     rows;
 	// Every table's name, by table number, so rows can be refused a store built
 	// from another schema.
-	std::vector<std::string>     table_names;
-	std::vector<machine_storage> machines;
-	std::vector<create_machine>  commands;
-	// A machine body's cells, which its clauses' names view; a deque keeps each
-	// body where it was put.
-	std::deque<detail::csv_text> bodies;
-	// Names that had escapes in the file and so are not a view of it.
-	std::deque<std::string>      owned;
+	shared_array<std::string>      table_names;
+	shared_array<machine_storage>  machines;
+	shared_array<create_machine>   commands;
+	// Each machine's body, whose cells its clauses' names view.
+	shared_array<detail::csv_text> bodies;
+	// Names that had escapes in the file and so are not a view of it; a deque
+	// keeps each where it was put while the count is still unknown.
+	std::deque<std::string>        owned;
 };
 
 namespace detail

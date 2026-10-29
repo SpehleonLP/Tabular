@@ -185,39 +185,43 @@ tl::expected<source, ErrorContext> ReadSource(std::string_view value, std::strin
 }
 
 tl::expected<void, ErrorContext> ReadBinds(std::string_view cell, std::string_view key, schema const& tables,
-	std::string_view table, hash_names& names, std::string_view label, uint32_t line, std::vector<clause_bind>& out)
+	std::string_view table, hash_names& names, std::string_view label, uint32_t line, shared_array<clause_bind>& out)
 {
 	auto pairs = SplitPairs(cell, key);
 	if (!pairs)
 	{
 		return tl::make_unexpected(std::move(pairs.error()));
 	}
-	for (name_value const& pair : *pairs)
+	out = shared_array<clause_bind>(pairs->size());
+	for (size_t i = 0; i < pairs->size(); ++i)
 	{
+		name_value const& pair = (*pairs)[i];
 		auto from = ReadSource(pair.value, pair.name, TargetType(tables, table, pair.name, key == "where"), names, label, line);
 		if (!from)
 		{
 			return tl::make_unexpected(std::move(from.error()).with(key));
 		}
-		out.push_back(clause_bind{pair.name, *from});
+		out[i] = clause_bind{pair.name, *from};
 	}
 	return {};
 }
 
-tl::expected<void, ErrorContext> ReadSets(std::string_view cell, std::vector<set_state>& out)
+tl::expected<void, ErrorContext> ReadSets(std::string_view cell, shared_array<set_state>& out)
 {
 	auto pairs = SplitPairs(cell, "set");
 	if (!pairs)
 	{
 		return tl::make_unexpected(std::move(pairs.error()));
 	}
-	for (name_value const& pair : *pairs)
+	out = shared_array<set_state>(pairs->size());
+	for (size_t i = 0; i < pairs->size(); ++i)
 	{
+		name_value const& pair = (*pairs)[i];
 		if (pair.value.front() == '(')
 		{
 			return tl::make_unexpected(ErrorContext("set writes '", pair.name, "' from something that is not a column name"));
 		}
-		out.push_back(set_state{pair.name, pair.value});
+		out[i] = set_state{pair.name, pair.value};
 	}
 	return {};
 }
@@ -264,6 +268,7 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 			continue;
 		}
 		hasMembers = true;
+		store.members[index] = shared_array<cell>(part.items.size() - 1);
 		for (size_t m = 1; m < part.items.size(); ++m)
 		{
 			auto text = NameOf(part.items[m], storage, label, "a member");
@@ -277,7 +282,7 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 				return tl::make_unexpected(std::move(value.error()).with("member ", m - 1, " of state column '", *name, "'")
 					.with(Place(label, part.items[m].line)));
 			}
-			store.members[index].push_back(*value);
+			store.members[index][m - 1] = *value;
 		}
 	}
 	if (initial == nullptr || initial->items.size() != 2)
@@ -295,7 +300,7 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 		return tl::make_unexpected(std::move(value.error()).with("the initial value of state column '", *name, "'")
 			.with(Place(label, initial->line)));
 	}
-	store.state.push_back(add_state{*name, *type, store.members[index], *value});
+	store.state[index] = add_state{*name, *type, store.members[index], *value};
 	return {};
 }
 
@@ -312,8 +317,9 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 			++machineCount;
 		}
 	}
-	storage.machines.resize(machineCount);
-	storage.commands.resize(machineCount);
+	storage.machines = shared_array<machine_storage>(machineCount);
+	storage.commands = shared_array<create_machine>(machineCount);
+	storage.bodies   = shared_array<csv_text>(machineCount);
 
 	size_t built = 0;
 	for (section const& section : sections)
@@ -325,6 +331,7 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 		}
 		machine_storage& store = storage.machines[built];
 		create_machine&  out   = storage.commands[built];
+		csv_text&        csv   = storage.bodies[built];
 		++built;
 
 		if (header.items.size() < 2)
@@ -339,6 +346,7 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 		std::string const whose = cc(std::string("machine '"), *machineName, "'");
 
 		size_t stateCount = 0;
+		size_t inputCount = 0;
 		for (size_t i = 2; i < header.items.size(); ++i)
 		{
 			sexpr const& opt = header.items[i];
@@ -346,11 +354,18 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 			{
 				++stateCount;
 			}
+			if (opt.what == sexpr::kind::List && !opt.items.empty() && IsAtom(opt.items[0], "input"))
+			{
+				++inputCount;
+			}
 		}
-		store.members.resize(stateCount);
+		store.members = shared_array<shared_array<cell>>(stateCount);
+		store.state   = shared_array<add_state>(stateCount);
+		store.inputs  = shared_array<add_input>(inputCount);
 
 		hash_names names;
 		size_t     stateAt = 0;
+		size_t     inputAt = 0;
 		for (size_t i = 2; i < header.items.size(); ++i)
 		{
 			sexpr const& opt = header.items[i];
@@ -374,7 +389,7 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 				{
 					return tl::make_unexpected(std::move(input.error()).with(whose));
 				}
-				store.inputs.push_back(*input);
+				store.inputs[inputAt++] = *input;
 			}
 			else
 			{
@@ -388,8 +403,7 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 		{
 			return tl::make_unexpected(std::move(body.error()));
 		}
-		storage.bodies.push_back(std::move(*body));
-		csv_text const& csv = storage.bodies.back();
+		csv = std::move(*body);
 
 		std::array<size_t, kTriggerCount> counts{};
 		if (csv.rows() > 0)
@@ -426,14 +440,16 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 			}
 			++counts[list];
 		}
+		std::array<shared_array<uint32_t>, kTriggerCount> rowLines;
 		for (size_t l = 0; l < kTriggerCount; ++l)
 		{
-			store.where[l].resize(counts[l]);
-			store.given[l].resize(counts[l]);
-			store.sets[l].resize(counts[l]);
+			store.where[l]   = shared_array<shared_array<clause_bind>>(counts[l]);
+			store.given[l]   = shared_array<shared_array<clause_bind>>(counts[l]);
+			store.sets[l]    = shared_array<shared_array<set_state>>(counts[l]);
+			store.clauses[l] = shared_array<add_clause>(counts[l]);
+			rowLines[l]      = shared_array<uint32_t>(counts[l]);
 		}
-		std::array<size_t, kTriggerCount>                placed{};
-		std::array<std::vector<uint32_t>, kTriggerCount> rowLines;
+		std::array<size_t, kTriggerCount> placed{};
 		for (size_t r = 1; r < csv.rows(); ++r)
 		{
 			uint32_t const line = csv.line_of_row(r);
@@ -443,7 +459,7 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 				++list;
 			}
 			size_t const c = placed[list]++;
-			rowLines[list].push_back(line);
+			rowLines[list][c] = line;
 			std::string_view const from = csv.cell(1, r);
 			auto here = [&](ErrorContext&& error)
 			{
@@ -474,8 +490,8 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 			{
 				return here(ErrorContext("overrides is '", overridesCell, "'; it is the position of the clause overridden"));
 			}
-			store.clauses[list].push_back(add_clause{from, store.where[list][c], store.given[list][c],
-				store.sets[list][c], csv.cell(5, r), overrides});
+			store.clauses[list][c] = add_clause{from, store.where[list][c], store.given[list][c],
+				store.sets[list][c], csv.cell(5, r), overrides};
 		}
 
 		out = create_machine{*machineName, store.state, store.inputs, store.clauses[0], store.clauses[1],

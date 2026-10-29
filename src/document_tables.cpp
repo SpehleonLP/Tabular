@@ -688,6 +688,21 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 	std::vector<create_table> commands;
 	std::vector<uint32_t>     headerLines;   // per table, the line its bracket opens on
 
+	size_t tableCount = 0;
+	size_t rowsCount  = 0;
+	for (section const& section : sections)
+	{
+		std::string_view const head = section.header.items[0].text;
+		if (section.header.items[0].what == sexpr::kind::Atom && (head == "table" || head == "grid"))
+		{
+			++tableCount;
+			rowsCount += HasRows(section.body, head == "grid") ? 1 : 0;
+		}
+	}
+	storage.table_names = shared_array<std::string>(tableCount);
+	storage.rows        = shared_array<section_rows>(rowsCount);
+	size_t rowsAt       = 0;
+
 	for (size_t s = 0; s < sections.size(); ++s)
 	{
 		section const& section = sections[s];
@@ -718,7 +733,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			return tl::make_unexpected(std::move(name.error()));
 		}
 		build.name = *name;
-		storage.table_names.push_back(std::string(*name));
+		storage.table_names[commands.size()] = std::string(*name);
 		headerLines.push_back(header.line);
 		if (isGrid)
 		{
@@ -786,7 +801,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			isGrid ? &build.grid : nullptr, build.suffix, build.weightColumn});
 		if (HasRows(section.body, isGrid))
 		{
-			storage.rows.push_back(section_rows{static_cast<uint32_t>(commands.size() - 1), section.body, section.body_line});
+			storage.rows[rowsAt++] = section_rows{static_cast<uint32_t>(commands.size() - 1), section.body, section.body_line};
 		}
 	}
 
