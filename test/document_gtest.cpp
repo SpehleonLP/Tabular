@@ -121,7 +121,7 @@ a: int
 
 TEST(Document, MalformedBracketsAreRefused)
 {
-	auto s = ReadSchema("[table t (column a int\n", "bad.tabular");
+	auto s = ReadSchema("[table t (input a double\n", "bad.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "bad.tabular")) << s.error().format();
 }
@@ -224,7 +224,7 @@ TEST(Document, AGridHasAxesAndCellsAndNoColumns)
 	EXPECT_EQ(def.grid_columns.name, "kind");
 	EXPECT_EQ(def.grid_cells, column_type::Command);
 
-	auto both = ReadSchema("[grid g (rows r int) (columns c int) (cells int) (column x int)]", "g.tabular");
+	auto both = ReadSchema("[grid g (rows r int) (columns c int) (cells int) (input x double)]", "g.tabular");
 	EXPECT_FALSE(both.has_value());
 
 	auto lacking = ReadSchema("[grid g (rows r int) (cells int)]", "g.tabular");
@@ -1062,6 +1062,12 @@ std::string DescribeFile(std::string_view text)
 	return d ? Describe(d->tables) : "refused: " + d.error().format();
 }
 
+std::string DescribeBuilt(std::span<create_table const> tables)
+{
+	auto built = BuildSchema(tables);
+	return built ? Describe(*built) : "refused: " + built.error().format();
+}
+
 std::string RefusalOf(std::string_view text)
 {
 	auto d = ReadDocument(text, "t.tabular");
@@ -1089,16 +1095,16 @@ when, then: command, mask: flags, count: int
 >mode, next, command
 idle,walk,go
 walk,idle,stop
-)"), DescribeFile(R"(
-[table grazer_brain
-  (key mode hash (domain (members idle walk)))
-  (column next hash)
-  (order mode)
-  (suffix command)]
-mode,next,command
-idle,walk,go
-walk,idle,stop
-)"));
+)"), ([] {
+		cell const      walks[]  = {cell::Integer(Hash("idle")), cell::Integer(Hash("walk"))};
+		add_column const cols[] = {{"mode", column_type::Hash, true, UINT32_MAX, {domain_kind::Members, walks, {}, {}}},
+			{"next", column_type::Hash}};
+		uint32_t const  byMode[] = {0};
+		order_by const  order{byMode};
+		create_table const t[] = {{"grazer_brain", cols, &order, true, {}, pick_policy::Best, UINT32_MAX, nullptr,
+			nullptr, "command"}};
+		return DescribeBuilt(t);
+	}()));
 
 	EXPECT_EQ(DescribeFile(R"(
 [table keys
@@ -1133,48 +1139,41 @@ walk,idle,stop
   (input rank flags)
   (order clip)]
 >clip: int, rank: flags
-)"), DescribeFile(R"(
-[table keys
-  (key a hash (domain (members x y)))
-  (key b hash fallthrough)
-  (key n int (domain (members 1 2)))
-  (column v double)
-  (order a b n unique)
-  (suffix then)]
-[table foreign
-  (key f hash (domain (from keys a)))
-  (column v int)
-  (order f)]
-[table bands
-  (input win double 0..1 cyclic)
-  (input m flags)
-  (key clip int)
-  (column win band (input win) edge)
-  (pick all)
-  (order clip)]
-[table ors
-  (key clip int)
-  (column bits flags)
-  (pick or bits)
-  (order clip)]
-[table weights
-  (key clip int)
-  (column w double)
-  (pick weighted w)
-  (order clip)]
-[table pivoted
-  (input mood flags)
-  (key label int (domain rows))
-  (column mood flags (input mood))
-  (column cell string)
-  (order label)
-  (pivot mood cell)]
-[table ranked
-  (input rank flags)
-  (key clip int (domain rows))
-  (column rank flags (input rank))
-  (order clip)]
-)"));
+)"), ([] {
+		cell const      xy[]       = {cell::Integer(Hash("x")), cell::Integer(Hash("y"))};
+		cell const      oneTwo[]   = {cell::Integer(1), cell::Integer(2)};
+		add_column const keys[] = {{"a", column_type::Hash, true, UINT32_MAX, {domain_kind::Members, xy, {}, {}}},
+			{"b", column_type::Hash, true, UINT32_MAX, key_domain::FallThrough()},
+			{"n", column_type::Int, true, UINT32_MAX, {domain_kind::Members, oneTwo, {}, {}}},
+			{"v", column_type::Double}};
+		add_column const foreign[] = {{"f", column_type::Hash, true, UINT32_MAX, {domain_kind::Column, {}, "keys", "a"}},
+			{"v", column_type::Int}};
+		add_input const  bandInputs[] = {{"win", column_type::Double, true, 0, 1, true}, {"m", column_type::Flags}};
+		add_column const bands[]   = {{"clip", column_type::Int, true}, {"win", column_type::Band, false, 0, {}, true}};
+		add_column const ors[]     = {{"clip", column_type::Int, true}, {"bits", column_type::Flags}};
+		add_column const weights[] = {{"clip", column_type::Int, true}, {"w", column_type::Double}};
+		add_input const  mood[]    = {{"mood", column_type::Flags}};
+		add_column const pivoted[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"mood", column_type::Flags, false, 0}, {"cell", column_type::String}};
+		add_input const  rank[]    = {{"rank", column_type::Flags}};
+		add_column const ranked[]  = {{"clip", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"rank", column_type::Flags, false, 0}};
+		uint32_t const   abn[]   = {0, 1, 2};
+		uint32_t const   first[] = {0};
+		order_by const   unique{abn, true};
+		order_by const   byFirst{first};
+		pivot_by const   pivot{1, 2};
+		create_table const t[] = {
+			{"keys", keys, &unique, true, {}, pick_policy::Best, UINT32_MAX, nullptr, nullptr, "then"},
+			{"foreign", foreign, &byFirst, true, {}, pick_policy::Best},
+			{"bands", bands, &byFirst, true, bandInputs, pick_policy::All},
+			{"ors", ors, &byFirst, true, {}, pick_policy::Or, 1},
+			{"weights", weights, &byFirst, true, {}, pick_policy::Weighted, UINT32_MAX, nullptr, nullptr, {}, 1},
+			{"pivoted", pivoted, &byFirst, true, mood, pick_policy::Best, UINT32_MAX, &pivot},
+			{"ranked", ranked, &byFirst, true, rank, pick_policy::Best},
+		};
+		return DescribeBuilt(t);
+	}()));
 }
 
 TEST(Document, ALastCommandCellIsTheSuffix)
@@ -1220,7 +1219,12 @@ TEST(Document, AWeightColumnMakesTheTableWeighted)
 TEST(Document, ABandMustBeNamedForAnInput)
 {
 	EXPECT_EQ(DescribeFile("[table t (input hp double 0..10) (pick all)]\nhp: band, v: int\n"),
-		DescribeFile("[table t (input hp double 0..10) (pick all) (column hp band (input hp)) (column v int)]"));
+		([] {
+			add_input const  hp[]   = {{"hp", column_type::Double, true, 0, 10}};
+			add_column const cols[] = {{"hp", column_type::Band, false, 0}, {"v", column_type::Int}};
+			create_table const t[] = {{"t", cols, nullptr, true, hp, pick_policy::All}};
+			return DescribeBuilt(t);
+		}()));
 	std::string const refused = RefusalOf("[table t (input t double 0..10) (pick all)]\nhp: band, v: int\n");
 	EXPECT_TRUE(Mentions(refused, "'hp'")) << refused;
 	EXPECT_TRUE(Mentions(refused, "input")) << refused;
@@ -1283,16 +1287,16 @@ TEST(Document, APivotDeclaresItsTwoColumnsInTheBracket)
 1,c1_none,c1_injured,c1_crouch,
 2,c2_none,c2_injured,c2_crouch,c2_combo
 )";
-	EXPECT_EQ(DescribeFile(kHeaderForm), DescribeFile(R"(
-[table lookup
-  (input req flags)
-  (key label int (domain rows))
-  (column req flags (input req))
-  (column clip string)
-  (order label)
-  (pivot req clip)]
-label,None,Injured,Crouch,Injured|Crouch
-)"));
+	EXPECT_EQ(DescribeFile(kHeaderForm), ([] {
+		add_input const  req[]  = {{"req", column_type::Flags}};
+		add_column const cols[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"req", column_type::Flags, false, 0}, {"clip", column_type::String}};
+		uint32_t const   first[] = {0};
+		order_by const   order{first};
+		pivot_by const   pivot{1, 2};
+		create_table const t[] = {{"lookup", cols, &order, true, req, pick_policy::Best, UINT32_MAX, &pivot}};
+		return DescribeBuilt(t);
+	}()));
 	auto d = ReadDocument(kHeaderForm, "t.tabular");
 	ASSERT_TRUE(d.has_value()) << d.error().format();
 	relation_store store(std::move(d->tables));
@@ -1314,11 +1318,8 @@ label,None,Injured,Crouch,Injured|Crouch
 	EXPECT_EQ(hashes->tables()[0].columns[2].type, column_type::Hash);
 }
 
-TEST(Document, MixingHeaderAndColumnOptionsIsRefused)
+TEST(Document, ATableWithoutAHeaderRowIsRefused)
 {
-	std::string const mixed = RefusalOf("[table t (pick none) (column a int)]\nb: int\n");
-	EXPECT_TRUE(Mentions(mixed, "header")) << mixed;
-	EXPECT_TRUE(Mentions(mixed, "t.tabular:2")) << mixed;
 	std::string const neither = RefusalOf("[table t (pick none)]\n");
 	EXPECT_TRUE(Mentions(neither, "no columns")) << neither;
 }

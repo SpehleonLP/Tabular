@@ -112,7 +112,7 @@ Each key of a `best` table must declare a **domain**: the key values the table p
 - `members`: a literal list.
 - `{table, column}`: the distinct values another table's column currently holds. Domains that depend on each other in a cycle are refused.
 - `rows`: the key tuples the table's own rows name.
-- **fall-through** (`fallthrough` on the column, in place of a domain): an open hash key. A value no run is keyed on falls through to the blank run (key 0). Up to eight per table; a miss retries with fall-through keys blanked in key order, the first fall-through key being the lowest bit, so `(sub, kind)` tries `(0, kind)`, then `(sub, 0)`, then `(0, 0)`. The run with every fall-through key blank is required.
+- **fall-through** (`>name?` in the header, in place of a domain): an open hash key. A value no run is keyed on falls through to the blank run (key 0). Up to eight per table; a miss retries with fall-through keys blanked in key order, the first fall-through key being the lowest bit, so `(sub, kind)` tries `(0, kind)`, then `(sub, 0)`, then `(0, 0)`. The run with every fall-through key blank is required.
 
 A change that brings rows is refused unless the version it would publish meets all of these conditions:
 
@@ -145,11 +145,9 @@ A grid (`[grid g (rows r type) (columns c type) (cells type)]`) is a dense 2D ar
 ```
 [table grazer_brain
   (input energy double 0..1)
-  (key mode hash (domain (members idle walk)))
-  (column hunger band (input energy))
-  (column next hash)
+  (domain mode idle walk)
   (order mode)]
-mode,hunger,next
+>mode, energy: band, next
 idle,0..1,walk
 walk,0..1,idle
 
@@ -160,11 +158,13 @@ list,from,where,given,set,emit,overrides
 step,grazer_brain,mode=state.mode,energy=input.energy,mode=next,,
 ```
 
-With no `(pick ..)` a table is `best`. A table takes `(key|column name type ..)`, `(input name type [lo..hi] [cyclic])`, `(pick none|best|all)`, `(pick or col)` or `(pick weighted col)`, `(order cols.. [unique])`, `(suffix name)` and `(pivot headers cells)`. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
+A table's first body row is its **header**, and each cell declares one column: `>name` is a key, `>name?` a fall-through key, `^name` a band edge, and `name: type` a typed column (a bare name is a hash). `when` is a condition, `weight` a double, and `command` a command; a command cell that comes last is the suffix, every cell from it on read as one list of commands. A band, and a flags column that ranks, are named for the input they read. A table with a `weight` column and no `(pick ..)` is `weighted`.
+
+With no `(pick ..)` a table is `best`. The bracket takes `(input name type [lo..hi] [cyclic])`, `(pick none|best|all)`, `(pick or col)` or `(pick weighted col)`, `(order cols.. [unique])`, `(domain key ..)` and `(pivot headers cells[: type])`. A pivot's header row is its keys, then its flag headers; the bracket declares its headers flags column and its cells column. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
 
 Column types are `hash`, `flags`, `int`, `double`, `condition`, `command`, `vec2`, `string` and `band`.
 
-A domain is written `(domain rows)`, `(domain (members ..))` or `(domain (from table column))`. A fall-through key writes `fallthrough` instead; declaring both is refused, and so is a fall-through key on a table that isn't `best`.
+A best table's key has its rows as its domain unless `(domain key a b ..)` lists its members or `(domain key table.column)` reads another table's column. A fall-through key's domain is open, so a `(domain ..)` for it is refused, and so is a fall-through key on a table that isn't `best`.
 
 Machine sources are written as `state.<col>`, `input.<name>`, `clause.<n>.<col>` (an earlier clause in the same list) or `(literal <text>)`.
 
@@ -230,7 +230,7 @@ An instance's own messages never come back into its own machine; the host routes
 A hierarchical state machine is an outer join, and can be written two ways that compile to the same thing:
 
 - **One table**, with fall-through on the substate key: a substate with no row of its own falls through to the superstate's blank row.
-- **Two tables**, with the `overrides` cell of the second clause set to `<n>`. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as it uses `(domain rows)` (a `(domain (members ..))` domain is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. The two **give way level by level**: at each blanking of the base's fall-through keys the override is tried first, then the base, so the more specific row wins and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the substate's `(rest, sleep, _)`; that is the one-table order with keys `(super, sub, kind)`. So the override falls through on each of the base's fall-through keys, from the same source, and its own fall-through keys give way first. Overrides are hierarchy within a package: a package can't see another's tables.
+- **Two tables**, with the `overrides` cell of the second clause set to `<n>`. The override directly follows the clause it overrides (position `n` in the same list), sets only columns that clause sets, and emits only if it emits; neither reads an `or` table. It runs only when its base answered, keyed on the state the base read. On a **hit** its sets and its emit replace the base's; with no emit column, the base's command stands. On a **miss** it writes, emits and reports nothing (outcome `Missed`), and the base answers alone. So the override table need not be total, as long as its keys keep their rows domain (a `(domain key ..)` member list is checked for totality when the table loads). Later clauses read the coalesced answer through the base; reading an override directly is refused. The two **give way level by level**: at each blanking of the base's fall-through keys the override is tried first, then the base, so the more specific row wins and the override wins a tie. Asleep, `wake` finds the superstate's `(rest, wake)` before the substate's `(rest, sleep, _)`; that is the one-table order with keys `(super, sub, kind)`. So the override falls through on each of the base's fall-through keys, from the same source, and its own fall-through keys give way first. Overrides are hierarchy within a package: a package can't see another's tables.
 
 **Entry and exit run per column.** An entry or exit clause runs only when a state column its `where:` reads changed. Clauses that read one another, and an override with its base, run as one group. Creation, `Rebind` and `Close` run their lists whole.
 

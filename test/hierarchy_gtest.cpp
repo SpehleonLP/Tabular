@@ -979,14 +979,14 @@ TEST(Hierarchy, ANinthFallThroughKeyIsRefused)
 {
 	auto table = [](int keys)
 	{
-		std::string source = "[table wide\n";
+		std::string header;
 		std::string order;
 		for (int k = 1; k <= keys; ++k)
 		{
-			source += "  (key k" + std::to_string(k) + " hash fallthrough)\n";
+			header += ">k" + std::to_string(k) + "?, ";
 			order += (k == 1 ? "" : " ") + std::string("k") + std::to_string(k);
 		}
-		return source + "  (column said int)\n  (order " + order + ")]\n";
+		return "[table wide\n  (order " + order + ")]\n" + header + "said: int\n";
 	};
 	EXPECT_TRUE(ReadSchema(table(8), "wide.tabular").has_value()) << RefusalOf(ReadSchema(table(8), "wide.tabular"));
 	std::string const refused = RefusalOf(ReadSchema(table(9), "wide.tabular"));

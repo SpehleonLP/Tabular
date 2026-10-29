@@ -53,11 +53,9 @@ struct schema_document
 // is read by Document.TheHeaderCommentsExampleIsAValidFile:
 //
 //   [table grazer_brain
-//     (key mode hash (domain (members idle walk)))
-//     (column next hash)
 //     (order mode)
-//     (suffix command)]
-//   mode,next,command
+//     (domain mode idle walk)]
+//   >mode, next, command
 //   idle,walk,go
 //   walk,idle,stop
 //
@@ -67,10 +65,14 @@ struct schema_document
 //   list,from,where,given,set,emit,overrides
 //   step,grazer_brain,mode=state.mode,,mode=next,command,
 //
-// A table takes (key|column name type [(domain rows|(members ..)|(from t c))]
-// [fallthrough] [(input t)] [edge]), (input name type [lo..hi] [cyclic]),
-// (pick none|best|all), (pick or col), (pick weighted col), (order cols.. [unique]),
-// (suffix name) and (pivot headers cells); with no (pick) it is best.
+// A table's first body row declares its columns, one header cell each:
+// `>key`, `>key?` (falls through), `^edge` (a band edge), `name: type`, and
+// `name = default`. A band or a ranking flags column is named for its input; a
+// last command cell is the suffix. The bracket takes (input name type [lo..hi]
+// [cyclic]), (pick none|best|all), (pick or col), (pick weighted col),
+// (order cols.. [unique]), (domain key members..), (domain key table.column) and
+// (pivot headers cells[: type]); with no (pick) it is best, and then each key's
+// domain is its rows unless a (domain ..) lists it.
 //
 // Every table a file declares is read-only: a reload loads a new version.
 // label names the source in errors; an error's message carries no position, and

@@ -145,7 +145,7 @@ the feature is wrong, not the rule.
   s-expression list `(C D E)`, to whoever consumes it, and that consumer interprets it. Tabular
   does not.
   Bridge steps are such a command.
-  Built (2026-10-18): a table declares `(suffix name)` (in a file) or `create_table::suffix`
+  Built (2026-10-18): a table declares a last command cell in the header row (in a file) or `create_table::suffix`
   (builder), which adds one Command column of that name after its declared columns, so the
   store and the picks see an ordinary command column. **Commands as lists** (built
   2026-10-19, commands-and-messages spec Part 2). In CSV the suffix is the row's cells after the
@@ -240,21 +240,21 @@ through an input, and only a best table ranks:
   and a best table's key that declares none is refused (see Key domains).
 
 **Key domains (owner, 2026-10-18).** Every key column of a best table says where its domain
-comes from; nothing is inferred. The builder takes `add_column::domain` (`key_domain`), a file
-the column's `(domain ..)`:
+comes from; nothing is inferred. The builder takes `add_column::domain` (`key_domain`); in a
+file a key's domain is its rows unless the bracket's `(domain key ..)` says otherwise:
 
-- `members` (`(domain (members idle walk))`): a literal list, on a hash key (texts, hashed
+- `members` (`(domain mode idle walk)`): a literal list, on a hash key (texts, hashed
   as a CSV cell is) or an int key (integers). A duplicate, an empty list, or members on any
   other key type are refused.
-- a foreign column (`(domain (from display display))`): the distinct values that
+- a foreign column (`(domain kind display.display)`): the distinct values that
   column holds in the other table's current rows, read-only or mutable. A missing table or
   column, or a column of another type than the key, is refused. Tables whose domains come from
   other tables form a DAG; a cycle, a table naming itself included, is refused naming it. A
   foreign column that is the other table's fall-through key gives its values without its 0:
   the blank is the blank run's, not a value the dependent key could name (and a hash 0 is
   refused in its CSV), so the dependent is total over the real values alone.
-- `rows` (`(domain rows)`): the key's own table's rows name its values.
-- fall-through (`fallthrough` in place of `(domain ..)`; `key_domain::FallThrough()` in the
+- `rows` (a file's default): the key's own table's rows name its values.
+- fall-through (`>name?` in the header, in place of a domain; `key_domain::FallThrough()` in the
   builder; commands-and-messages spec Part 3, built 2026-10-19; several, Part 4, built
   2026-10-19): an open key, on a hash key, at most eight per table. Any value may come, and keys
   no run has fall through to blanks. Each contributes the blank, 0, so every tuple of the other
@@ -599,7 +599,7 @@ compile to one internal table (owner, 2026-10-19).
   replaces that clause's in the results; an override with no emit replaces only the columns it
   sets, so the overridden clause's command goes out with the override's state. The override
   table's own load still checks it total over its declared domain, so a partial override
-  declares its keys `(domain rows)` (its domain is the keys it has); one declaring `(domain (members ..))`
+  keeps its keys' rows domain (its domain is the keys it has); one declaring `(domain key ..)` members
   must have a run for every member. Provenance records the overridden clause as `Answered`
   with its own row; the override's entry, next, shows the replacement. The override runs only when the clause it overrides
   answered (a hold stands: there is nothing to coalesce onto), and keys on the state that
@@ -1103,10 +1103,12 @@ changed through the table's generation counter (see Generation).
    table, declaring its columns, inserting and retracting rows are each a flat command record
    handed to the builder. The core is complete and testable with no parser.
 2. **File front end** (built: `tabular/document.h`): a `.tabular` file of bracket declarations
-   becomes those commands. `[table name ..]` takes `(key|column name type ..)` (a key's `(domain ..)`,
-   `fallthrough`, `(input t)` and `edge`; see Key domains), `(input name type [lo..hi] [cyclic])`,
-   `(pick none|best|all)`, `(pick or col)`, `(pick weighted col)`, `(order cols.. [unique])`, `(suffix name)` (the
-   trailing command column, see Suffix) and `(pivot headers cells)`; types are hash, flags, int,
+   becomes those commands. A `[table name ..]`'s first body row declares its columns (`>key`,
+   `>key?` for fall-through, `^edge`, `name: type`, a band or ranking flags column named for its
+   input, a last command cell the suffix, see Suffix), and its bracket takes
+   `(input name type [lo..hi] [cyclic])`, `(pick none|best|all)`, `(pick or col)`,
+   `(pick weighted col)`, `(order cols.. [unique])`, `(domain key ..)` (see Key domains) and
+   `(pivot headers cells[: type])`; types are hash, flags, int,
    double, condition, command, vec2, string, band. `[grid g (rows r type) (columns c type) (cells type)]`
    is a grid. `[machine ..]` declares state and inputs, and its CSV body is the clauses. A CSV body
    under a table or grid is its rows. A table with no `(pick)` is `best`, and every table a file declares is

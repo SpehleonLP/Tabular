@@ -347,16 +347,6 @@ TEST(SuffixSchema, TheBuilderRefusesAGridWithASuffixTheReaderNeverPasses)
 	EXPECT_TRUE(Mentions(s.error().format(), "suffix")) << s.error().format();
 }
 
-TEST(SuffixSchema, AGridOrAPivotedTableCannotHaveOne)
-{
-	constexpr std::string_view grid = R"(
-[grid array (rows r int) (columns c int) (cells int) (suffix command)]
-)";
-	auto g = ReadSchema(grid, "grid.tabular");
-	ASSERT_FALSE(g.has_value());
-	EXPECT_TRUE(Mentions(g.error().format(), "suffix")) << g.error().format();
-}
-
 TEST(SuffixCsv, APivotedLoadIntoASuffixTableIsRefused)
 {
 	relation_store store = Store();
