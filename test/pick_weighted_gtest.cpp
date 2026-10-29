@@ -32,19 +32,16 @@ std::string RefusalOf(tl::expected<T, ErrorContext> const& e)
 // kind (key), weight, item.
 constexpr std::string_view kLoot = R"(
 [table loot
-  (key kind int)
-  (column w double)
-  (column item int)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double, item: int
 )";
 
 // No keys: the whole table is one distribution.
 constexpr std::string_view kKeyless = R"(
 [table coin
-  (column w double)
-  (column face int)
   (pick weighted w)]
+w: double, face: int
 )";
 
 relation_store StoreFrom(std::string_view source)
@@ -203,7 +200,8 @@ TEST(PickWeighted, AnotherPolicyIsRefusedBothWays)
 	EXPECT_TRUE(Mentions(RefusalOf(PickOr(weighted, 0, pick_query{keys, {}})), "weighted"));
 
 	constexpr std::string_view bestSchema = R"(
-[table plain (key kind int (domain rows)) (order kind)]
+[table plain (order kind)]
+>kind: int
 )";
 	relation_store plain = StoreFrom(bestSchema);
 	std::string const refused = RefusalOf(PickWeighted(plain, 0, pick_query{keys, {}}, 1, 1));
@@ -372,12 +370,10 @@ TEST(PickWeightedSchema, ABandIsRefused)
 {
 	std::string const refused = SchemaRefusal(R"(
 [table loot
-  (input t double 0..1)
-  (key kind int)
-  (column w double)
-  (column window band (input t))
+  (input window double 0..1)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double, window: band
 )");
 	EXPECT_TRUE(Mentions(refused, "weighted")) << refused;
 	EXPECT_TRUE(Mentions(refused, "inputs")) << refused;
@@ -385,11 +381,9 @@ TEST(PickWeightedSchema, ABandIsRefused)
 	// A band with no input to test is refused before the pick is considered.
 	std::string const bare = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
-  (column window band)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double, window: band
 )");
 	EXPECT_TRUE(Mentions(bare, "window")) << bare;
 }
@@ -398,12 +392,10 @@ TEST(PickWeightedSchema, ARankingFlagsColumnIsRefused)
 {
 	std::string const refused = SchemaRefusal(R"(
 [table loot
-  (input mode flags)
-  (key kind int)
-  (column w double)
-  (column req flags (input mode))
+  (input req flags)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double, req: flags
 )");
 	EXPECT_TRUE(Mentions(refused, "weighted")) << refused;
 	EXPECT_TRUE(Mentions(refused, "ranking")) << refused;
@@ -413,11 +405,9 @@ TEST(PickWeightedSchema, AConditionColumnIsRefused)
 {
 	std::string const refused = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
-  (column when condition)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double, when
 )");
 	EXPECT_TRUE(Mentions(refused, "when")) << refused;
 	EXPECT_TRUE(Mentions(refused, "weighted")) << refused;
@@ -428,10 +418,9 @@ TEST(PickWeightedSchema, ADeclaredInputIsRefused)
 	std::string const refused = SchemaRefusal(R"(
 [table loot
   (input t double)
-  (key kind int)
-  (column w double)
   (pick weighted w)
   (order kind)]
+>kind: int, w: double
 )");
 	EXPECT_TRUE(Mentions(refused, "input")) << refused;
 	EXPECT_TRUE(Mentions(refused, "weighted")) << refused;
@@ -441,28 +430,25 @@ TEST(PickWeightedSchema, TheWeightColumnIsRequiredAndMustBeADouble)
 {
 	std::string const none = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
   (pick weighted)
   (order kind)]
+>kind: int, w: double
 )");
 	EXPECT_TRUE(Mentions(none, "(pick weighted ..) names the column it reads")) << none;
 
 	std::string const notDouble = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w int)
   (pick weighted w)
   (order kind)]
+>kind: int, w: int
 )");
 	EXPECT_TRUE(Mentions(notDouble, "double")) << notDouble;
 
 	std::string const missing = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
   (pick weighted nope)
   (order kind)]
+>kind: int, w: double
 )");
 	EXPECT_TRUE(Mentions(missing, "nope")) << missing;
 }
@@ -501,9 +487,8 @@ TEST(PickWeightedSchema, AWeightedTableIsReadOnlyAndKeyedLikeAnyPick)
 
 	std::string const unordered = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
   (pick weighted w)]
+>kind: int, w: double
 )");
 	EXPECT_TRUE(Mentions(unordered, "order")) << unordered;
 }
@@ -512,12 +497,10 @@ TEST(PickWeightedSchema, AWeightedTableCannotBePivoted)
 {
 	std::string const refused = SchemaRefusal(R"(
 [table loot
-  (key kind int)
-  (column w double)
-  (column item int)
   (pick weighted w)
   (order kind)
-  (pivot item w)]
+  (pivot item w: double)]
+>kind: int
 )");
 	EXPECT_TRUE(Mentions(refused, "pivot")) << refused;
 }

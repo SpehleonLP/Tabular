@@ -52,17 +52,27 @@ double const kNaN = std::numeric_limits<double>::quiet_NaN();
 // One best table: label (key), zone (an edge over t), clip.
 constexpr std::string_view kZone = R"(
 [table zone
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t) edge)
-  (column clip int)
+  (input zone double 0..1)
   (order label)]
+>label: int, ^zone, clip: int
 )";
 
 relation_store StoreFrom(std::string_view source)
 {
 	auto s = ReadSchema(source, "edge.tabular");
 	EXPECT_TRUE(s.has_value()) << RefusalOf(s);
+	return relation_store(s ? std::move(*s) : schema{});
+}
+
+// A table whose bands share one input, which only the builder can declare: a
+// file's band is named for the input it bands.
+relation_store StoreFrom(std::string_view name, std::span<add_input const> inputs, std::span<add_column const> columns,
+	std::span<uint32_t const> order)
+{
+	order_by const     by{order};
+	create_table const table{name, columns, &by, true, inputs, pick_policy::Best};
+	auto s = BuildSchema(std::span<create_table const>(&table, 1));
+	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(s ? std::move(*s) : schema{});
 }
 
@@ -120,17 +130,6 @@ TEST(EdgeSchema, AnEdgeIsABandColumnAndNoOtherKind)
 	EXPECT_FALSE(def.columns[2].edge);
 	EXPECT_TRUE(def.edges);
 
-	auto onInt = ReadSchema(R"(
-[table zone
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t))
-  (column clip int edge)
-  (order label)]
-)", "edge.tabular");
-	EXPECT_TRUE(Mentions(RefusalOf(onInt), "column 'clip' of table 'zone' is an int marked edge; only a band is an edge"))
-		<< RefusalOf(onInt);
-
 	// The builder refuses it the same way: it is the one place the rule lives.
 	add_column const columns[] = {{"flag", column_type::Flags, false, UINT32_MAX, {}, true}};
 	create_table table;
@@ -143,20 +142,17 @@ TEST(EdgeSchema, OrAndAllTablesCarryEdgesAndAPlainBandTableHasNone)
 {
 	auto s = ReadSchema(R"(
 [table pulse
-  (input t double)
-  (column zone band (input t) edge)
-  (column bit flags)
+  (input zone double)
   (pick or bit)]
+^zone, bit: flags
 [table every
-  (input t double)
-  (column zone band (input t) edge)
-  (column clip int)
+  (input zone double)
   (pick all)]
+^zone, clip: int
 [table plain
-  (input t double)
-  (column zone band (input t))
-  (column clip int)
+  (input zone double)
   (pick all)]
+zone: band, clip: int
 )", "edge.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	EXPECT_TRUE(s->tables()[0].edges);
@@ -173,11 +169,9 @@ TEST(EdgeSchema, ABlankEdgeCellIsNoEdgeAndOnlyAnEdgeTakesOne)
 	// A plain band has no blank: its catch-all is written as the whole range.
 	relation_store plain = StoreFrom(R"(
 [table zone
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t))
-  (column clip int)
+  (input zone double 0..1)
   (order label)]
+>label: int, zone: band, clip: int
 )");
 	EXPECT_TRUE(Mentions(RefusalOf(LoadText(plain, 0, "label,zone,clip\n1,,11\n")), "column 'zone' is empty"));
 	cell const noEdgeRow[] = {cell::Integer(1), NoEdge(), cell::Integer(11)};
@@ -196,7 +190,7 @@ TEST(EdgeLayout, ARunWhoseOnlyCatchAllIsAnEdgeIsNotTotal)
 {
 	relation_store store = StoreFrom(kZone);
 	std::string const refused = RefusalOf(LoadText(store, 0, "label,zone,clip\n1,0.3..0.5,10\n"));
-	EXPECT_TRUE(Mentions(refused, "key (1): t 0 has no row with no script condition and no edge")) << refused;
+	EXPECT_TRUE(Mentions(refused, "key (1): zone 0 has no row with no script condition and no edge")) << refused;
 }
 
 TEST(EdgeLayout, AnEdgeRowBeforeACatchAllIsNotDeadAndOneAfterItIs)
@@ -222,15 +216,12 @@ TEST(EdgeLayout, AnEdgeHoldsWhereACrossingCanEndNotOnlyInsideItsBand)
 {
 	// Upward into 0.6..1 ends at 0.6 or above; a plain row covering 0.6..1
 	// before it leaves it no cell, so it is dead. Below 0.6 it never ends.
-	relation_store store = StoreFrom(R"(
-[table zone
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t) edge)
-  (column window band (input t))
-  (column clip int)
-  (order label)]
-)");
+	add_input const  inputs[]  = {{"t", column_type::Double, true, 0, 1}};
+	add_column const columns[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+		{"zone", column_type::Band, false, 0, {}, true}, {"window", column_type::Band, false, 0},
+		{"clip", column_type::Int}};
+	uint32_t const   order[]   = {0};
+	relation_store   store     = StoreFrom("zone", inputs, columns, order);
 	std::string const dead = RefusalOf(LoadText(store, 0, "label,zone,window,clip\n1,,0.6..1,9\n1,0.6..1,0..1,10\n1,,0..1,11\n"));
 	EXPECT_TRUE(Mentions(dead, "is never picked")) << dead;
 	// Downward into 0..0.2 ends below 0.2, so a plain row over 0..0.2 before it
@@ -245,17 +236,12 @@ TEST(EdgeLayout, AnEdgeHoldsWhereACrossingCanEndNotOnlyInsideItsBand)
 
 TEST(EdgeLayout, AnOverlapRefusalWithAnEdgeRowSaysWhereAnEdgeHolds)
 {
-	relation_store store = StoreFrom(R"(
-[table zone
-  (input t double 0..1)
-  (input f flags)
-  (key label int (domain rows))
-  (column near flags (input f))
-  (column zone band (input t) edge)
-  (column window band (input t))
-  (column clip int)
-  (order label)]
-)");
+	add_input const  inputs[]  = {{"t", column_type::Double, true, 0, 1}, {"f", column_type::Flags}};
+	add_column const columns[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+		{"near", column_type::Flags, false, 1}, {"zone", column_type::Band, false, 0, {}, true},
+		{"window", column_type::Band, false, 0}, {"clip", column_type::Int}};
+	uint32_t const   order[]   = {0};
+	relation_store   store     = StoreFrom("zone", inputs, columns, order);
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,near,zone,window,clip\n1,0,,0..1,9\n1,1,0.4..0.42,0..1,10\n", 1)), "(accepted)");
 	// Owner 1's edge holds wherever a crossing into 0.4..0.42 ends, which is
 	// all of 0..1, so owner 2's 0.8..1 under equal flags overlaps it.
@@ -314,7 +300,7 @@ TEST(EdgePick, APickOfAnEdgeTableNeedsThePreviousInputsAndChecksThem)
 	ASSERT_TRUE(Mentions(none, "a pick of 'zone' reads an edge and was given 0 previous inputs; the table declares 1")) << none;
 	cell const nan[] = {cell::Real(kNaN)};
 	std::string const refused = RefusalOf(PickBest(store, 0, pick_query{keys, inputs, nullptr, nan}));
-	EXPECT_TRUE(Mentions(refused, "input 't' of 'zone' is NaN")) << refused;
+	EXPECT_TRUE(Mentions(refused, "input 'zone' of 'zone' is NaN")) << refused;
 	EXPECT_TRUE(Mentions(refused, "the previous value")) << refused;
 }
 
@@ -324,13 +310,10 @@ TEST(EdgePick, OnlyThePreviousValuesAnEdgeReadsAreChecked)
 	// there is no refusal; t is read by the edge, so a NaN there is.
 	relation_store store = StoreFrom(R"(
 [table zone
-  (input t double 0..1)
-  (input u double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t) edge)
-  (column level band (input u))
-  (column clip int)
+  (input zone double 0..1)
+  (input level double 0..1)
   (order label)]
+>label: int, ^zone, level: band, clip: int
 )");
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "label,zone,level,clip\n1,0.4..0.5,0..1,10\n1,,0..1,11\n")), "(accepted)");
 	cell const keys[]     = {cell::Integer(1)};
@@ -340,23 +323,21 @@ TEST(EdgePick, OnlyThePreviousValuesAnEdgeReadsAreChecked)
 	EXPECT_TRUE(accepted.has_value()) << RefusalOf(accepted);
 	cell const edgeNaN[] = {cell::Real(kNaN), cell::Real(0.1)};
 	std::string const refused = RefusalOf(PickBest(store, 0, pick_query{keys, inputs, nullptr, edgeNaN}));
-	EXPECT_TRUE(Mentions(refused, "input 't' of 'zone' is NaN")) << refused;
-	EXPECT_TRUE(Mentions(refused, "the previous value of input 't'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "input 'zone' of 'zone' is NaN")) << refused;
+	EXPECT_TRUE(Mentions(refused, "the previous value of input 'zone'")) << refused;
 }
 
 TEST(EdgePick, PickOrAndPickAllReadEdgesToo)
 {
 	relation_store store = StoreFrom(R"(
 [table pulse
-  (input t double)
-  (column zone band (input t) edge)
-  (column bit flags)
+  (input zone double)
   (pick or bit)]
+^zone, bit: flags
 [table every
-  (input t double)
-  (column zone band (input t) edge)
-  (column clip int)
+  (input zone double)
   (pick all)]
+^zone, clip: int
 )");
 	ASSERT_EQ(RefusalOf(LoadText(store, 0, "zone,bit\n0.4..0.42,1\n0..0.2,2\n,4\n")), "(accepted)");
 	ASSERT_EQ(RefusalOf(LoadText(store, 1, "zone,clip\n0.4..0.42,1\n0..0.2,2\n,4\n")), "(accepted)");
@@ -474,24 +455,20 @@ struct edge_fixture
 // startled state lasts one step; its entry emits the startle.
 constexpr std::string_view kStartle = R"(
 [table startle
-  (input threat double 0..1)
-  (input energy double 0..1)
-  (key mode hash (domain rows))
-  (column rise band (input threat) edge)
-  (column tired band (input energy))
-  (column next hash)
+  (input rise double 0..1)
+  (input tired double 0..1)
   (order mode)]
+>mode, ^rise, tired: band, next
 [table startle_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine grazer
   (state mode hash (members graze startled) (initial graze))
   (input threat double 0..1)
   (input energy double 0..1)]
 list,from,where,given,set,emit,overrides
 entry,startle_enter,mode=state.mode,,,command,
-step,startle,mode=state.mode,threat=input.threat energy=input.energy,mode=next,,
+step,startle,mode=state.mode,rise=input.threat tired=input.energy,mode=next,,
 )";
 
 constexpr std::string_view kStartleRows = R"(mode, rise, tired, next
@@ -520,7 +497,7 @@ int Startles(std::span<emitted const> results)
 std::string MachineRefusal(std::string_view given)
 {
 	std::string source(kStartle);
-	std::string const from = "threat=input.threat energy=input.energy";
+	std::string const from = "rise=input.threat tired=input.energy";
 	source.replace(source.find(from), from.size(), given);
 	return RefusalOf(ReadDocument(source, "edge.tabular"));
 }
@@ -633,11 +610,11 @@ TEST(MachineEdge, AValueThatIsNotReadLeavesThePreviousValueAtTheLastOneRead)
 
 TEST(MachineEdge, AnEdgeReadsAMachineInputThroughItsGetter)
 {
-	EXPECT_EQ(MachineRefusal("threat=input.threat energy=input.energy"), "(accepted)");
-	std::string const literal = MachineRefusal("threat=(literal 0.6) energy=input.energy");
-	EXPECT_TRUE(Mentions(literal, "input 'threat' is read by edge 'rise', which compares it with its value on the "
+	EXPECT_EQ(MachineRefusal("rise=input.threat tired=input.energy"), "(accepted)");
+	std::string const literal = MachineRefusal("rise=(literal 0.6) tired=input.energy");
+	EXPECT_TRUE(Mentions(literal, "input 'rise' is read by edge 'rise', which compares it with its value on the "
 		"previous step; it comes from a machine input's getter, and here from a literal")) << literal;
-	std::string const state = MachineRefusal("threat=input.energy energy=input.energy");
+	std::string const state = MachineRefusal("rise=input.energy tired=input.energy");
 	EXPECT_EQ(state, "(accepted)") << "any getter's input will do";
 
 }
@@ -646,35 +623,30 @@ TEST(MachineEdge, AnEdgeFromAStateOrAnEarlierClauseIsRefused)
 {
 	auto refused = ReadDocument(R"(
 [table level
-  (key mode hash (domain rows))
-  (column value double)
   (order mode)]
+>mode, value: double
 [table zone
-  (input t double 0..1)
-  (key mode hash (domain rows))
-  (column zone band (input t) edge)
-  (column next hash)
+  (input zone double 0..1)
   (order mode)]
+>mode, ^zone, next
 [machine m
   (state mode hash (members a) (initial a))
   (state level double (initial 0))]
 list,from,where,given,set,emit,overrides
 step,level,mode=state.mode,,,,
-step,zone,mode=state.mode,t=clause.0.value,mode=next,,
+step,zone,mode=state.mode,zone=clause.0.value,mode=next,,
 )", "edge.tabular");
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "and here from column 'value' of clause 0")) << RefusalOf(refused);
 	auto fromState = ReadDocument(R"(
 [table zone
-  (input t double 0..1)
-  (key mode hash (domain rows))
-  (column zone band (input t) edge)
-  (column next hash)
+  (input zone double 0..1)
   (order mode)]
+>mode, ^zone, next
 [machine m
   (state mode hash (members a) (initial a))
   (state level double (initial 0))]
 list,from,where,given,set,emit,overrides
-step,zone,mode=state.mode,t=state.level,mode=next,,
+step,zone,mode=state.mode,zone=state.level,mode=next,,
 )", "edge.tabular");
 	EXPECT_TRUE(Mentions(RefusalOf(fromState), "and here from state column 'level'")) << RefusalOf(fromState);
 }
@@ -685,8 +657,8 @@ TEST(MachineEdge, PrepareProvesAnEdgeRowConditionalOverTheClausesDomain)
 	// closes the key over [graze, startled], and startled's only row is an
 	// edge: an orphan to Load, not total to Prepare.
 	std::string source(kStartle);
-	std::string const domain = "(key mode hash (domain rows))\n  (column rise";
-	source.replace(source.find(domain), domain.size(), "(key mode hash (domain (members graze)))\n  (column rise");
+	std::string const domain = "(order mode)]\n>mode, ^rise";
+	source.replace(source.find(domain), domain.size(), "(order mode)\n  (domain mode graze)]\n>mode, ^rise");
 	auto doc = ReadDocument(source, "edge.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -707,23 +679,19 @@ namespace
 // 0.8..1), and plain bands; an or table pulses on the same edges.
 constexpr std::string_view kWalker = R"(
 [table walk
-  (input x double 0..1)
-  (key mode hash (domain rows))
-  (column zone band (input x) edge)
-  (column window band (input x))
-  (column next hash)
+  (input zone double 0..1) (input window double 0..1)
   (order mode)]
+>mode, ^zone, window: band, next
 [table pulse
-  (input x double 0..1)
-  (column zone band (input x) edge)
-  (column bit flags)
+  (input zone double 0..1)
   (pick or bit)]
+^zone, bit: flags
 [machine walker
   (state mode hash (members a b c d) (initial a))
   (input threat double 0..1)]
 list,from,where,given,set,emit,overrides
-step,walk,mode=state.mode,x=input.threat,mode=next,,
-step,pulse,,x=input.threat,,,
+step,walk,mode=state.mode,zone=input.threat window=input.threat,mode=next,,
+step,pulse,,zone=input.threat,,,
 )";
 
 constexpr std::string_view kWalkRows = R"(mode, zone, window, next
@@ -803,7 +771,10 @@ void WalkParity(std::string_view source, uint64_t seed)
 		cell const keys[]     = {before};
 		cell const inputs[]   = {cell::Real(host.threat)};
 		cell const previous[] = {cell::Real(last)};
-		auto const oracle = PickBest(**walk, pick_query{keys, inputs, nullptr, previous});
+		// walk's two bands read the threat, each through its own input.
+		cell const walkInputs[]   = {inputs[0], inputs[0]};
+		cell const walkPrevious[] = {previous[0], previous[0]};
+		auto const oracle = PickBest(**walk, pick_query{keys, walkInputs, nullptr, walkPrevious});
 		auto const ored   = PickOr(**pulse, pick_query{{}, inputs, nullptr, previous});
 		Step(walker, &host, uint64_t(i));
 		auto where = [&]() { return "step " + std::to_string(i) + " x " + std::to_string(host.threat) + " previous "
@@ -897,18 +868,15 @@ TEST(EdgeParity, TwoInputsWalkedTogetherMatchPickBestStepByStep)
 // the group below, here the default.
 constexpr std::string_view kRanked = R"(
 [table ranked
-  (input x double 0..1)
-  (input f flags)
-  (key mode hash (domain rows))
-  (column near flags (input f))
-  (column rise band (input x) edge)
-  (column next hash)
+  (input rise double 0..1)
+  (input near flags)
   (order mode)]
+>mode, near: flags, ^rise, next
 [machine ranker
   (state mode hash (members a b) (initial a))
   (input threat double 0..1)]
 list,from,where,given,set,emit,overrides
-step,ranked,mode=state.mode,x=input.threat f=(literal 1),mode=next,,
+step,ranked,mode=state.mode,rise=input.threat near=(literal 1),mode=next,,
 )";
 
 constexpr std::string_view kRankedRows = R"(mode, near, rise, next
@@ -961,14 +929,12 @@ TEST(EdgeParity, ARankedEdgeRowThatDoesNotHoldFallsToTheGroupBelow)
 // rows out, so the edge reads the same through PickOr and an or clause.
 constexpr std::string_view kPivotedPulse = R"(
 [table pulse
-  (input x double 0..1)
-  (column bits flags)
-  (column zone band (input x) edge)
+  (input zone double 0..1)
   (pick or bits)
-  (pivot bits zone)]
+  (pivot bits ^zone)]
 [machine pulser (input threat double 0..1)]
 list,from,where,given,set,emit,overrides
-step,pulse,,x=input.threat,,,
+step,pulse,,zone=input.threat,,,
 )";
 
 TEST(EdgeParity, APivotedOrTableWithAnEdgeCellsColumnPicksAndStepsAlike)
@@ -1063,22 +1029,23 @@ namespace
 std::string Cyclic(std::string_view source)
 {
 	std::string text(source);
-	std::string const from = "(input x double 0..1)";
-	std::string const to   = "(input x double 0..1 cyclic)";
-	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+	for (std::string_view input : {"zone", "window"})
 	{
-		text.replace(at, from.size(), to);
+		std::string const from = cc(std::string("(input "), input, " double 0..1)");
+		std::string const to   = cc(std::string("(input "), input, " double 0..1 cyclic)");
+		for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+		{
+			text.replace(at, from.size(), to);
+		}
 	}
 	return text;
 }
 
 constexpr std::string_view kStep = R"(
 [table zone
-  (input x double 0..1)
-  (key label int (domain rows))
-  (column zone band (input x) edge)
-  (column clip int)
+  (input zone double 0..1)
   (order label)]
+>label: int, ^zone, clip: int
 )";
 
 }
@@ -1093,10 +1060,10 @@ TEST(CyclicSchema, ARangedDoubleInputMayWrapAndNoOtherInput)
 	EXPECT_FALSE(linear->tables()[0].inputs[0].cyclic);
 
 	std::string unranged(kStep);
-	std::string const from = "(input x double 0..1)";
-	unranged.replace(unranged.find(from), from.size(), "(input x double cyclic)");
+	std::string const from = "(input zone double 0..1)";
+	unranged.replace(unranged.find(from), from.size(), "(input zone double cyclic)");
 	std::string const noRange = RefusalOf(ReadSchema(unranged, "edge.tabular"));
-	EXPECT_TRUE(Mentions(noRange, "input 'x' of table 'zone' is cyclic and has no range; a cyclic input's range is its period"))
+	EXPECT_TRUE(Mentions(noRange, "input 'zone' of table 'zone' is cyclic and has no range; a cyclic input's range is its period"))
 		<< noRange;
 
 	// The table input whose bands read a machine input wraps; the machine's
@@ -1169,19 +1136,19 @@ TEST(CyclicLayout, ACrossingCanEndAnywhereOnThePeriod)
 {
 	// Up through 0.6..1 the short way ends past 1, below 0.6 once wrapped, so a
 	// plain row over 0.6..1 before the edge no longer leaves it no cell.
-	constexpr std::string_view kWindowed = R"(
-[table zone
-  (input x double 0..1)
-  (key label int (domain rows))
-  (column zone band (input x) edge)
-  (column window band (input x))
-  (column clip int)
-  (order label)]
-)";
+	auto windowed = [](bool cyclic)
+	{
+		add_input const  inputs[]  = {{"x", column_type::Double, true, 0, 1, cyclic}};
+		add_column const columns[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"zone", column_type::Band, false, 0, {}, true}, {"window", column_type::Band, false, 0},
+			{"clip", column_type::Int}};
+		uint32_t const   order[]   = {0};
+		return StoreFrom("zone", inputs, columns, order);
+	};
 	constexpr std::string_view kRows = "label,zone,window,clip\n1,,0.6..1,9\n1,0.6..1,0..1,10\n1,,0..1,11\n";
-	relation_store linear = StoreFrom(kWindowed);
+	relation_store linear = windowed(false);
 	EXPECT_TRUE(Mentions(RefusalOf(LoadText(linear, 0, kRows)), "is never picked"));
-	relation_store cyclic = StoreFrom(Cyclic(kWindowed));
+	relation_store cyclic = windowed(true);
 	EXPECT_EQ(RefusalOf(LoadText(cyclic, 0, kRows)), "(accepted)");
 
 	// A band that is the whole period still holds for no input.
@@ -1194,9 +1161,8 @@ TEST(CyclicMachine, AFootstepStepsOncePerPassOfThePhase)
 {
 	// kStartle with its edge on a cyclic phase: startled is the footstep.
 	std::string source(kStartle);
-	std::string const table = "  (input threat double 0..1)\n  (input energy double 0..1)\n  (key mode";
-	source.replace(source.find(table), table.size(),
-		"  (input threat double 0..1 cyclic)\n  (input energy double 0..1)\n  (key mode");
+	std::string const table = "  (input rise double 0..1)\n";
+	source.replace(source.find(table), table.size(), "  (input rise double 0..1 cyclic)\n");
 	edge_fixture f(source, {"mode, rise, tired, next\ngraze, 0.5..0.55, 0..1, startled\ngraze, , 0..1, graze\nstartled, , 0..1, graze\n",
 		kStartleEnterRows});
 	ASSERT_TRUE(f.binding);

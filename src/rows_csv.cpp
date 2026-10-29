@@ -215,7 +215,8 @@ tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& 
 	uint32_t const stringCount    = layout.stringCount;
 	uint32_t const conditionCount = layout.conditionCount;
 
-	auto read = detail::csv_text::Read(command.text, command.label, command.first_line);
+	auto read = command.record_lines.empty() ? detail::csv_text::Read(command.text, command.label, command.first_line)
+		: detail::csv_text::Read(command.text, command.label, command.record_lines);
 	if (!read)
 	{
 		return tl::make_unexpected(std::move(read.error()));

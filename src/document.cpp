@@ -196,7 +196,8 @@ tl::expected<void, ErrorContext> LoadDocumentRows(relation_store& store, schema_
 		else
 		{
 			csv_rows command{body.table, owner, body.text, document.storage->label, body.first_line, condition};
-			command.pivoted = def.pivot_headers != UINT32_MAX;
+			command.pivoted      = def.pivot_headers != UINT32_MAX;
+			command.record_lines = body.record_lines;
 			loaded          = LoadCsv(store, command);
 		}
 		if (!loaded)

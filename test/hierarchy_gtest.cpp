@@ -173,28 +173,20 @@ std::string Replace(std::string_view text, std::string_view from, std::string_vi
 // own entry and exit table, keyed on its own column.
 constexpr std::string_view kBench = R"(
 [table bench
-  (key page hash (domain rows))
-  (key modal hash (domain rows))
-  (key kind hash fallthrough)
-  (column next_page hash)
-  (column next_modal hash)
   (order page modal kind)]
+>page, >modal, >kind?, next_page, next_modal
 [table page_enter
-  (key page hash (domain rows))
-  (order page)
-  (suffix command)]
+  (order page)]
+>page, command
 [table page_leave
-  (key page hash (domain rows))
-  (order page)
-  (suffix command)]
+  (order page)]
+>page, command
 [table modal_enter
-  (key modal hash (domain rows))
-  (order modal)
-  (suffix command)]
+  (order modal)]
+>modal, command
 [table modal_leave
-  (key modal hash (domain rows))
-  (order modal)
-  (suffix command)]
+  (order modal)]
+>modal, command
 [machine craft_bench
   (state page hash (members experiment recipes) (initial experiment))
   (state modal hash (members none confirm result) (initial none))
@@ -258,7 +250,7 @@ TEST(EntryPerColumn, AClauseKeyedOnNoStateColumnRunsOnAnyChange)
 {
 	// A third entry clause keys on no state column (a constant table): it runs
 	// whenever any hash column changed, as every clause did before Part 4.
-	std::string const source = Replace(Replace(kBench, "[machine craft_bench", "[table chime (column v int) (suffix command)]\n[machine craft_bench"),
+	std::string const source = Replace(Replace(kBench, "[machine craft_bench", "[table chime]\nv: int, command\n[machine craft_bench"),
 		"entry,modal_enter,modal=state.modal,,,command,\n", "entry,modal_enter,modal=state.modal,,,command,\nentry,chime,,,,command,\n");
 	machine_fixture f(source, {kBenchRows, kPageEnterRows, kPageLeaveRows, kModalEnterRows, kModalLeaveRows,
 		"v,command\n1,chime\n"});
@@ -274,9 +266,9 @@ TEST(EntryPerColumn, ClausesThatReadOneAnotherRunAsOne)
 	// The modal's entry reads what the page's entry answered: they run on the
 	// union of their columns, so a modal-only change runs the page's entry too
 	// rather than leaving its reader without a source.
-	std::string const source = Replace(Replace(kBench, "[table modal_enter\n  (key modal hash (domain rows))\n  (order modal)\n  (suffix command)]\n",
-		"[table modal_enter\n  (key modal hash (domain rows))\n  (key page int (domain rows))\n  (order modal page)\n  (suffix command)]\n"
-		"[table page_code\n  (key page hash (domain rows))\n  (column code int)\n  (order page)]\n"),
+	std::string const source = Replace(Replace(kBench, "[table modal_enter\n  (order modal)]\n>modal, command\n",
+		"[table modal_enter\n  (order modal page)]\n>modal, >page: int, command\n"
+		"[table page_code\n  (order page)]\n>page, code: int\n"),
 		"entry,page_enter,page=state.page,,,command,\nentry,modal_enter,modal=state.modal,,,command,\n",
 		"entry,page_code,page=state.page,,,,\nentry,modal_enter,modal=state.modal page=clause.0.code,,,command,\n");
 	machine_fixture f(source, {kBenchRows, kPageEnterRows, kPageLeaveRows,
@@ -299,20 +291,14 @@ namespace
 // its own and answers from the superstate's row; a run overrides it.
 constexpr std::string_view kHfsm = R"(
 [table behaviour
-  (key super hash (domain rows))
-  (key sub hash fallthrough)
-  (key kind hash fallthrough)
-  (column next_super hash)
-  (column next_sub hash)
   (order super sub kind)]
+>super, >sub?, >kind?, next_super, next_sub
 [table super_enter
-  (key super hash (domain rows))
-  (order super)
-  (suffix command)]
+  (order super)]
+>super, command
 [table sub_enter
-  (key sub hash (domain rows))
-  (order sub)
-  (suffix command)]
+  (order sub)]
+>sub, command
 [machine creature
   (state super hash (members move rest) (initial move))
   (state sub hash (members walk run sit sleep) (initial walk))
@@ -404,10 +390,8 @@ namespace
 // Two fall-through keys, a then b: a is the lowest bit, so it gives way first.
 constexpr std::string_view kTwo = R"(
 [table two
-  (key a hash fallthrough)
-  (key b hash fallthrough)
-  (column said hash)
   (order a b)]
+>a?, >b?, said
 )";
 
 constexpr std::string_view kTwoRows = R"(a, b, said
@@ -460,20 +444,14 @@ namespace
 // Clause 2 reads the base clause's next, which is the coalesced answer.
 constexpr std::string_view kModded = R"(
 [table brain
-  (key mode hash (domain rows))
-  (column next hash)
-  (column steps int)
-  (order mode)
-  (suffix command)]
-[table brain_mod
-  (key mode hash (domain rows))
-  (column next hash)
-  (order mode)
-  (suffix command)]
-[table label
-  (key mode hash (domain rows))
-  (column code int)
   (order mode)]
+>mode, next, steps: int, command
+[table brain_mod
+  (order mode)]
+>mode, next, command
+[table label
+  (order mode)]
+>mode, code: int
 [machine grazer
   (state mode hash (members idle walk sleep) (initial idle))
   (state steps int (initial 0))
@@ -570,8 +548,8 @@ TEST(OverrideClause, ItsShapeIsChecked)
 	std::string const gap = refusal(Replace(kModded, "step,brain_mod,", "step,label,mode=state.mode,,,,\nstep,brain_mod,"));
 	EXPECT_TRUE(Mentions(gap, "which does not directly precede it")) << gap;
 
-	std::string const wider = refusal(Replace(Replace(kModded, "  (column next hash)\n  (order mode)\n  (suffix command)]\n[table label",
-		"  (column next hash)\n  (column code int)\n  (order mode)\n  (suffix command)]\n[table label"),
+	std::string const wider = refusal(Replace(Replace(kModded, ">mode, next, command\n[table label",
+		">mode, next, code: int, command\n[table label"),
 		"step,brain_mod,mode=state.mode,,mode=next,command,0", "step,brain_mod,mode=state.mode,,mode=next code=code,command,0"));
 	EXPECT_TRUE(Mentions(wider, "sets state column 'code', which clause 0 it overrides does not")) << wider;
 
@@ -612,13 +590,8 @@ namespace
 // row for no event.
 constexpr std::string_view kOneTable = R"(
 [table rules
-  (key super hash (domain rows))
-  (key sub hash fallthrough)
-  (key kind hash fallthrough)
-  (column next_super hash)
-  (column next_sub hash)
-  (order super sub kind)
-  (suffix command)]
+  (order super sub kind)]
+>super, >sub?, >kind?, next_super, next_sub, command
 [machine creature
   (state super hash (members move rest) (initial move))
   (state sub hash (members walk run sit sleep) (initial walk))
@@ -641,20 +614,11 @@ rest,  ,     sleep, rest,       sleep,    (snore)
 
 constexpr std::string_view kTwoTables = R"(
 [table super_rules
-  (key super hash (domain rows))
-  (key kind hash fallthrough)
-  (column next_super hash)
-  (column next_sub hash)
-  (order super kind)
-  (suffix command)]
+  (order super kind)]
+>super, >kind?, next_super, next_sub, command
 [table sub_rules
-  (key super hash (domain rows))
-  (key kind hash fallthrough)
-  (key sub hash (domain rows))
-  (column next_super hash)
-  (column next_sub hash)
-  (order super kind sub)
-  (suffix command)]
+  (order super kind sub)]
+>super, >kind?, >sub, next_super, next_sub, command
 [machine creature
   (state super hash (members move rest) (initial move))
   (state sub hash (members walk run sit sleep) (initial walk))
@@ -784,21 +748,17 @@ namespace
 // forms of kOneTable / kTwoTables so a mode change's leaving and entering are
 // compared too.
 constexpr std::string_view kEntryExitTables = R"([table super_enter
-  (key super hash (domain rows))
-  (order super)
-  (suffix command)]
+  (order super)]
+>super, command
 [table sub_enter
-  (key sub hash (domain rows))
-  (order sub)
-  (suffix command)]
+  (order sub)]
+>sub, command
 [table super_leave
-  (key super hash (domain rows))
-  (order super)
-  (suffix command)]
+  (order super)]
+>super, command
 [table sub_leave
-  (key sub hash (domain rows))
-  (order sub)
-  (suffix command)]
+  (order sub)]
+>sub, command
 )";
 
 constexpr std::string_view kEntryExitLists = R"(exit,super_leave,super=state.super,,,command,
@@ -858,20 +818,14 @@ namespace
 // group on both columns.
 constexpr std::string_view kCrouch = R"(
 [table brain
-  (key mode hash (domain rows))
-  (key kind hash fallthrough)
-  (column next_mode hash)
-  (column next_pose hash)
   (order mode kind)]
+>mode, >kind?, next_mode, next_pose
 [table leave
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [table leave_mod
-  (key mode hash (domain rows))
-  (key pose hash (domain rows))
-  (order mode pose)
-  (suffix command)]
+  (order mode pose)]
+>mode, >pose, command
 [machine walker
   (state mode hash (members idle walk) (initial idle))
   (state pose hash (members up down) (initial up))
@@ -944,8 +898,8 @@ TEST(OverrideClause, AnOverrideThatFailsIsReportedAndItsBasesAnswerStands)
 {
 	// The mod's first row is a script condition, the second its fallback: the
 	// override answers either way, unless the script raises.
-	std::string const source = Replace(kModded, "[table brain_mod\n  (key mode hash (domain rows))\n",
-		"[table brain_mod\n  (key mode hash (domain rows))\n  (column when condition)\n");
+	std::string const source = Replace(kModded, ">mode, next, command\n[table label",
+		">mode, when, next, command\n[table label");
 	machine_fixture f(source, {kBaseRows, "mode,when,next,command\nidle,mod_on,sleep,anim yawn\nidle,,walk,anim stroll\n",
 		kLabelRows});
 	ASSERT_TRUE(f.binding) << f.refusal;
@@ -981,8 +935,8 @@ TEST(OverrideClause, AHitWithNoEmitKeepsTheBasesCommand)
 {
 	// The column-subset rule: an override that sets mode but declares no emit
 	// replaces mode only, so the base's command goes out with the mod's state.
-	std::string const source = Replace(Replace(kModded, "  (column next hash)\n  (order mode)\n  (suffix command)]\n[table label",
-		"  (column next hash)\n  (order mode)]\n[table label"),
+	std::string const source = Replace(Replace(kModded, ">mode, next, command\n[table label",
+		">mode, next\n[table label"),
 		"mode=next,command,0", "mode=next,,0");
 	machine_fixture f(source, {kBaseRows, "mode,next\nidle,sleep\n", kLabelRows});
 	ASSERT_TRUE(f.binding) << f.refusal;
@@ -1000,7 +954,7 @@ TEST(OverrideClause, AnOverridesOwnFallThroughFeedsTheCoalescedAnswer)
 	// kTwoTables' override falls through on kind; a reader of clause 0's
 	// next_sub reads what the override answered, retry included.
 	std::string const source = Replace(Replace(Replace(std::string(kTwoTables), "[machine creature",
-		"[table sub_code\n  (key sub hash (domain rows))\n  (column code int)\n  (order sub)]\n[machine creature"),
+		"[table sub_code\n  (order sub)]\n>sub, code: int\n[machine creature"),
 		"(state sub hash (members walk run sit sleep) (initial walk))",
 		"(state sub hash (members walk run sit sleep) (initial walk))\n  (state code int (initial 0))"),
 		"sub=state.sub,,super=next_super sub=next_sub,command,0\n",
@@ -1025,14 +979,14 @@ TEST(Hierarchy, ANinthFallThroughKeyIsRefused)
 {
 	auto table = [](int keys)
 	{
-		std::string source = "[table wide\n";
+		std::string header;
 		std::string order;
 		for (int k = 1; k <= keys; ++k)
 		{
-			source += "  (key k" + std::to_string(k) + " hash fallthrough)\n";
+			header += ">k" + std::to_string(k) + "?, ";
 			order += (k == 1 ? "" : " ") + std::string("k") + std::to_string(k);
 		}
-		return source + "  (column said int)\n  (order " + order + ")]\n";
+		return "[table wide\n  (order " + order + ")]\n" + header + "said: int\n";
 	};
 	EXPECT_TRUE(ReadSchema(table(8), "wide.tabular").has_value()) << RefusalOf(ReadSchema(table(8), "wide.tabular"));
 	std::string const refused = RefusalOf(ReadSchema(table(9), "wide.tabular"));
@@ -1046,8 +1000,8 @@ TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
 	// checks it is total over its declared domain. A mod naming only idle
 	// over members [idle, walk, sleep] is refused at load, so a partial
 	// override declares domain: rows (its domain is the keys it has).
-	std::string const source = Replace(kModded, "[table brain_mod\n  (key mode hash (domain rows))",
-		"[table brain_mod\n  (key mode hash (domain (members idle walk sleep)))");
+	std::string const source = Replace(kModded, "[table brain_mod\n  (order mode)]",
+		"[table brain_mod\n  (order mode)\n  (domain mode idle walk sleep)]");
 	auto doc = ReadDocument(source, "machine.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -1062,8 +1016,7 @@ TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
 // fall-through keys, read from the same source.
 TEST(OverrideClause, ItFallsThroughOnItsBasesFallThroughKeys)
 {
-	std::string const keyed = Replace(kTwoTables, "(key kind hash fallthrough)\n  (key sub hash (domain rows))",
-		"(key kind hash (domain rows))\n  (key sub hash (domain rows))");
+	std::string const keyed = Replace(kTwoTables, ">super, >kind?, >sub,", ">super, >kind, >sub,");
 	std::string const refused = RefusalOf(ReadDocument(keyed, "machine.tabular"));
 	EXPECT_TRUE(Mentions(refused, "machine 'creature' step clause 1 (table 'sub_rules')")) << refused;
 	EXPECT_TRUE(Mentions(refused, "whose fall-through key 'kind' of table 'super_rules' it does not fall through on")) << refused;
@@ -1077,8 +1030,7 @@ namespace
 // gives way first, inside each level of the base's kind.
 std::string WithFallingSub()
 {
-	return Replace(kTwoTables, "(key kind hash fallthrough)\n  (key sub hash (domain rows))",
-		"(key kind hash fallthrough)\n  (key sub hash fallthrough)");
+	return Replace(kTwoTables, ">super, >kind?, >sub,", ">super, >kind?, >sub?,");
 }
 
 // The override's catch-all for each superstate, a row for wake with any
@@ -1130,15 +1082,11 @@ TEST(OverrideClause, ItsLevelsFollowTheBasesOrderOfFallThroughKeys)
 {
 	constexpr std::string_view source = R"(
 [table base
-  (key x hash fallthrough)
-  (key y hash fallthrough)
-  (column next hash)
   (order x y)]
+>x?, >y?, next
 [table over
-  (key y hash fallthrough)
-  (key x hash fallthrough)
-  (column next hash)
   (order y x)]
+>y?, >x?, next
 [machine twins
   (state mood hash (members p calm) (initial p))
   (state last hash (members base0 basep baseq over0 overq) (initial base0))

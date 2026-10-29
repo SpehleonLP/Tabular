@@ -146,6 +146,26 @@ tl::expected<csv_text, ErrorContext> csv_text::Read(std::string_view text, std::
 	return out;
 }
 
+tl::expected<csv_text, ErrorContext> csv_text::Read(std::string_view text, std::string_view label,
+	std::span<uint32_t const> record_lines)
+{
+	auto read = Read(text, label, uint32_t(1));
+	if (!read)
+	{
+		return read;
+	}
+	if (read->_rows.size() != record_lines.size())
+	{
+		return tl::make_unexpected(ErrorContext("the text has ", read->_rows.size(), " records and ", record_lines.size(),
+			" source lines for them").with(std::string(label)));
+	}
+	for (size_t r = 0; r < record_lines.size(); ++r)
+	{
+		read->_rows[r].line = record_lines[r];
+	}
+	return read;
+}
+
 }
 
 namespace tabular

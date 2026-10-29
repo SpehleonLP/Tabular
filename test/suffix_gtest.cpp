@@ -27,9 +27,8 @@ int64_t Hash(std::string_view name)
 // An entry table: the state keys the row, and the cells after it are its command.
 constexpr std::string_view kSchema = R"(
 [table enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 )";
 
 relation_store Store()
@@ -218,12 +217,8 @@ TEST(SuffixCsv, ABridgeRowIsOneListOfStepsAndMessages)
 {
 	constexpr std::string_view schema = R"(
 [table bridge
-  (column from hash)
-  (column phase hash)
-  (column mode hash)
-  (column to hash)
-  (pick none)
-  (suffix steps)]
+  (pick none)]
+from, phase, mode, to, steps: command
 )";
 	auto s = ReadSchema(schema, "bridge.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
@@ -294,10 +289,8 @@ TEST(SuffixCsv, TheSuffixFollowsSeveralDeclaredColumnsInHeaderOrder)
 {
 	constexpr std::string_view schema = R"(
 [table moves
-  (column id int)
-  (column speed double)
-  (pick none)
-  (suffix steps)]
+  (pick none)]
+id: int, speed: double, steps: command
 )";
 	auto s = ReadSchema(schema, "moves.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
@@ -336,28 +329,12 @@ TEST(SuffixSchema, ASuffixNamingADeclaredColumnIsRefused)
 {
 	constexpr std::string_view schema = R"(
 [table clash
-  (column command int)
-  (pick none)
-  (suffix command)]
+  (pick none)]
+command: int
 )";
 	auto s = ReadSchema(schema, "clash.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "command")) << s.error().format();
-}
-
-TEST(SuffixSchema, AQuotedSuffixNameIsRefused)
-{
-	constexpr std::string_view schema = R"(
-[table blank
-  (column id int)
-  (pick none)
-  (suffix "")]
-)";
-	auto s = ReadSchema(schema, "blank.tabular");
-	ASSERT_FALSE(s.has_value());
-	EXPECT_TRUE(Mentions(s.error().format(), "the suffix's name")) << s.error().format();
-	EXPECT_TRUE(Mentions(s.error().format(), "is quoted; a declared name is a bare word"))
-		<< s.error().format();
 }
 
 TEST(SuffixSchema, TheBuilderRefusesAGridWithASuffixTheReaderNeverPasses)
@@ -368,30 +345,6 @@ TEST(SuffixSchema, TheBuilderRefusesAGridWithASuffixTheReaderNeverPasses)
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "grid 'array' has axes and cells")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "suffix")) << s.error().format();
-}
-
-TEST(SuffixSchema, AGridOrAPivotedTableCannotHaveOne)
-{
-	constexpr std::string_view grid = R"(
-[grid array (rows r int) (columns c int) (cells int) (suffix command)]
-)";
-	auto g = ReadSchema(grid, "grid.tabular");
-	ASSERT_FALSE(g.has_value());
-	EXPECT_TRUE(Mentions(g.error().format(), "suffix")) << g.error().format();
-
-	constexpr std::string_view pivoted = R"(
-[table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip int)
-  (order label)
-  (pivot req clip)
-  (suffix command)]
-)";
-	auto p = ReadSchema(pivoted, "pivot.tabular");
-	ASSERT_FALSE(p.has_value());
-	EXPECT_TRUE(Mentions(p.error().format(), "suffix")) << p.error().format();
 }
 
 TEST(SuffixCsv, APivotedLoadIntoASuffixTableIsRefused)
@@ -411,9 +364,8 @@ TEST(SuffixCsv, ADeclaredCommandColumnIsAListOfCommandsToo)
 {
 	constexpr std::string_view schema = R"(
 [table plain
-  (column id int)
-  (column on_spawn command)
   (pick none)]
+on_spawn: command, id: int
 )";
 	auto s = ReadSchema(schema, "plain.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
@@ -424,7 +376,7 @@ TEST(SuffixCsv, ADeclaredCommandColumnIsAListOfCommandsToo)
 	std::vector<std::string> got;
 	for (size_t r = 0; r < 4; ++r)
 	{
-		auto command = store.CommandAt(0, r, 1);
+		auto command = store.CommandAt(0, r, 0);
 		got.push_back(command ? std::string(*command) : command.error().format());
 	}
 	EXPECT_EQ(got, (std::vector<std::string>{"((anim chew))", "((anim chew))", "()", "(idle)"}));
@@ -439,9 +391,8 @@ TEST(SuffixCsv, ATableWithoutASuffixStillTakesACommaAsACellBoundary)
 {
 	constexpr std::string_view schema = R"(
 [table plain
-  (column id int)
-  (column on_spawn command)
   (pick none)]
+on_spawn: command, id: int
 )";
 	auto s = ReadSchema(schema, "plain.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();

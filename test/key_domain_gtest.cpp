@@ -209,13 +209,17 @@ TEST(KeyDomain, DomainsTakenFromOtherTablesFormNoCycle)
 TEST(KeyDomainFile, TheThreeFormsRead)
 {
 	auto s = ReadSchema(R"(
-[table display (column display hash) (pick none)]
-[table by_rows (key k int (domain rows)) (order k)]
+[table display (pick none)]
+display
+[table by_rows (order k)]
+>k: int
 [table by_members
-  (key mode hash (domain (members idle walk)))
-  (key n int (domain (members 3 -1)))
-  (order mode n)]
-[table by_column (key d hash (domain (from display display))) (order d)]
+  (order mode n)
+  (domain mode idle walk)
+  (domain n 3 -1)]
+>mode, >n: int
+[table by_column (order d) (domain d display.display)]
+>d
 )", "forms.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	EXPECT_EQ(s->tables()[1].domains[0].kind, domain_kind::Rows);
@@ -241,26 +245,18 @@ TEST(KeyDomainFile, AMalformedDomainIsRefused)
 	auto with = [](std::string_view domain)
 	{
 		return ReadSchema(std::string(R"(
-[table display (column display hash) (pick none)]
+[table display (pick none)]
+display
 [table t
-  (key k hash )") + std::string(domain) + R"()
+  )") + std::string(domain) + R"(
   (order k)]
+>k
 )", "bad.tabular");
 	};
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain row)")), "has the unknown domain 'row'")) << RefusalOf(with("(domain row)"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (a b))")), "unknown domain form 'a'")) << RefusalOf(with("(domain (a b))"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) (from display display))")), "one of the two"))
-		<< RefusalOf(with("(domain (members a) (from display display))"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (from display))")), "names a table and its column, both"))
-		<< RefusalOf(with("(domain (from display))"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a) unique)")), "unknown option 'unique'"))
-		<< RefusalOf(with("(domain (members a) unique)"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain rows (members a))")), "is rows and has more after it"))
-		<< RefusalOf(with("(domain rows (members a))"));
-	EXPECT_TRUE(Mentions(RefusalOf(with("(domain (members a a))")), "twice")) << RefusalOf(with("(domain (members a a))"));
-	EXPECT_TRUE(Mentions(RefusalOf(ReadSchema(R"(
-[table t (key k int) (order k)]
-)", "none.tabular")), "declares no domain"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain k display.)")), "table.column")) << RefusalOf(with("(domain k display.)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain k .display)")), "table.column")) << RefusalOf(with("(domain k .display)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain k a a)")), "twice")) << RefusalOf(with("(domain k a a)"));
+	EXPECT_TRUE(Mentions(RefusalOf(with("(domain k)")), "(domain key ..)")) << RefusalOf(with("(domain k)"));
 }
 
 // ---- Totality over the domain -----------------------------------------------
@@ -271,12 +267,10 @@ namespace
 // lookup(label int key with members 1 and 2, req ranks by mode, when, clip).
 constexpr std::string_view kMembers = R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain (members 1 2)))
-  (column req flags (input mode))
-  (column when condition)
-  (column clip int)
-  (order label)]
+  (input req flags)
+  (order label)
+  (domain label 1 2)]
+>label: int, req: flags, when, clip: int
 )";
 
 struct lookup_row
@@ -354,10 +348,8 @@ TEST(DomainTotality, KeysOverTheirRowsTogetherAreExactlyTheTuplesTheRowsName)
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (key a int (domain rows))
-  (key b int (domain rows))
-  (column clip int)
   (order a b)]
+>a: int, >b: int, clip: int
 )");
 	std::vector<run_note> report{run_note{}};
 	// A product of each column's values would demand (1, 2) and (2, 1), which
@@ -370,10 +362,9 @@ TEST(DomainTotality, ARowsKeyBesideAMembersKeyDemandsEveryMemberForEachValueTheR
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (key a int (domain rows))
-  (key b int (domain (members 1 2)))
-  (column clip int)
-  (order a b)]
+  (order a b)
+  (domain b 1 2)]
+>a: int, >b: int, clip: int
 )");
 	auto loaded = LoadTuples(store, {1, 1, 11});
 	EXPECT_TRUE(Mentions(RefusalOf(loaded), "table 'lookup' key (1, 2) has no row with no script condition; no row has this key"))
@@ -387,11 +378,9 @@ TEST(DomainTotality, RowsKeysAfterAMembersKeyProjectOutOfRowOrder)
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (key a int (domain (members 1 2)))
-  (key b int (domain rows))
-  (key c int (domain rows))
-  (column clip int)
-  (order a b c)]
+  (order a b c)
+  (domain a 1 2)]
+>a: int, >b: int, >c: int, clip: int
 )");
 	// The rows name (b, c) = (5, 1) under a = 1 and (3, 9) under a = 2; each is
 	// demanded under both members, and (3, 9) sorts first.
@@ -462,11 +451,12 @@ namespace
 
 // kinds(kind) is read-only; clips(kind, clip) takes its keys from it.
 constexpr std::string_view kKinds = R"(
-[table kinds (column kind int) (pick none)]
+[table kinds (pick none)]
+kind: int
 [table clips
-  (key kind int (domain (from kinds kind)))
-  (column clip int)
-  (order kind)]
+  (order kind)
+  (domain kind kinds.kind)]
+>kind: int, clip: int
 )";
 
 tl::expected<void, ErrorContext> LoadInts(relation_store& store, uint32_t table, uint64_t owner,
@@ -606,13 +596,13 @@ TEST(DomainTotality, AStrandedDependentRefusesEveryChangeToItsSourceThatBringsRo
 TEST(DomainTotality, AStrandedRunOfADependentNamesItsFirstRowNotTheSourceChange)
 {
 	relation_store store = StoreFrom(R"(
-[table kinds (column kind int) (pick none)]
+[table kinds (pick none)]
+kind: int
 [table clips
-  (input t double 0..1)
-  (key kind int (domain (from kinds kind)))
-  (column window band (input t))
-  (column clip int)
-  (order kind)]
+  (input window double 0..1)
+  (order kind)
+  (domain kind kinds.kind)]
+>kind: int, window: band, clip: int
 )");
 	auto loadClip = [&](uint64_t owner, float lo, float hi)
 	{
@@ -628,7 +618,7 @@ TEST(DomainTotality, AStrandedRunOfADependentNamesItsFirstRowNotTheSourceChange)
 	EXPECT_TRUE(Mentions(RefusalOf(refused), "table 'clips' takes a key domain from table 'kinds', and is not total"))
 		<< RefusalOf(refused);
 	EXPECT_TRUE(Mentions(RefusalOf(refused),
-		"table 'clips' key (2): t 0.5 has no row with no script condition; its first row is owner 1's row with key (2), window 0..0.5"))
+		"table 'clips' key (2): window 0.5 has no row with no script condition; its first row is owner 1's row with key (2), window 0..0.5"))
 		<< RefusalOf(refused);
 	EXPECT_FALSE(Mentions(RefusalOf(refused), "brings the key no row")) << RefusalOf(refused);
 }

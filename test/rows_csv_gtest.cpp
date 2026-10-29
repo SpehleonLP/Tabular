@@ -21,14 +21,11 @@ namespace
 
 constexpr std::string_view kSchema = R"(
 [table spawn_points
-  (key package hash)
-  (column section int)
-  (column mask flags)
-  (column x double)
-  (column on_spawn command)
   (pick none)
   (order package section unique)]
-[table rules (column when condition) (pick none)]
+>package, section: int, mask: flags, on_spawn: command, x: double
+[table rules (pick none)]
+when
 )";
 
 relation_store Store()
@@ -63,10 +60,10 @@ TEST(RowsCsv, ReadsEveryTypeInHeaderOrder)
 	EXPECT_EQ(store.Value(0, 0, 0)->i, Hash("meadow"));
 	EXPECT_EQ(store.Value(0, 0, 1)->i, -1);
 	EXPECT_EQ(store.Value(0, 0, 2)->i, 3);
-	EXPECT_EQ(store.Value(0, 0, 3)->d, -0.25);
-	EXPECT_EQ(*store.CommandAt(0, 0, 4), "((spawn moth))") << "a command column holds a list of commands";
+	EXPECT_EQ(store.Value(0, 0, 4)->d, -0.25);
+	EXPECT_EQ(*store.CommandAt(0, 0, 3), "((spawn moth))") << "a command column holds a list of commands";
 	EXPECT_EQ(store.Value(0, 1, 2)->i, 16);
-	EXPECT_EQ(store.Value(0, 1, 3)->d, 1.5);
+	EXPECT_EQ(store.Value(0, 1, 4)->d, 1.5);
 }
 
 TEST(RowsCsv, ReloadReplacesTheOwnersRows)
@@ -192,9 +189,8 @@ namespace
 
 constexpr std::string_view kVecSchema = R"(
 [table marks
-  (column id int)
-  (column at vec2)
   (pick none)]
+id: int, at: vec2
 )";
 
 relation_store VecStore()
@@ -244,7 +240,7 @@ TEST(RowsCsv, Vec2AcceptsSignsAndExponentsAndRefusesInnerSpaces)
 TEST(RowsCsv, AStringCellIsItsTrimmedText)
 {
 	auto s = ReadSchema(
-		"[table places (key name string) (column id int) (pick none)]\n", "places.tabular");
+		"[table places (pick none)]\n>name: string, id: int\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "id,name\n1,  north meadow \n", "places.csv"});
@@ -255,7 +251,7 @@ TEST(RowsCsv, AStringCellIsItsTrimmedText)
 
 TEST(RowsCsv, AnEmptyStringCellIsRefused)
 {
-	auto s = ReadSchema("[table places (column name string) (column id int) (pick none)]\n", "places.tabular");
+	auto s = ReadSchema("[table places (pick none)]\nname: string, id: int\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n,1\n", "places.csv"});
@@ -267,7 +263,7 @@ TEST(RowsCsv, AnEmptyStringCellIsRefused)
 // A cell of only whitespace trims to empty and is refused like an empty one.
 TEST(RowsCsv, StringCellsAreTrimmedButKeepInnerSpaces)
 {
-	auto s = ReadSchema("[table places (key name string) (column id int) (pick none)]\n", "places.tabular");
+	auto s = ReadSchema("[table places (pick none)]\n>name: string, id: int\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n  forest  edge \t,1\n", "places.csv"});
@@ -275,7 +271,7 @@ TEST(RowsCsv, StringCellsAreTrimmedButKeepInnerSpaces)
 	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "forest  edge");
 	EXPECT_EQ(*store.Find(0, 0, std::string_view("forest  edge")), std::vector<size_t>{0});
 
-	relation_store blank(ReadSchema("[table places (column name string) (column id int) (pick none)]\n", "places.tabular").value());
+	relation_store blank(ReadSchema("[table places (pick none)]\nname: string, id: int\n", "places.tabular").value());
 	auto refused = LoadCsv(blank, csv_rows{0, 1, "name,id\n \t ,1\n", "places.csv"});
 	std::string error = refused ? std::string() : refused.error().format();
 	EXPECT_TRUE(Mentions(error, "'name'")) << error;
@@ -287,9 +283,8 @@ namespace
 
 constexpr std::string_view kRuleSchema = R"(
 [table rules
-  (column priority int)
-  (column when condition)
   (pick none)]
+priority: int, when
 )";
 
 relation_store RuleStore()
@@ -433,9 +428,8 @@ TEST(RowsCsv, AHashCollisionAcrossColumnsIsRefused)
 {
 	auto s = ReadSchema(R"(
 [table links
-  (column from hash)
-  (column to hash)
   (pick none)]
+from, to
 )", "links.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
@@ -449,10 +443,8 @@ TEST(RowsCsv, ADeadRowNamesTheLineThatCoversIt)
 	auto s = ReadSchema(R"(
 [table reaction
   (input energy double 0..1)
-  (key stimulus hash (domain rows))
-  (column energy band (input energy))
-  (column reaction string)
   (order stimulus)]
+>stimulus, energy: band, reaction: string
 )", "reaction.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
@@ -471,11 +463,9 @@ TEST(RowsCsv, AStrandedRunIsRefusedNamingTheFileAndNoLine)
 {
 	auto s = ReadSchema(R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label)]
+>label: int, req: flags, clip: string
 )", "lookup.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
@@ -497,9 +487,9 @@ TEST(RowsCsv, ALoadFillsTheReportWithItsOrphans)
 {
 	auto s = ReadSchema(R"(
 [table lookup
-  (key label int (domain (members 1)))
-  (column clip int)
-  (order label)]
+  (order label)
+  (domain label 1)]
+>label: int, clip: int
 )", "lookup.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store        store(std::move(*s));
@@ -518,4 +508,32 @@ TEST(RowsCsv, ALoadFillsTheReportWithItsOrphans)
 	bad.report = &report;
 	EXPECT_FALSE(LoadCsv(store, bad).has_value());
 	EXPECT_TRUE(report.empty()) << "a refused load, refused before the store sees it, leaves the report empty too";
+}
+
+TEST(RowsCsv, RecordLinesNameTheSourceLineOfARefusedRow)
+{
+	relation_store store = Store();
+	uint32_t const lines[] = {10, 40, 41};
+	csv_rows rows{0, 1,
+		"package,section,mask,x,on_spawn\n"
+		"a,1,0,0,()\n"
+		"b,notanumber,0,0,()\n", "spawn.csv"};
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "spawn.csv:41")) << loaded.error().format();
+}
+
+TEST(RowsCsv, RecordLinesOfTheWrongCountAreRefused)
+{
+	relation_store store = Store();
+	uint32_t const lines[] = {10, 40};
+	csv_rows rows{0, 1,
+		"package,section,mask,x,on_spawn\n"
+		"a,1,0,0,()\n"
+		"b,2,0,0,()\n", "spawn.csv"};
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(store.RowCount(0), 0u);
 }

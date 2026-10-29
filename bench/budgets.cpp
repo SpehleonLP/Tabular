@@ -183,18 +183,12 @@ host_binding BenchHost()
 constexpr std::string_view kGrazer = R"(
 [table grazer_brain
   (input energy double 0..1)
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column when condition)
-  (column next hash)
+  (input near flags)
   (order mode message)]
+>mode, >message?, energy: band, near: flags, when, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine grazer
   (state mode hash (members idle walk eat panic) (initial idle))
   (input energy double 0..1)
@@ -202,7 +196,7 @@ constexpr std::string_view kGrazer = R"(
   (input message hash)]
 list,from,where,given,set,emit,overrides
 entry,grazer_enter,mode=state.mode,,,command,
-step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kGrazerBrainRows = R"(mode,  message, energy,   near, when,     next
@@ -271,12 +265,7 @@ std::string BrainSource(budget_sizes const& sizes)
 		{
 			source += "  (input near flags)\n";
 		}
-		source += "  (key mode hash (domain rows))\n  (column energy band (input energy))\n";
-		if (ranked)
-		{
-			source += "  (column near flags (input near))\n";
-		}
-		source += "  (column next hash)\n  (order mode)]\n";
+		source += std::string("  (order mode)]\n>mode, energy: band, ") + (ranked ? "near: flags, " : "") + "next\n";
 	}
 	source += "[machine brain\n  (state mode hash (members";
 	for (size_t m = 0; m < sizes.modes; ++m)

@@ -340,21 +340,14 @@ constexpr char const* kNoCounting = "a sanitizer owns operator new in this build
 
 constexpr std::string_view kMover = R"(
 [table m_step
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column next hash)
   (order mode message)]
+>mode, >message?, next
 [table m_enter
-  (key mode hash (domain rows))
-  (column lv int)
-  (column sp double)
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, lv: int, sp: double, command
 [table m_exit
-  (key mode hash (domain rows))
-  (column lv int)
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, lv: int, command
 [machine m
   (state mode hash (members a b c) (initial a))
   (state level int (initial 5))
@@ -573,23 +566,19 @@ namespace
 
 constexpr std::string_view kStartle = R"(
 [table startle
-  (input threat double 0..1)
-  (key mode hash (domain rows))
-  (column rise band (input threat) edge)
-  (column next hash)
+  (input rise double 0..1)
   (order mode)]
+>mode, ^rise, next
 [table startle_enter
-  (input threat double 0..1)
-  (key mode hash (domain rows))
-  (column rise band (input threat) edge)
-  (order mode)
-  (suffix command)]
+  (input rise double 0..1)
+  (order mode)]
+>mode, ^rise, command
 [machine grazer
   (state mode hash (members graze startled) (initial graze))
   (input threat double 0..1)]
 list,from,where,given,set,emit,overrides
-entry,startle_enter,mode=state.mode,threat=input.threat,,command,
-step,startle,mode=state.mode,threat=input.threat,mode=next,,
+entry,startle_enter,mode=state.mode,rise=input.threat,,command,
+step,startle,mode=state.mode,rise=input.threat,mode=next,,
 )";
 
 constexpr std::string_view kStartleRows = R"(mode, rise, next
@@ -610,8 +599,8 @@ std::string Alarmed()
 {
 	std::string source = Replace(kStartle, "(initial graze))\n  (input threat double 0..1)]",
 		"(initial graze))\n  (input alarm double 0..1)]");
-	source = Replace(source, "step,startle,mode=state.mode,threat=input.threat,", "step,startle,mode=state.mode,threat=input.alarm,");
-	return Replace(source, "entry,startle_enter,mode=state.mode,threat=input.threat,", "entry,startle_enter,mode=state.mode,threat=input.alarm,");
+	source = Replace(source, "step,startle,mode=state.mode,rise=input.threat,", "step,startle,mode=state.mode,rise=input.alarm,");
+	return Replace(source, "entry,startle_enter,mode=state.mode,rise=input.threat,", "entry,startle_enter,mode=state.mode,rise=input.alarm,");
 }
 
 // The grazer with an exit table reading threat both ways: a plain band (is
@@ -619,14 +608,11 @@ std::string Alarmed()
 std::string WithExit()
 {
 	std::string source = Replace(kStartle, "[machine grazer", R"([table startle_exit
-  (input threat double 0..1)
-  (key mode hash (domain rows))
-  (column rise band (input threat) edge)
-  (column high band (input threat))
-  (order mode)
-  (suffix command)]
+  (input rise double 0..1) (input high double 0..1)
+  (order mode)]
+>mode, ^rise, high: band, command
 [machine grazer)");
-	return source + "exit,startle_exit,mode=state.mode,threat=input.threat,,command,\n";
+	return source + "exit,startle_exit,mode=state.mode,rise=input.threat high=input.threat,,command,\n";
 }
 
 constexpr std::string_view kStartleExitRows = R"(mode, rise, high, command
@@ -783,14 +769,11 @@ TEST(MachineRebind, AnOldExitThatHoldsReportsToTheOldBindingAndSendsNoAbort)
 {
 	reload_world w(R"(
 [table bye
-  (key mode hash (domain rows))
-  (column when condition)
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, when, command
 [table hello
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine leaver (state mode hash (members a) (initial a))]
 list,from,where,given,set,emit,overrides
 entry,hello,mode=state.mode,,,command,
@@ -856,21 +839,15 @@ namespace
 constexpr std::string_view kGrazer = R"(
 [table grazer_brain
   (input energy double 0..1)
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column next hash)
+  (input near flags)
   (order mode message)]
+>mode, >message?, energy: band, near: flags, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [table grazer_exit
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine grazer
   (state mode hash (members idle walk eat panic) (initial idle))
   (input energy double 0..1)
@@ -878,7 +855,7 @@ constexpr std::string_view kGrazer = R"(
   (input message hash)]
 list,from,where,given,set,emit,overrides
 entry,grazer_enter,mode=state.mode,,,command,
-step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,
 exit,grazer_exit,mode=state.mode,,,command,
 )";
 
@@ -1062,16 +1039,11 @@ namespace
 
 constexpr std::string_view kWalker = R"(
 [table walker_brain
-  (key mode hash (domain rows))
-  (key target hash (domain rows))
-  (key message hash fallthrough)
-  (column next hash)
-  (column goal hash)
   (order mode target message)]
+>mode, >target, >message?, next, goal
 [table walker_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine walker
   (state mode hash (members idle walk bridge_c bridge_d bridge_e) (initial idle))
   (state target hash (members idle walk) (initial idle))
@@ -1206,18 +1178,14 @@ namespace
 
 constexpr std::string_view kForager = R"(
 [table forager_brain
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column next hash)
   (order mode message)]
+>mode, >message?, next
 [table forager_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [table forager_exit
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine forager
   (state mode hash (members idle graze) (initial idle))
   (input message hash)]

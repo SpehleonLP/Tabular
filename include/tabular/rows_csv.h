@@ -3,6 +3,7 @@
 
 #include "tabular/relation.h"
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,6 +62,11 @@ struct csv_rows
 	bool                      pivoted    = false;     // the table's pivot: keys, then flag headers
 	std::vector<std::string>* flag_names = nullptr;   // filled by a pivoted load: index = bit
 	std::vector<run_note>*    report     = nullptr;   // the load's report (see relation_store); empty on a refusal
+	// When set, record i of text (blank and comment rows are not records)
+	// starts on source line record_lines[i], and first_line is not read: text
+	// compiled from a file names the lines its author wrote. Refused when text
+	// has another number of records.
+	std::span<uint32_t const> record_lines;
 };
 
 tl::expected<void, ErrorContext> LoadCsv(relation_store& store, csv_rows const& command);

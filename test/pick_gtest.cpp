@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,14 +39,24 @@ relation_store StoreFrom(std::string_view source)
 	return relation_store(std::move(*s));
 }
 
+// A table whose bands share one input, which only the builder can declare: a
+// file's band is named for the input it bands.
+relation_store StoreFrom(std::string_view name, std::span<add_input const> inputs, std::span<add_column const> columns,
+	std::span<uint32_t const> order)
+{
+	order_by const     by{order};
+	create_table const table{name, columns, &by, true, inputs, pick_policy::Best};
+	auto s = BuildSchema(std::span<create_table const>(&table, 1));
+	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
+	return relation_store(s ? std::move(*s) : schema{});
+}
+
 // A lookup table: label (key), req (ranks by mode), clip.
 constexpr std::string_view kRanked = R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip int)
+  (input req flags)
   (order label)]
+>label: int, req: flags, clip: int
 )";
 
 // Rows of (label, req, clip).
@@ -82,12 +93,9 @@ int64_t BestClip(relation_store const& store, int64_t label, int64_t mode)
 // A guarded table: label (key), window (band over t), when (script), clip.
 constexpr std::string_view kGuarded = R"(
 [table guarded
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column window band (input t))
-  (column when condition)
-  (column clip int)
+  (input window double 0..1)
   (order label)]
+>label: int, window: band, when, clip: int
 )";
 
 struct guarded_row
@@ -276,7 +284,7 @@ TEST(PickBest, QueriesOfTheWrongShapeAreRefused)
 		cell const input[] = {cell::Integer(bad)};
 		auto picked = PickBest(store, 0, pick_query{oneKey, input});
 		ASSERT_FALSE(picked.has_value()) << bad;
-		EXPECT_TRUE(Mentions(picked.error().format(), "mode")) << picked.error().format();
+		EXPECT_TRUE(Mentions(picked.error().format(), "req")) << picked.error().format();
 	}
 }
 
@@ -316,12 +324,10 @@ namespace
 // tables), long-form: clip 1 = grendel_walk, 2 = grendel_run; footstep = 1, pivot = 2.
 constexpr std::string_view kPhase = R"(
 [table phase
-  (input t double)
-  (key clip int)
-  (column bits flags)
-  (column window band (input t))
+  (input window double)
   (pick or bits)
   (order clip)]
+>clip: int, bits: flags, window: band
 )";
 
 relation_store PhaseStore()
@@ -424,13 +430,10 @@ TEST(PickAll, ReturnsEveryHoldingRowInRowOrder)
 	int released = 0;
 	relation_store store = StoreFrom(R"(
 [table all
-  (input t double)
-  (key label int)
-  (column window band (input t))
-  (column when condition)
-  (column clip int)
+  (input window double)
   (pick all)
   (order label)]
+>label: int, window: band, when, clip: int
 )");
 	ASSERT_TRUE(LoadGuarded(store, {{1, 0.0f, 1.0f, MakeProbe(0, &released), 10},
 	                                {1, 0.5f, 1.0f, MakeProbe(0, &released), 11},
@@ -450,10 +453,9 @@ TEST(PickAll, OrderAcrossOwnersSurvivesAnIdenticalReload)
 {
 	relation_store store = StoreFrom(R"(
 [table all
-  (key label int)
-  (column clip int)
   (pick all)
   (order label)]
+>label: int, clip: int
 )");
 	auto load = [&](uint64_t owner, int64_t clip)
 	{
@@ -487,12 +489,9 @@ TEST(PickPolicy, NanIsRefusedForARangedInputInEveryPolicy)
 	auto store = [](char const* policy)
 	{
 		return StoreFrom(std::string(R"([table t
-  (input t double 0..1)
-  (key label int)
-  (column window band (input t))
-  (column out flags)
+  (input window double 0..1)
   (order label)
-  (pick )") + policy + (std::string_view(policy) == "or" ? " out" : "") + ")]\n");
+  (pick )") + policy + (std::string_view(policy) == "or" ? " out" : "") + ")]\n>label: int, window: band, out: flags\n");
 	};
 	cell const keys[]   = {cell::Integer(1)};
 	cell const inputs[] = {cell::Real(std::nan(""))};
@@ -521,12 +520,9 @@ namespace
 // (a, b, req) and not (a).
 constexpr std::string_view kTwoKeys = R"(
 [table lookup
-  (input mode flags)
-  (key a int (domain rows))
-  (key b int (domain rows))
-  (column req flags (input mode))
-  (column clip int)
+  (input req flags)
   (order a b req)]
+>a: int, >b: int, req: flags, clip: int
 )";
 
 tl::expected<void, ErrorContext> LoadTwoKeys(relation_store& store, std::vector<std::array<int64_t, 4>> const& rows,
@@ -583,10 +579,8 @@ TEST(PickSchema, TwoKeysLeadTheOrderInColumnOrder)
 {
 	auto s = ReadSchema(R"(
 [table lookup
-  (key a int (domain rows))
-  (key b int (domain rows))
-  (column clip int)
   (order b a)]
+>a: int, >b: int, clip: int
 )", "two.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "starts with its keys")) << s.error().format();
@@ -628,14 +622,10 @@ namespace
 // label (key), req (ranks by mode), window (band over t in 0..1), when (script), clip.
 constexpr std::string_view kRankedBand = R"(
 [table lookup
-  (input mode flags)
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column window band (input t))
-  (column when condition)
-  (column clip int)
+  (input req flags)
+  (input window double 0..1)
   (order label)]
+>label: int, req: flags, window: band, when, clip: int
 )";
 
 struct band_row
@@ -706,7 +696,7 @@ TEST(PickBest, AGapInTheQuiescentRowsIsRefusedNamingAValue)
 	auto loaded = store.Load(load_rows{0, 1, 2, values, {}, &refusal, conditions});
 	ASSERT_FALSE(loaded.has_value());
 	std::string const error = loaded.error().format();
-	EXPECT_TRUE(Mentions(error, "key (1): t 0.2 has no row with no script condition")) << error;
+	EXPECT_TRUE(Mentions(error, "key (1): window 0.2 has no row with no script condition")) << error;
 	EXPECT_EQ(refusal.row, 0u) << "the run's first loaded row";
 	EXPECT_EQ(store.RowCount(0), 0u);
 }
@@ -725,10 +715,8 @@ TEST(PickBest, AnUnrankedTableOfScriptedRowsIsRefused)
 {
 	auto s = ReadSchema(R"(
 [table rules
-  (key label int (domain rows))
-  (column when condition)
-  (column clip int)
   (order label)]
+>label: int, when, clip: int
 )", "rules.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
@@ -965,15 +953,11 @@ TEST(PickBest, SameFlagsShadowInTieOrder)
 
 TEST(PickBest, TwoBandsOnOneInputIntersect)
 {
-	relation_store store = StoreFrom(R"(
-[table twice
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column a band (input t))
-  (column b band (input t))
-  (column clip int)
-  (order label)]
-)");
+	add_input const  inputs[]  = {{"t", column_type::Double, true, 0, 1}};
+	add_column const columns[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+		{"a", column_type::Band, false, 0}, {"b", column_type::Band, false, 0}, {"clip", column_type::Int}};
+	uint32_t const   order[]   = {0};
+	relation_store   store     = StoreFrom("twice", inputs, columns, order);
 	auto load = [&](std::vector<std::array<float, 4>> const& rows)
 	{
 		std::vector<cell> values;
@@ -1014,12 +998,9 @@ TEST(PickBest, AnOverlapWithAnOrderColumnPastTheKeysIsRefusedAsAnOverlap)
 {
 	relation_store store = StoreFrom(R"(
 [table prioritised
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column prio int)
-  (column window band (input t))
-  (column clip int)
+  (input window double 0..1)
   (order label prio)]
+>label: int, prio: int, window: band, clip: int
 )");
 	auto load = [&](int64_t prio, uint64_t owner, load_refusal* refusal)
 	{
@@ -1039,13 +1020,10 @@ TEST(PickBest, TwoBandInputsAreCheckedTogether)
 {
 	relation_store store = StoreFrom(R"(
 [table plane
-  (input x double 0..1)
-  (input y double 0..1)
-  (key label int (domain rows))
-  (column bx band (input x))
-  (column by band (input y))
-  (column clip int)
+  (input bx double 0..1)
+  (input by double 0..1)
   (order label)]
+>label: int, bx: band, by: band, clip: int
 )");
 	auto load = [&](std::vector<std::array<float, 4>> const& rows)
 	{
@@ -1060,7 +1038,7 @@ TEST(PickBest, TwoBandInputsAreCheckedTogether)
 		return store.Load(load_rows{0, 1, rows.size(), values});
 	};
 	std::string const hole = RefusalOf(load({{0.0f, 0.5f, 0.0f, 1.0f}, {0.5f, 1.0f, 0.0f, 0.5f}}));
-	EXPECT_TRUE(Mentions(hole, "x 0.5, y 0.5 has no row with no script condition")) << hole;
+	EXPECT_TRUE(Mentions(hole, "bx 0.5, by 0.5 has no row with no script condition")) << hole;
 	EXPECT_EQ(RefusalOf(load({{0.0f, 0.5f, 0.0f, 1.0f}, {0.5f, 1.0f, 0.0f, 0.5f}, {0.5f, 1.0f, 0.5f, 1.0f}})),
 		"(accepted)");
 	cell const keys[]   = {cell::Integer(1)};

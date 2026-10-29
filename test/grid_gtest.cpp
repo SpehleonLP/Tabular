@@ -399,7 +399,8 @@ TEST(GridCsv, AGridIsNotLoadedAsRowsNorRowsAsAGrid)
 	relation_store store = GridStoreFrom(kClipByKind);
 	EXPECT_FALSE(LoadCsv(store, csv_rows{0, 1, "creature\nx\n", "g.csv"}).has_value());
 	relation_store rows = GridStoreFrom(R"(
-[table t (column x int) (pick none)]
+[table t (pick none)]
+x: int
 )");
 	EXPECT_TRUE(Mentions(GridError(rows, "x,1\n1,2\n"), "not a grid"));
 }

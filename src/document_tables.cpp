@@ -1,6 +1,9 @@
 #include "document_internal.h"
+#include "document_header.h"
 #include "csv_cells.h"
 
+#include <algorithm>
+#include <charconv>
 #include <deque>
 
 namespace tabular::detail
@@ -9,13 +12,9 @@ namespace tabular::detail
 namespace
 {
 
-// In column_type's order: the index is the enumerator.
-constexpr std::string_view kTypeNames[] = {"hash", "flags", "int", "double", "condition", "command", "vec2", "string",
-	"band"};
-
 enum class option : uint8_t
 {
-	Key, Column, Input, Pick, Order, Suffix, Pivot, Rows, Columns, Cells, Count
+	Input, Pick, Order, Pivot, Domain, Rows, Columns, Cells, Count
 };
 
 struct option_name
@@ -27,13 +26,11 @@ struct option_name
 };
 
 constexpr option_name kOptions[] = {
-	{"key",     option::Key,     false, true},
-	{"column",  option::Column,  false, true},
 	{"input",   option::Input,   false, true},
 	{"pick",    option::Pick,    false, false},
 	{"order",   option::Order,   false, false},
-	{"suffix",  option::Suffix,  false, false},
 	{"pivot",   option::Pivot,   false, false},
+	{"domain",  option::Domain,  false, true},
 	{"rows",    option::Rows,    true,  false},
 	{"columns", option::Columns, true,  false},
 	{"cells",   option::Cells,   true,  false},
@@ -48,11 +45,33 @@ struct reference
 	bool             set  = false;
 };
 
+// What a blank cell of one header column compiles to.
+struct column_fill
+{
+	enum class kind : uint8_t
+	{
+		Blank,      // left blank: the loader decides, as for a row written out
+		Text,       // the column's default
+		Key,        // the row's own cell of a key the default names
+		Range,      // a band's input's whole range
+		Unranged,   // a band whose input has no range to stand for: refused
+	};
+	kind        what = kind::Blank;
+	std::string text;               // Text and Range
+	uint32_t    key  = UINT32_MAX;  // Key: the key's header position
+};
+
+struct compiled_row
+{
+	std::vector<std::string_view> cells;
+	uint32_t                      line = 0;      // the line the author wrote it on
+	bool                          copy = false;  // one of a `*` row's copies
+};
+
 struct table_build
 {
 	std::string_view              name;
 	std::vector<add_column>       columns;
-	std::vector<reference>        columnInputs;   // per column
 	std::vector<add_input>        inputs;
 	std::deque<std::vector<cell>> members;
 	std::vector<uint32_t>         orderColumns;
@@ -67,8 +86,31 @@ struct table_build
 	std::string_view              suffix;
 	pivot_by                      pivot;
 	bool                          pivoted = false;
-	std::array<reference, 2>      pivotNames;
+	reference                     pivotHeaders;   // the flags column of the headers
+	std::string                   pivotCells;    // the cells column as the bracket writes it, `clip: string`
 	grid_shape                    grid;
+	bool                          pickGiven = false;
+	// `(domain key ..)` options, resolved against the header's keys.
+	std::vector<sexpr const*>     domains;
+	// The header row's column names, bare, as the compiled body's header says
+	// them; a pivot's flag headers follow its keys.
+	std::vector<std::string_view> headerNames;
+	// Per header cell, what a blank cell compiles to; empty for a pivot, whose
+	// blank is a cell with no row.
+	std::vector<column_fill>      fills;
+	// Per column, for a key: the members its (domain ..) lists, which a `*`
+	// copies its row for; with none, the rows' own values are. A key whose
+	// domain is another table's column takes no `*`.
+	std::vector<std::vector<std::string_view>> starMembers;
+	std::vector<bool>                          foreignDomain;
+	// Rows its [fragment ..] sections add after its own, in section order.
+	std::vector<compiled_row>                  fragmentRows;
+	csv_text const*                            body     = nullptr;   // its own rows; null for a grid
+	std::string_view                           text;                 // its section's body, as written
+	bool                                       ownRows  = false;     // its body has rows, not just a header
+	uint32_t                                   table    = 0;
+	uint32_t                                   bodyLine = 0;
+	bool                                       isGrid   = false;
 };
 
 // Whether a body has any row. A table's first record is its header, so it needs
@@ -110,72 +152,17 @@ struct reader
 	DocumentStorage& storage;
 	table_build&     build;
 
-	// The domain of a key column: rows, a list of members, or another table's column.
-	tl::expected<key_domain, ErrorContext> ReadDomain(sexpr const& domain, std::string_view column, column_type type)
+	// A key's literal members, read as cells of its type.
+	tl::expected<key_domain, ErrorContext> ReadMembers(std::span<sexpr const> items, std::string_view column,
+		column_type type)
 	{
-		constexpr char const* kShapes = "; a domain is (domain rows), (domain (members ..)) or (domain (from table column))";
-		if (domain.items.size() < 2)
-		{
-			return Refuse(label, domain.line, "the domain of column '", column, "' is empty", kShapes);
-		}
-		sexpr const& what = domain.items[1];
-		// What the domain says comes before how many words follow it, so
-		// (domain rows (members a)) is refused for the rows it also names.
-		if (IsAtom(what, "rows"))
-		{
-			if (domain.items.size() > 2)
-			{
-				return Refuse(label, domain.items[2].line, "the domain of column '", column,
-					"' is rows and has more after it; rows takes nothing", kShapes);
-			}
-			return key_domain::Rows();
-		}
-		if (domain.items.size() > 2)
-		{
-			sexpr const& extra = domain.items[2];
-			if (extra.what != sexpr::kind::List)
-			{
-				return Refuse(label, extra.line, "the domain of column '", column, "' has the unknown option '", extra.text,
-					"'", kShapes);
-			}
-			return Refuse(label, extra.line, "the domain of column '", column,
-				"' names members or a table's column, one of the two", kShapes);
-		}
-		if (what.what != sexpr::kind::List || what.items.empty())
-		{
-			return Refuse(label, domain.line, "column '", column, "' has the unknown domain '", what.text, "'", kShapes);
-		}
-		if (IsAtom(what.items[0], "from"))
-		{
-			if (what.items.size() != 3)
-			{
-				return Refuse(label, what.line, "the domain of column '", column,
-					"' names a table and its column, both", kShapes);
-			}
-			auto table = NameOf(what.items[1], storage, label, "a domain's table");
-			if (!table)
-			{
-				return tl::make_unexpected(std::move(table.error()));
-			}
-			auto other = NameOf(what.items[2], storage, label, "a domain's column");
-			if (!other)
-			{
-				return tl::make_unexpected(std::move(other.error()));
-			}
-			return key_domain{domain_kind::Column, {}, *table, *other};
-		}
-		if (!IsAtom(what.items[0], "members"))
-		{
-			return Refuse(label, what.line, "column '", column, "' has the unknown domain form '", what.items[0].text,
-				"'", kShapes);
-		}
 		build.members.emplace_back();
 		std::vector<cell>& members = build.members.back();
 		hash_names         names;
 		column_def const   asColumn{std::string(column), type};
-		for (size_t m = 1; m < what.items.size(); ++m)
+		for (size_t m = 0; m < items.size(); ++m)
 		{
-			auto text = NameOf(what.items[m], storage, label, "a domain member");
+			auto text = NameOf(items[m], storage, label, "a domain member");
 			if (!text)
 			{
 				return tl::make_unexpected(std::move(text.error()));
@@ -187,104 +174,36 @@ struct reader
 				members.push_back(cell::Integer(0));
 				continue;
 			}
-			auto value = ReadCell(asColumn, *text, names, what.items[m].line);
+			auto value = ReadCell(asColumn, *text, names, items[m].line);
 			if (!value)
 			{
-				return tl::make_unexpected(std::move(value.error()).with("member ", m - 1, " of the domain of column '",
-					column, "'").with(Place(label, what.items[m].line)));
+				return tl::make_unexpected(std::move(value.error()).with("member ", m, " of the domain of column '",
+					column, "'").with(Place(label, items[m].line)));
 			}
 			members.push_back(*value);
 		}
 		return key_domain{domain_kind::Members, members, {}, {}};
 	}
 
-	// `(key|column name type [(domain ..)] [fallthrough] [(input t)] [edge])`
-	tl::expected<void, ErrorContext> ReadColumn(sexpr const& option, bool key)
+	// `(domain key a b ..)` for members, `(domain key table.column)` for
+	// another table's column.
+	tl::expected<key_domain, ErrorContext> ReadDomainOption(sexpr const& option, std::string_view column,
+		column_type type)
 	{
-		std::string_view const head = HeadOf(option);
-		if (option.items.size() < 3)
+		sexpr const& first = option.items[2];
+		size_t const dot   = first.what == sexpr::kind::Atom ? first.text.find('.') : std::string_view::npos;
+		if (option.items.size() == 3 && dot != std::string_view::npos)
 		{
-			return Refuse(label, option.line, "(", head, " name type) needs a name and a type");
-		}
-		auto name = DeclaredName(option.items[1], storage, label, "a column's name");
-		if (!name)
-		{
-			return tl::make_unexpected(std::move(name.error()));
-		}
-		auto type = TypeOf(option.items[2], label);
-		if (!type)
-		{
-			return tl::make_unexpected(std::move(type.error()));
-		}
-		key_domain domain;
-		bool       hasDomain = false;
-		bool       fall      = false;
-		bool       edge      = false;
-		reference  input;
-		for (size_t i = 3; i < option.items.size(); ++i)
-		{
-			sexpr const& part = option.items[i];
-			if (IsAtom(part, "fallthrough") || IsAtom(part, "edge"))
+			std::string_view const table = first.text.substr(0, dot);
+			std::string_view const other = first.text.substr(dot + 1);
+			if (table.empty() || other.empty() || other.find('.') != std::string_view::npos)
 			{
-				bool& flag = part.text == "edge" ? edge : fall;
-				if (flag)
-				{
-					return Refuse(label, part.line, "column '", *name, "' repeats '", part.text, "'");
-				}
-				flag = true;
+				return Refuse(label, first.line, "the domain of column '", column, "' names '", first.text,
+					"'; another table's column is written table.column");
 			}
-			else if (part.what == sexpr::kind::List && !part.items.empty() && IsAtom(part.items[0], "domain"))
-			{
-				if (hasDomain)
-				{
-					return Refuse(label, part.line, "column '", *name, "' repeats 'domain'");
-				}
-				auto read = ReadDomain(part, *name, *type);
-				if (!read)
-				{
-					return tl::make_unexpected(std::move(read.error()));
-				}
-				domain    = *read;
-				hasDomain = true;
-			}
-			else if (part.what == sexpr::kind::List && !part.items.empty() && IsAtom(part.items[0], "input"))
-			{
-				if (input.set)
-				{
-					return Refuse(label, part.line, "column '", *name, "' repeats 'input'");
-				}
-				if (part.items.size() != 2)
-				{
-					return Refuse(label, part.line, "(input name) on column '", *name, "' names one input");
-				}
-				// Presence, not emptiness: (input "") is a mistake, not "no input".
-				auto text = NameOf(part.items[1], storage, label, "a column's input");
-				if (!text)
-				{
-					return tl::make_unexpected(std::move(text.error()));
-				}
-				input = reference{*text, part.line, true};
-			}
-			else
-			{
-				return Refuse(label, part.line, "column '", *name, "' has the unknown option '",
-					part.what == sexpr::kind::List ? HeadOf(part) : part.text, "'; a column takes (domain ..), fallthrough, (input ..) and edge");
-			}
+			return key_domain{domain_kind::Column, {}, table, other};
 		}
-		// A fall-through key's domain is open, so it declares no other: the
-		// declaration is the domain (the builder's FallThrough kind).
-		if (fall)
-		{
-			if (hasDomain)
-			{
-				return Refuse(label, option.line, "column '", *name, "' of table '", build.name,
-					"' falls through and declares a domain; a fall-through key is open, any value may come");
-			}
-			domain = key_domain::FallThrough();
-		}
-		build.columns.push_back(add_column{*name, *type, key, UINT32_MAX, domain, edge});
-		build.columnInputs.push_back(input);
-		return {};
+		return ReadMembers(std::span<sexpr const>(option.items).subspan(2), column, type);
 	}
 
 	tl::expected<void, ErrorContext> ReadPick(sexpr const& option)
@@ -294,6 +213,7 @@ struct reader
 		{
 			return Refuse(label, option.line, "(pick ..) names a policy", kShapes);
 		}
+		build.pickGiven = true;
 		std::string_view const policy = option.items[1].text;
 		size_t                 arity  = 2;
 		if (policy == "best")
@@ -390,10 +310,6 @@ struct reader
 	{
 		switch (which.which)
 		{
-		case option::Key:
-			return ReadColumn(option, true);
-		case option::Column:
-			return ReadColumn(option, false);
 		case option::Input:
 		{
 			auto input = ReadInputOption(option, storage, label, cc(std::string(" of table '"), build.name, "'"));
@@ -408,38 +324,39 @@ struct reader
 			return ReadPick(option);
 		case option::Order:
 			return ReadOrder(option);
-		case option::Suffix:
-		{
-			if (option.items.size() != 2)
-			{
-				return Refuse(label, option.line, "(suffix ..) names one command column");
-			}
-			auto name = DeclaredName(option.items[1], storage, label, "the suffix's name");
-			if (!name)
-			{
-				return tl::make_unexpected(std::move(name.error()));
-			}
-			build.suffix = *name;
-			return {};
-		}
 		case option::Pivot:
 		{
-			if (option.items.size() != 3)
+			if (option.items.size() < 3)
 			{
 				return Refuse(label, option.line, "(pivot headers cells) names the flags column of the headers and the column of the cells");
 			}
-			for (size_t i = 0; i < 2; ++i)
+			auto headers = NameOf(option.items[1], storage, label, "a pivot column");
+			if (!headers)
 			{
-				auto name = NameOf(option.items[i + 1], storage, label, "a pivot column");
-				if (!name)
+				return tl::make_unexpected(std::move(headers.error()));
+			}
+			build.pivotHeaders = reference{*headers, option.line, true};
+			// The cells column is declared here, as a header cell is: `clip: string`
+			// may be read as one atom or as several.
+			for (size_t i = 2; i < option.items.size(); ++i)
+			{
+				if (option.items[i].what == sexpr::kind::List)
 				{
-					return tl::make_unexpected(std::move(name.error()));
+					return Refuse(label, option.items[i].line, "(pivot headers cells) has a list where the cells column belongs");
 				}
-				build.pivotNames[i] = reference{*name, option.line, true};
+				build.pivotCells += (i > 2 ? " " : "");
+				build.pivotCells += option.items[i].text;
 			}
 			build.pivoted = true;
 			return {};
 		}
+		case option::Domain:
+			if (option.items.size() < 3)
+			{
+				return Refuse(label, option.line, "(domain key ..) names a key and its members, or a key and table.column");
+			}
+			build.domains.push_back(&option);
+			return {};
 		case option::Rows:
 		{
 			auto axis = ReadAxis(option);
@@ -505,24 +422,507 @@ uint32_t IndexOfInput(table_build const& build, std::string_view name)
 	return UINT32_MAX;
 }
 
-// Options come in any order, so the names they refer to resolve after the last.
-tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view label)
+// The columns a header row declares, in its order, as the Spellings in the
+// shorthand plan have them: `>key`, `>key?`, `^edge`, `name: type`, a band or a
+// ranking flags column named for its input, and a last command cell that is the
+// suffix. A pivot's row is its keys, then flag headers; its other two columns
+// are the bracket's.
+tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 {
+	table_build&           build = in.build;
+	std::string_view const label = in.label;
+	bool const             any   = body.rows() > 0;   // a keyless pivot may have no header row
+	uint32_t const         line  = any ? body.line_of_row(0) : 0;
+	size_t const           width = any ? body.used_width(0) : 0;
+	std::vector<bool>      fallsThrough;
+	std::vector<std::optional<std::string_view>> fallbacks;
+	for (size_t h = 0; h < width; ++h)
+	{
+		std::string_view const text = body.cell(h, 0);
+		if (build.pivoted && !text.starts_with('>'))
+		{
+			for (size_t f = h; f < width; ++f)
+			{
+				build.headerNames.push_back(body.cell(f, 0));
+			}
+			break;
+		}
+		auto cell = ParseHeaderCell(text);
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("table '", build.name, "'").with(Place(label, line)));
+		}
+		auto type = TypeOfCell(*cell);
+		if (!type)
+		{
+			return tl::make_unexpected(std::move(type.error()).with("table '", build.name, "'").with(Place(label, line)));
+		}
+		if (build.pivoted && cell->what != header_cell::mark::Key)
+		{
+			return Refuse(label, line, "pivoted table '", build.name, "' has '", cell->text,
+				"' among its keys; a pivot's header row is its keys, then its flag headers");
+		}
+		build.headerNames.push_back(cell->name);
+		fallbacks.push_back(cell->fallback);
+		bool const key = cell->what == header_cell::mark::Key;
+		if (!key && *type == column_type::Command && h + 1 == width)
+		{
+			build.suffix = cell->name;
+			continue;
+		}
+		add_column column{cell->name, *type, key};
+		column.edge          = cell->what == header_cell::mark::Edge;
+		uint32_t const input = IndexOfInput(build, cell->name);
+		if (*type == column_type::Band)
+		{
+			if (input == UINT32_MAX)
+			{
+				return Refuse(label, line, "column '", cell->name, "' of table '", build.name,
+					"' is a band, and the table has no input '", cell->name, "'; a band is named for the input it bands");
+			}
+			column.input = input;
+		}
+		else if (*type == column_type::Flags)
+		{
+			column.input = input;   // named for an input, it ranks; otherwise it is a value
+		}
+		build.columns.push_back(column);
+		fallsThrough.push_back(cell->fallthrough);
+	}
+
+	if (build.pivoted)
+	{
+		uint32_t const line = build.pivotHeaders.line;
+		auto           cell = ParseHeaderCell(build.pivotCells);
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("the pivot of table '", build.name, "'")
+				.with(Place(label, line)));
+		}
+		if (cell->what == header_cell::mark::Key || cell->fallback)
+		{
+			return Refuse(label, line, "the pivot of table '", build.name, "' declares its cells column '", cell->text,
+				"'; it is a name, a type and '^' for an edge");
+		}
+		auto type = TypeOfCell(*cell);
+		if (!type)
+		{
+			return tl::make_unexpected(std::move(type.error()).with("the pivot of table '", build.name, "'")
+				.with(Place(label, line)));
+		}
+		uint32_t const input = IndexOfInput(build, cell->name);
+		if (!cell->type && *type == column_type::Hash && input != UINT32_MAX)
+		{
+			*type = column_type::Band;   // named for an input, the cells band it
+		}
+		if (*type == column_type::Band && input == UINT32_MAX)
+		{
+			return Refuse(label, line, "the pivot of table '", build.name, "' has the band '", cell->name,
+				"', and the table has no input '", cell->name, "'; a band is named for the input it bands");
+		}
+		uint32_t const keys = static_cast<uint32_t>(build.columns.size());
+		build.columns.push_back(add_column{build.pivotHeaders.name, column_type::Flags, false,
+			IndexOfInput(build, build.pivotHeaders.name)});
+		build.columns.push_back(add_column{cell->name, *type, false,
+			*type == column_type::Band || *type == column_type::Flags ? input : UINT32_MAX, {},
+			cell->what == header_cell::mark::Edge});
+		build.pivot = pivot_by{keys, keys + 1};
+	}
+
+	if (!build.pivoted)
+	{
+		build.fills.resize(fallbacks.size());
+		for (size_t h = 0; h < fallbacks.size(); ++h)
+		{
+			column_fill& fill = build.fills[h];
+			if (fallbacks[h])
+			{
+				// The suffix is last, so a column's header position is its index.
+				uint32_t const named = IndexOfColumn(build, *fallbacks[h]);
+				bool const     key   = named != UINT32_MAX && build.columns[named].key;
+				fill.what = key ? column_fill::kind::Key : column_fill::kind::Text;
+				fill.text = key ? std::string() : std::string(*fallbacks[h]);
+				fill.key  = key ? named : UINT32_MAX;
+				continue;
+			}
+			if (h >= build.columns.size() || build.columns[h].type != column_type::Band || build.columns[h].edge)
+			{
+				continue;
+			}
+			add_input const& input = build.inputs[build.columns[h].input];
+			if (!input.ranged)
+			{
+				fill.what = column_fill::kind::Unranged;
+				continue;
+			}
+			// Shortest round-trip text, so the loader reads back the very floats.
+			char lo[32];
+			char hi[32];
+			char* const loEnd = std::to_chars(lo, lo + sizeof(lo), input.lo).ptr;
+			char* const hiEnd = std::to_chars(hi, hi + sizeof(hi), input.hi).ptr;
+			fill.what = column_fill::kind::Range;
+			fill.text = cc(std::string(lo, loEnd), "..", std::string_view(hi, hiEnd - hi));
+		}
+	}
+
+	// A column named weight weighs the rows unless a (pick ..) says otherwise.
+	if (!build.pickGiven && IndexOfColumn(build, "weight") != UINT32_MAX)
+	{
+		build.pick   = pick_policy::Weighted;
+		build.weight = reference{"weight", line, true};
+	}
+	// Only a best table's keys have domains: its rows unless a (domain ..)
+	// lists them.
+	bool const best = build.pick == pick_policy::Best;
+	for (size_t c = 0; c < fallsThrough.size(); ++c)
+	{
+		if (build.columns[c].key)
+		{
+			build.columns[c].domain = fallsThrough[c] ? key_domain::FallThrough() : best ? key_domain::Rows() : key_domain{};
+		}
+	}
+	std::vector<bool> given(build.columns.size(), false);
+	build.starMembers.resize(build.columns.size());
+	build.foreignDomain.resize(build.columns.size());
+	for (sexpr const* option : build.domains)
+	{
+		auto name = NameOf(option->items[1], in.storage, label, "a domain's key");
+		if (!name)
+		{
+			return tl::make_unexpected(std::move(name.error()));
+		}
+		uint32_t const c = IndexOfColumn(build, *name);
+		if (c == UINT32_MAX || !build.columns[c].key)
+		{
+			return Refuse(label, option->line, "(domain ", *name, " ..) on table '", build.name, "' names '", *name,
+				"', which is not one of its keys");
+		}
+		if (fallsThrough[c])
+		{
+			return Refuse(label, option->line, "key '", *name, "' of table '", build.name,
+				"' falls through, so its domain is open; it takes no (domain ..)");
+		}
+		if (given[c])
+		{
+			return Refuse(label, option->line, "table '", build.name, "' gives key '", *name, "' a second (domain ..)");
+		}
+		given[c]    = true;
+		auto domain = in.ReadDomainOption(*option, *name, build.columns[c].type);
+		if (!domain)
+		{
+			return tl::make_unexpected(std::move(domain.error()));
+		}
+		build.columns[c].domain = *domain;
+		build.foreignDomain[c]  = domain->kind == domain_kind::Column;
+		for (size_t m = 2; domain->kind == domain_kind::Members && m < option->items.size(); ++m)
+		{
+			build.starMembers[c].push_back(option->items[m].text);
+		}
+	}
+	return {};
+}
+
+bool IsBlank(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r';
+}
+
+// A cell as plain CSV: quoted only where csv_text would otherwise read other
+// text, so the cell comes back exactly.
+void AppendCell(std::string& out, std::string_view text, bool first)
+{
+	bool const quote = text.find_first_of(",\"\n") != std::string_view::npos
+		|| (!text.empty() && (IsBlank(text.front()) || IsBlank(text.back())))
+		|| (first && text.starts_with('#'));
+	if (!quote)
+	{
+		out += text;
+		return;
+	}
+	out += '"';
+	for (char c : text)
+	{
+		if (c == '"')
+		{
+			out += '"';
+		}
+		out += c;
+	}
+	out += '"';
+}
+
+bool IsStar(std::string_view cell)
+{
+	return cell == "*";
+}
+
+// The values each key's `*` copies a row for: its domain's members, or else the
+// distinct values the rows name for it, in the order they first appear.
+tl::expected<std::vector<std::vector<std::string_view>>, ErrorContext> StarValues(table_build const& build,
+	std::span<compiled_row const> rows, std::string_view label)
+{
+	std::vector<std::vector<std::string_view>> values(build.columns.size());
 	for (size_t c = 0; c < build.columns.size(); ++c)
 	{
-		reference const& input = build.columnInputs[c];
-		if (!input.set)
+		if (!build.columns[c].key)
 		{
 			continue;
 		}
-		uint32_t const found = IndexOfInput(build, input.name);
-		if (found == UINT32_MAX)
+		auto const star = std::find_if(rows.begin(), rows.end(),
+			[c](compiled_row const& row) { return c < row.cells.size() && IsStar(row.cells[c]); });
+		if (star == rows.end())
 		{
-			return Refuse(label, input.line, "column '", build.columns[c].name, "' of table '", build.name,
-				"' reads input '", input.name, "', which the table does not declare");
+			continue;
 		}
-		build.columns[c].input = found;
+		std::string_view const name = build.columns[c].name;
+		if (c < build.foreignDomain.size() && build.foreignDomain[c])
+		{
+			return Refuse(label, star->line, "key '", name, "' of table '", build.name,
+				"' has '*', and its domain is another table's column; '*' copies its row for each member, so list its members with (domain ",
+				name, " a b ..)");
+		}
+		if (c < build.starMembers.size() && !build.starMembers[c].empty())
+		{
+			values[c] = build.starMembers[c];
+			continue;
+		}
+		for (compiled_row const& row : rows)
+		{
+			std::string_view const value = c < row.cells.size() ? row.cells[c] : std::string_view();
+			if (!value.empty() && !IsStar(value) && std::find(values[c].begin(), values[c].end(), value) == values[c].end())
+			{
+				values[c].push_back(value);
+			}
+		}
+		if (values[c].empty())
+		{
+			return Refuse(label, star->line, "key '", name, "' of table '", build.name,
+				"' has '*' and no value for it to stand for; list its members with (domain ", name, " a b ..)");
+		}
 	}
+	return values;
+}
+
+// Each `*` row as its copies, where it is written: one per value of each
+// starred key, the first starred key varying slowest.
+void Expand(compiled_row const& row, std::span<std::vector<std::string_view> const> values,
+	std::vector<compiled_row>& out)
+{
+	std::vector<size_t> stars;
+	for (size_t c = 0; c < row.cells.size() && c < values.size(); ++c)
+	{
+		if (IsStar(row.cells[c]) && !values[c].empty())
+		{
+			stars.push_back(c);
+		}
+	}
+	if (stars.empty())
+	{
+		out.push_back(row);
+		return;
+	}
+	std::vector<size_t> at(stars.size(), 0);
+	while (true)
+	{
+		compiled_row copy = row;
+		copy.copy         = true;
+		for (size_t s = 0; s < stars.size(); ++s)
+		{
+			copy.cells[stars[s]] = values[stars[s]][at[s]];
+		}
+		out.push_back(std::move(copy));
+		size_t s = stars.size();
+		while (s > 0 && ++at[s - 1] == values[stars[s - 1]].size())
+		{
+			at[--s] = 0;
+		}
+		if (s == 0)
+		{
+			return;
+		}
+	}
+}
+
+// A blank cell takes its column's fill, after expansion, so a default naming a
+// key takes the copy's key.
+tl::expected<void, ErrorContext> Fill(table_build const& build, compiled_row& row, std::string_view label)
+{
+	using kind = column_fill::kind;
+	std::vector<std::string_view>& cells = row.cells;
+	size_t const suffixAt = build.suffix.empty() ? SIZE_MAX : build.headerNames.size() - 1;
+	// The suffix runs to the row's end, so it is blank only if all of it is.
+	bool const suffixBlank = suffixAt < cells.size()
+		&& std::all_of(cells.begin() + suffixAt, cells.end(), [](std::string_view c) { return c.empty(); });
+	for (size_t c = 0; c < cells.size() && c < build.fills.size(); ++c)
+	{
+		column_fill const& fill = build.fills[c];
+		if (!cells[c].empty() || fill.what == kind::Blank || (c == suffixAt && !suffixBlank))
+		{
+			continue;
+		}
+		switch (fill.what)
+		{
+		case kind::Text:
+		case kind::Range:
+			cells[c] = fill.text;
+			break;
+		case kind::Key:
+			cells[c] = fill.key < cells.size() ? cells[fill.key] : std::string_view();
+			break;
+		case kind::Unranged:
+			return Refuse(label, row.line, "column '", build.headerNames[c], "' of table '", build.name,
+				"' is blank, and its input '", build.inputs[build.columns[c].input].name,
+				"' has no range for a blank band to stand for; write the band, or give the input a range");
+		case kind::Blank:
+			break;
+		}
+	}
+	return {};
+}
+
+// Whether a row answers every input it is picked with: no condition, no edge,
+// and every band its input's whole range.
+bool Unconditional(table_build const& build, compiled_row const& row)
+{
+	for (size_t c = 0; c < build.columns.size() && c < row.cells.size(); ++c)
+	{
+		add_column const&      column = build.columns[c];
+		std::string_view const cell   = row.cells[c];
+		if (column.type == column_type::Condition || (column.type == column_type::Band && column.edge))
+		{
+			if (!cell.empty())
+			{
+				return false;
+			}
+		}
+		else if (column.type == column_type::Band)
+		{
+			add_input const& input = build.inputs[column.input];
+			float            lo    = 0;
+			float            hi    = 0;
+			if (!input.ranged || !ParseRange(cell, lo, hi) || lo != input.lo || hi != input.hi)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// A copy an earlier unconditional row with the same keys and ranking flags
+// already answers would be a dead row: the `*` yields to the key's own row.
+bool Answered(table_build const& build, std::span<compiled_row const> earlier, compiled_row const& copy)
+{
+	for (compiled_row const& row : earlier)
+	{
+		bool same = true;
+		for (size_t c = 0; same && c < build.columns.size(); ++c)
+		{
+			add_column const& column  = build.columns[c];
+			bool const        ranking = column.type == column_type::Flags && column.input != UINT32_MAX;
+			if (column.key || ranking)
+			{
+				std::string_view const a = c < row.cells.size() ? row.cells[c] : std::string_view();
+				std::string_view const b = c < copy.cells.size() ? copy.cells[c] : std::string_view();
+				same = a == b;
+			}
+		}
+		if (same && Unconditional(build, row))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// The one place a table's rows are rewritten into the plain CSV the loaders
+// read: the header becomes bare names, fragments' rows follow the table's own,
+// `*` rows become their copies, blank
+// cells take their column's fill, and every record keeps the file line it came
+// from.
+tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text const& body, std::string_view label,
+	std::string& text, shared_array<uint32_t>& lines)
+{
+	// A row shorter than the header still takes the fills it has cells for.
+	size_t fillWidth = 0;
+	for (size_t h = 0; h < build.fills.size(); ++h)
+	{
+		if (build.fills[h].what != column_fill::kind::Blank)
+		{
+			fillWidth = h + 1;
+		}
+	}
+	std::vector<compiled_row> written;
+	for (size_t r = 1; r < body.rows(); ++r)
+	{
+		compiled_row& row = written.emplace_back();
+		row.line          = body.line_of_row(r);
+		row.cells.assign(std::max(body.width(r), fillWidth), std::string_view());
+		for (size_t c = 0; c < body.width(r); ++c)
+		{
+			row.cells[c] = body.cell(c, r);
+		}
+	}
+	for (compiled_row const& fragment : build.fragmentRows)
+	{
+		compiled_row& row = written.emplace_back(fragment);
+		row.cells.resize(std::max(row.cells.size(), fillWidth));
+	}
+	auto values = StarValues(build, written, label);
+	if (!values)
+	{
+		return tl::make_unexpected(std::move(values.error()));
+	}
+	std::vector<compiled_row> expanded;
+	for (compiled_row const& row : written)
+	{
+		Expand(row, *values, expanded);
+	}
+	std::vector<compiled_row> kept;
+	for (compiled_row& row : expanded)
+	{
+		auto filled = Fill(build, row, label);
+		if (!filled)
+		{
+			return filled;
+		}
+		// Only a best table has dead rows: under any other pick a later row of
+		// the same keys is another answer. A pivot's cells are its columns'
+		// flag headers, so no copy of one is judged here; the loader judges it.
+		if (row.copy && build.pick == pick_policy::Best && !build.pivoted && Answered(build, kept, row))
+		{
+			continue;
+		}
+		kept.push_back(std::move(row));
+	}
+
+	lines = shared_array<uint32_t>(kept.size() + (body.rows() > 0 ? 1 : 0));
+	if (body.rows() > 0)
+	{
+		lines[0] = body.line_of_row(0);
+		for (size_t h = 0; h < build.headerNames.size(); ++h)
+		{
+			text += h == 0 ? "" : ",";
+			AppendCell(text, build.headerNames[h], h == 0);
+		}
+		text += '\n';
+	}
+	for (size_t r = 0; r < kept.size(); ++r)
+	{
+		lines[r + 1] = kept[r].line;
+		for (size_t c = 0; c < kept[r].cells.size(); ++c)
+		{
+			text += c == 0 ? "" : ",";
+			AppendCell(text, kept[r].cells[c], c == 0);
+		}
+		text += '\n';
+	}
+	return {};
+}
+
+// Options come in any order, so the names they refer to resolve after the last.
+tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view label)
+{
 	for (reference const& name : build.orderNames)
 	{
 		uint32_t const found = IndexOfColumn(build, name.name);
@@ -559,23 +959,184 @@ tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view la
 	{
 		return weight;
 	}
-	if (build.pivoted)
-	{
-		for (reference const& ref : build.pivotNames)
-		{
-			if (IndexOfColumn(build, ref.name) == UINT32_MAX)
-			{
-				return Refuse(label, ref.line, "the pivot of table '", build.name, "' names a column the table does not have");
-			}
-		}
-		build.pivot = pivot_by{IndexOfColumn(build, build.pivotNames[0].name), IndexOfColumn(build, build.pivotNames[1].name)};
-	}
 	return {};
 }
 
 std::string_view OptionHead(sexpr const& item)
 {
 	return item.what == sexpr::kind::List ? HeadOf(item) : item.text;
+}
+
+// `[fragment t (col v ..)..]`: rows for a table declared above it. Its header
+// names the table's columns, bare; a bracket constant sets a column on every
+// row, one copy per value it lists.
+tl::expected<void, ErrorContext> ReadFragment(section const& section, std::deque<table_build>& builds,
+	std::deque<csv_text>& bodies, DocumentStorage& storage, std::string_view label)
+{
+	sexpr const& header = section.header;
+	if (header.items.size() < 2)
+	{
+		return Refuse(label, header.line, "[fragment] names the table it adds rows to");
+	}
+	auto name = NameOf(header.items[1], storage, label, "a fragment's table");
+	if (!name)
+	{
+		return tl::make_unexpected(std::move(name.error()));
+	}
+	auto const found = std::find_if(builds.rbegin(), builds.rend(), [&](table_build const& b) { return b.name == *name; });
+	if (found == builds.rend())
+	{
+		return Refuse(label, header.line, "fragment of '", *name,
+			"' names no table declared above it; a [fragment ..] follows the [table ..] it adds rows to");
+	}
+	table_build& table = *found;
+	if (table.isGrid || table.pivoted)
+	{
+		return Refuse(label, header.line, "fragment of '", *name, "' adds rows to a ", table.isGrid ? "grid" : "pivot",
+			", which is written whole in its own section");
+	}
+	auto positionOf = [&](std::string_view column) -> size_t
+	{
+		auto const at = std::find(table.headerNames.begin(), table.headerNames.end(), column);
+		return at == table.headerNames.end() ? SIZE_MAX : static_cast<size_t>(at - table.headerNames.begin());
+	};
+
+	struct constant
+	{
+		size_t                        at = SIZE_MAX;
+		std::vector<std::string_view> values;
+		uint32_t                      line = 0;
+	};
+	std::vector<constant> constants;
+	for (size_t i = 2; i < header.items.size(); ++i)
+	{
+		sexpr const& option = header.items[i];
+		if (option.what != sexpr::kind::List || option.items.size() < 2)
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' has '", OptionHead(option),
+				"' where a constant (column value ..) belongs");
+		}
+		auto column = NameOf(option.items[0], storage, label, "a fragment constant's column");
+		if (!column)
+		{
+			return tl::make_unexpected(std::move(column.error()));
+		}
+		constant& c = constants.emplace_back();
+		c.at        = positionOf(*column);
+		c.line      = option.line;
+		if (c.at == SIZE_MAX)
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column,
+				"', which table '", *name, "' does not declare");
+		}
+		if (std::any_of(constants.begin(), constants.end() - 1, [&](constant const& o) { return o.at == c.at; }))
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column, "' twice");
+		}
+		for (size_t v = 1; v < option.items.size(); ++v)
+		{
+			auto value = NameOf(option.items[v], storage, label, "a fragment constant's value");
+			if (!value)
+			{
+				return tl::make_unexpected(std::move(value.error()));
+			}
+			c.values.push_back(*value);
+		}
+		bool const star = std::any_of(c.values.begin(), c.values.end(), IsStar);
+		if (star && (c.values.size() != 1 || c.at >= table.columns.size() || !table.columns[c.at].key))
+		{
+			return Refuse(label, option.line, "fragment of '", *name, "' sets column '", *column,
+				"' to '*' among other values or on a column that is not a key; (key *) alone copies per key value");
+		}
+	}
+
+	auto read = csv_text::Read(section.body, label, section.body_line);
+	if (!read)
+	{
+		return tl::make_unexpected(std::move(read.error()));
+	}
+	bodies.push_back(std::move(*read));
+	csv_text const& body = bodies.back();
+	if (body.rows() == 0)
+	{
+		return {};
+	}
+	uint32_t const      headerLine = body.line_of_row(0);
+	size_t const        width      = body.used_width(0);
+	std::vector<size_t> positions;
+	for (size_t h = 0; h < width; ++h)
+	{
+		auto cell = ParseHeaderCell(body.cell(h, 0));
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("fragment of '", *name, "'").with(Place(label, headerLine)));
+		}
+		if (cell->what != header_cell::mark::None || cell->fallthrough || cell->type || cell->fallback)
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' has the header cell '", cell->text,
+				"'; a fragment's header names the table's columns, bare, and the table declares them");
+		}
+		size_t const at = positionOf(cell->name);
+		if (at == SIZE_MAX)
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' names column '", cell->name, "', which table '",
+				*name, "' does not declare");
+		}
+		if (std::find(positions.begin(), positions.end(), at) != positions.end())
+		{
+			return Refuse(label, headerLine, "fragment of '", *name, "' names column '", cell->name, "' twice");
+		}
+		auto const constant = std::find_if(constants.begin(), constants.end(), [at](auto const& c) { return c.at == at; });
+		if (constant != constants.end())
+		{
+			return Refuse(label, constant->line, "fragment of '", *name, "' sets column '", cell->name,
+				"' in its bracket and names it in its header too");
+		}
+		positions.push_back(at);
+	}
+	// The suffix is the table's last column, so a fragment that names it last
+	// runs it to the row's end as the table does.
+	bool const suffixLast = !table.suffix.empty() && !positions.empty()
+		&& positions.back() == table.headerNames.size() - 1;
+	for (size_t r = 1; r < body.rows(); ++r)
+	{
+		uint32_t const line = body.line_of_row(r);
+		if (body.used_width(r) > width && !suffixLast)
+		{
+			return Refuse(label, line, "a row of the fragment of '", *name, "' has more cells than its header names");
+		}
+		std::vector<std::string_view> cells(table.headerNames.size());
+		for (size_t h = 0; h < width && h < body.width(r); ++h)
+		{
+			cells[positions[h]] = body.cell(h, r);
+		}
+		for (size_t extra = width; suffixLast && extra < body.width(r); ++extra)
+		{
+			cells.push_back(body.cell(extra, r));
+		}
+		// One copy per value of each constant, the first constant varying slowest.
+		std::vector<size_t> at(constants.size(), 0);
+		while (true)
+		{
+			compiled_row& row = table.fragmentRows.emplace_back();
+			row.cells         = cells;
+			row.line          = line;
+			for (size_t c = 0; c < constants.size(); ++c)
+			{
+				row.cells[constants[c].at] = constants[c].values[at[c]];
+			}
+			size_t c = constants.size();
+			while (c > 0 && ++at[c - 1] == constants[c - 1].values.size())
+			{
+				at[--c] = 0;
+			}
+			if (c == 0)
+			{
+				break;
+			}
+		}
+	}
+	return {};
 }
 
 }
@@ -614,12 +1175,9 @@ tl::expected<column_type, ErrorContext> TypeOf(sexpr const& item, std::string_vi
 {
 	if (item.what != sexpr::kind::List)
 	{
-		for (size_t t = 0; t < std::size(kTypeNames); ++t)
+		if (auto type = TypeNamed(item.text))
 		{
-			if (item.text == kTypeNames[t])
-			{
-				return static_cast<column_type>(t);
-			}
+			return *type;
 		}
 	}
 	return Refuse(label, item.line, "unknown type '", item.text, "'; a type is hash, flags, int, double, condition, command, vec2, string or band");
@@ -685,23 +1243,22 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 	DocumentStorage& storage)
 {
 	std::deque<table_build>  builds;
+	// Each table's body as records. Header-form names view into them, so they
+	// live until the schema is built.
+	std::deque<csv_text>      bodies;
 	std::vector<create_table> commands;
 	std::vector<uint32_t>     headerLines;   // per table, the line its bracket opens on
 
 	size_t tableCount = 0;
-	size_t rowsCount  = 0;
 	for (section const& section : sections)
 	{
 		std::string_view const head = section.header.items[0].text;
 		if (section.header.items[0].what == sexpr::kind::Atom && (head == "table" || head == "grid"))
 		{
 			++tableCount;
-			rowsCount += HasRows(section.body, head == "grid") ? 1 : 0;
 		}
 	}
 	storage.table_names = shared_array<std::string>(tableCount);
-	storage.rows        = shared_array<section_rows>(rowsCount);
-	size_t rowsAt       = 0;
 
 	for (size_t s = 0; s < sections.size(); ++s)
 	{
@@ -709,16 +1266,26 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		sexpr const&   header  = section.header;
 		if (header.items[0].what != sexpr::kind::Atom)
 		{
-			return Refuse(label, header.line, "a bracket starts with table, grid or machine");
+			return Refuse(label, header.line, "a bracket starts with table, grid, fragment or machine");
 		}
 		std::string_view const head = header.items[0].text;
 		if (head == "machine")
 		{
 			continue;
 		}
+		if (head == "fragment")
+		{
+			auto added = ReadFragment(section, builds, bodies, storage, label);
+			if (!added)
+			{
+				return tl::make_unexpected(std::move(added.error()));
+			}
+			continue;
+		}
 		if (head != "table" && head != "grid")
 		{
-			return Refuse(label, header.line, "unknown bracket '", head, "'; a file declares [table ..], [grid ..] and [machine ..]");
+			return Refuse(label, header.line, "unknown bracket '", head,
+				"'; a file declares [table ..], [grid ..], [fragment ..] and [machine ..]");
 		}
 		bool const isGrid = head == "grid";
 		if (header.items.size() < 2)
@@ -748,7 +1315,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			if (opt.what != sexpr::kind::List || opt.items.empty() || opt.items[0].what != sexpr::kind::Atom)
 			{
 				return Refuse(label, opt.line, "table '", build.name, "' has '", opt.what == sexpr::kind::List ? "a list" : opt.text,
-					"' where an option in parentheses belongs, like (column x int)");
+					"' where an option in parentheses belongs, like (input x double)");
 			}
 			option_name const* found = nullptr;
 			for (option_name const& candidate : kOptions)
@@ -789,6 +1356,28 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 				}
 			}
 		}
+		if (!isGrid)
+		{
+			auto read = csv_text::Read(section.body, label, section.body_line);
+			if (!read)
+			{
+				return tl::make_unexpected(std::move(read.error()));
+			}
+			bodies.push_back(std::move(*read));
+			csv_text const& body = bodies.back();
+			// A pivot's bracket declares its two columns, so one with no keys
+			// needs no header row.
+			if (body.rows() == 0 && !build.pivoted)
+			{
+				return Refuse(label, header.line, "table '", build.name,
+					"' has no columns; the first row of its body declares them, as `>key, name: type`");
+			}
+			auto declared = ReadHeader(in, body);
+			if (!declared)
+			{
+				return tl::make_unexpected(std::move(declared.error()));
+			}
+		}
 		auto resolved = Resolve(build, label);
 		if (!resolved)
 		{
@@ -799,10 +1388,41 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		commands.push_back(create_table{build.name, build.columns, build.ordered ? &build.order : nullptr, true,
 			build.inputs, build.pick, build.outputColumn, build.pivoted ? &build.pivot : nullptr,
 			isGrid ? &build.grid : nullptr, build.suffix, build.weightColumn});
-		if (HasRows(section.body, isGrid))
+		build.table    = static_cast<uint32_t>(commands.size() - 1);
+		build.isGrid   = isGrid;
+		build.text     = section.body;
+		build.bodyLine = section.body_line;
+		build.body     = isGrid ? nullptr : &bodies.back();
+		build.ownRows  = HasRows(section.body, isGrid);
+	}
+	// Fragments add to tables above them, so a table compiles once the whole
+	// file is read, and only then is it known which tables have rows.
+	auto const hasRows = [](table_build const& b) { return b.ownRows || !b.fragmentRows.empty(); };
+	size_t const rowsCount = static_cast<size_t>(std::count_if(builds.begin(), builds.end(), hasRows));
+	storage.rows           = shared_array<section_rows>(rowsCount);
+	storage.compiled       = shared_array<std::string>(rowsCount);
+	storage.compiled_lines = shared_array<shared_array<uint32_t>>(rowsCount);
+	size_t rowsAt          = 0;
+	for (table_build const& build : builds)
+	{
+		if (!hasRows(build))
 		{
-			storage.rows[rowsAt++] = section_rows{static_cast<uint32_t>(commands.size() - 1), section.body, section.body_line};
+			continue;
 		}
+		if (build.isGrid)
+		{
+			storage.rows[rowsAt++] = section_rows{build.table, build.text, build.bodyLine};
+			continue;
+		}
+		std::string&            text     = storage.compiled[rowsAt];
+		shared_array<uint32_t>& lines    = storage.compiled_lines[rowsAt];
+		auto                    compiled = CompileBody(build, *build.body, label, text, lines);
+		if (!compiled)
+		{
+			return tl::make_unexpected(std::move(compiled.error()));
+		}
+		storage.rows[rowsAt++] = section_rows{build.table, text, build.bodyLine,
+			std::span<uint32_t const>(lines.begin(), lines.size())};
 	}
 
 	uint32_t refused = UINT32_MAX;

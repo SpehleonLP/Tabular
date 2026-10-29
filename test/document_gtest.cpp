@@ -8,6 +8,7 @@
 
 #include <array>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -23,18 +24,12 @@ namespace
 
 constexpr std::string_view kSpawnPoints = R"(
 [table spawn_points
-  (key package hash)
-  (column section hash)
-  (column x double)
-  (column y double)
   (pick none)
   (order section package unique)]
+>package, section, x: double, y: double
 [table rules
-  (column when condition)
-  (column then command)
-  (column mask flags)
-  (column count int)
   (pick none)]
+when, then: command, mask: flags, count: int
 )";
 
 // The context's first layer is where the file says the fault is.
@@ -75,7 +70,7 @@ TEST(Document, BuildsEveryTableColumnAndOrder)
 
 TEST(Document, AnOrderNamingAMissingColumnIsRefused)
 {
-	auto s = ReadSchema("[table t (column a int) (pick none) (order b)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none) (order b)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "'b'")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular")) << s.error().format();
@@ -83,32 +78,32 @@ TEST(Document, AnOrderNamingAMissingColumnIsRefused)
 
 TEST(Document, AnUnknownTypeIsRefused)
 {
-	auto s = ReadSchema("[table t (column a vec3) (pick none)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none)]\na: vec3\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "vec3")) << s.error().format();
 }
 
 TEST(Document, AMisspelledOptionIsRefusedNotIgnored)
 {
-	auto s = ReadSchema("[table t (column a int) (pick none) (uniqe a)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none) (uniqe a)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "uniqe")) << s.error().format();
 
 	// Read as a column name, a misspelled flag is a missing column, not a quiet
 	// non-unique table.
-	auto flag = ReadSchema("[table t (column a int) (pick none) (order a uniqe)]", "t.tabular");
+	auto flag = ReadSchema("[table t (pick none) (order a uniqe)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(flag.has_value());
 	EXPECT_TRUE(Mentions(flag.error().format(), "uniqe")) << flag.error().format();
 }
 
 TEST(Document, MissingRequiredPartsAreRefused)
 {
-	EXPECT_FALSE(ReadSchema("[table (column a int) (pick none)]", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table (pick none)]\na: int\n", "t.tabular").has_value());
 	EXPECT_FALSE(ReadSchema("[table]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table \"\" (column a int) (pick none)]", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table \"\" (pick none)]\na: int\n", "t.tabular").has_value());
 	EXPECT_FALSE(ReadSchema("[table t (pick none)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a) (pick none)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (key) (pick none)]", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick none)]\na:\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick none)]\n>\n", "t.tabular").has_value());
 	EXPECT_FALSE(ReadSchema("[something t]", "t.tabular").has_value());
 }
 
@@ -116,8 +111,10 @@ TEST(Document, CoreRefusalsCarryTheLabel)
 {
 	// Two tables named t: BuildSchema refuses it, and the label says which file.
 	auto s = ReadSchema(R"(
-[table t (column a int) (pick none)]
-[table t (column a int) (pick none)]
+[table t (pick none)]
+a: int
+[table t (pick none)]
+a: int
 )", "dup.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "dup.tabular")) << s.error().format();
@@ -126,21 +123,21 @@ TEST(Document, CoreRefusalsCarryTheLabel)
 
 TEST(Document, MalformedBracketsAreRefused)
 {
-	auto s = ReadSchema("[table t (column a int\n", "bad.tabular");
+	auto s = ReadSchema("[table t (input a double\n", "bad.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "bad.tabular")) << s.error().format();
 }
 
 TEST(Document, ReadsTheVec2Type)
 {
-	auto s = ReadSchema("[table t (column at vec2) (pick none)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none)]\nat: vec2\n", "t.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	EXPECT_EQ(s->tables()[0].columns[0].type, column_type::Vec2);
 }
 
 TEST(Document, ReadsTheStringType)
 {
-	auto s = ReadSchema("[table t (key n string) (pick none)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none)]\n>n: string\n", "t.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	EXPECT_EQ(s->tables()[0].columns[0].type, column_type::String);
 }
@@ -150,11 +147,9 @@ TEST(Document, APickedTableIsDeclaredByName)
 	auto s = ReadSchema(R"(
 [table phase
   (pick or bits)
-  (input t double)
-  (key clip int)
-  (column bits flags)
-  (column window band (input t))
+  (input window double)
   (order clip)]
+>clip: int, bits: flags, window: band
 )", "phase.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	table_def const& def = s->tables()[0];
@@ -166,19 +161,16 @@ TEST(Document, APickedTableIsDeclaredByName)
 
 TEST(Document, NoPickIsBest)
 {
-	constexpr std::string_view kBody = R"(
-  (key clip int (domain rows))
-  (column v int)
-  (order clip))";
-	auto none = ReadSchema(std::string("[table t") + std::string(kBody) + "]", "t.tabular");
+	constexpr std::string_view kBody = " (order clip)]\n>clip: int, v: int\n";
+	auto none = ReadSchema(std::string("[table t") + std::string(kBody), "t.tabular");
 	ASSERT_TRUE(none.has_value()) << none.error().format();
 	EXPECT_EQ(none->tables()[0].pick, pick_policy::Best);
 
-	auto spelled = ReadSchema(std::string("[table t (pick best)") + std::string(kBody) + "]", "t.tabular");
+	auto spelled = ReadSchema(std::string("[table t (pick best)") + std::string(kBody), "t.tabular");
 	ASSERT_TRUE(spelled.has_value()) << spelled.error().format();
 	EXPECT_EQ(spelled->tables()[0].pick, pick_policy::Best);
 
-	auto explicitNone = ReadSchema("[table t (pick none) (column v int)]", "t.tabular");
+	auto explicitNone = ReadSchema("[table t (pick none)]\nv: int\n", "t.tabular");
 	ASSERT_TRUE(explicitNone.has_value()) << explicitNone.error().format();
 	EXPECT_EQ(explicitNone->tables()[0].pick, pick_policy::None);
 }
@@ -186,9 +178,12 @@ TEST(Document, NoPickIsBest)
 TEST(Document, EveryFileTableIsReadOnly)
 {
 	auto s = ReadSchema(R"(
-[table a (pick none) (column v int)]
-[table b (pick all) (key clip int) (order clip)]
-[table c (key clip int (domain rows)) (order clip)]
+[table a (pick none)]
+v: int
+[table b (pick all) (order clip)]
+>clip: int
+[table c (order clip)]
+>clip: int
 [grid g (rows r int) (columns c int) (cells int)]
 )", "t.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
@@ -203,20 +198,20 @@ TEST(Document, EveryFileTableIsReadOnly)
 
 TEST(Document, MutableIsRefused)
 {
-	auto s = ReadSchema("[table t (column a int) (pick none) (mutable)]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none) (mutable)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "mutable")) << s.error().format();
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick none) (read_only)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick none) mutable]", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick none) (read_only)]\na: int\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick none) mutable]\na: int\n", "t.tabular").has_value());
 }
 
 TEST(Document, AnUndeclaredInputOrOutputIsRefused)
 {
-	auto input = ReadSchema("[table t (pick none) (column window band (input speed))]", "t.tabular");
+	auto input = ReadSchema("[table t (pick none)]\nspeed: band\n", "t.tabular");
 	ASSERT_FALSE(input.has_value());
 	EXPECT_TRUE(Mentions(input.error().format(), "input 'speed'")) << input.error().format();
 
-	auto output = ReadSchema("[table t (pick or bits) (column clip int)]", "t.tabular");
+	auto output = ReadSchema("[table t (pick or bits)]\nclip: int\n", "t.tabular");
 	ASSERT_FALSE(output.has_value());
 	EXPECT_TRUE(Mentions(output.error().format(), "output 'bits'")) << output.error().format();
 }
@@ -231,7 +226,7 @@ TEST(Document, AGridHasAxesAndCellsAndNoColumns)
 	EXPECT_EQ(def.grid_columns.name, "kind");
 	EXPECT_EQ(def.grid_cells, column_type::Command);
 
-	auto both = ReadSchema("[grid g (rows r int) (columns c int) (cells int) (column x int)]", "g.tabular");
+	auto both = ReadSchema("[grid g (rows r int) (columns c int) (cells int) (input x double)]", "g.tabular");
 	EXPECT_FALSE(both.has_value());
 
 	auto lacking = ReadSchema("[grid g (rows r int) (cells int)]", "g.tabular");
@@ -245,22 +240,14 @@ TEST(Document, AGridHasAxesAndCellsAndNoColumns)
 
 TEST(Document, AnEmptyInputOrOutputIsRefusedNotNone)
 {
-	auto input = ReadSchema("[table t (pick none) (input mode flags) (column req flags (input \"\"))]", "t.tabular");
-	ASSERT_FALSE(input.has_value()) << "a flags column with input \"\" became unranked";
-	EXPECT_TRUE(Mentions(input.error().format(), "input ''")) << input.error().format();
-
-	auto output = ReadSchema("[table t (pick or \"\") (key clip int) (order clip)]", "t.tabular");
+	auto output = ReadSchema("[table t (pick or \"\") (order clip)]\n>clip: int\n", "t.tabular");
 	ASSERT_FALSE(output.has_value());
 	EXPECT_TRUE(Mentions(output.error().format(), "output ''")) << output.error().format();
-
-	auto suffix = ReadSchema("[table t (pick none) (column a int) (suffix \"\")]", "t.tabular");
-	ASSERT_FALSE(suffix.has_value());
-	EXPECT_TRUE(Mentions(suffix.error().format(), "suffix")) << suffix.error().format();
 }
 
 TEST(Document, ABandIsNamedInRefusals)
 {
-	auto s = ReadSchema("[table t (pick none) (input t double) (key window band (input t))]", "t.tabular");
+	auto s = ReadSchema("[table t (pick none) (input window double)]\n>window: band\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "band")) << s.error().format();
 	EXPECT_FALSE(Mentions(s.error().format(), "unknown type")) << s.error().format();
@@ -271,11 +258,9 @@ TEST(Document, AnInputReadsItsRange)
 	auto s = ReadSchema(R"(
 [table phase
   (pick or bits)
-  (input t double -0.5..2)
-  (key clip int)
-  (column bits flags)
-  (column window band (input t))
+  (input window double -0.5..2)
   (order clip)]
+>clip: int, bits: flags, window: band
 )", "phase.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	input_def const& t = s->tables()[0].inputs[0];
@@ -283,7 +268,7 @@ TEST(Document, AnInputReadsItsRange)
 	EXPECT_EQ(t.lo, -0.5f);
 	EXPECT_EQ(t.hi, 2.0f);
 
-	auto bad = ReadSchema("[table phase (pick none) (input t double \"0-1\") (column clip int)]", "phase.tabular");
+	auto bad = ReadSchema("[table phase (pick none) (input t double \"0-1\")]\nclip: int\n", "phase.tabular");
 	ASSERT_FALSE(bad.has_value());
 	EXPECT_TRUE(Mentions(bad.error().format(), "written lo..hi")) << bad.error().format();
 }
@@ -292,45 +277,37 @@ TEST(Document, EveryOptionIsRead)
 {
 	auto s = ReadSchema(R"(
 [table keys
-  (key a hash (domain (members x y)))
-  (key b hash fallthrough)
-  (key n int (domain (members 1 2)))
-  (column v double)
   (order a b n unique)
-  (suffix then)]
+  (domain a x y)
+  (domain n 1 2)]
+>a, >b?, >n: int, v: double, then: command
 [table foreign
-  (key f hash (domain (from keys a)))
-  (column v int)
-  (order f)]
+  (order f)
+  (domain f keys.a)]
+>f, v: int
 [table bands
-  (input t double 0..1 cyclic)
+  (input win double 0..1 cyclic)
   (input m flags)
-  (key clip int)
-  (column win band (input t) edge)
   (pick all)
   (order clip)]
+>clip: int, ^win
 [table ors
-  (key clip int)
-  (column bits flags)
   (pick or bits)
   (order clip)]
+>clip: int, bits: flags
 [table weights
-  (key clip int)
-  (column w double)
   (pick weighted w)
   (order clip)]
+>clip: int, w: double
 [table pivoted
-  (input mode flags)
-  (key label int (domain rows))
-  (column mood flags (input mode))
-  (column cell string)
+  (input mood flags)
   (order label)
-  (pivot mood cell)]
+  (pivot mood cell: string)]
+>label: int
 [table ranked
-  (input m flags)
-  (key clip int (domain rows))
-  (column rank flags (input m))
+  (input rank flags)
   (order clip)]
+>clip: int, rank: flags
 )", "all.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	ASSERT_EQ(s->tables().size(), 7u);
@@ -378,19 +355,15 @@ TEST(Document, EveryOptionIsRead)
 
 TEST(Document, RepeatedOptionIsRefused)
 {
-	auto pick = ReadSchema("[table t (column a int) (pick best) (pick best)]", "t.tabular");
+	auto pick = ReadSchema("[table t (pick best) (pick best)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(pick.has_value());
 	EXPECT_TRUE(Mentions(pick.error().format(), "pick")) << pick.error().format();
 
-	auto order = ReadSchema("[table t (column a int) (pick none) (order a) (order a)]", "t.tabular");
+	auto order = ReadSchema("[table t (pick none) (order a) (order a)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(order.has_value());
 	EXPECT_TRUE(Mentions(order.error().format(), "order")) << order.error().format();
 
-	auto suffix = ReadSchema("[table t (column a int) (pick none) (suffix x) (suffix y)]", "t.tabular");
-	ASSERT_FALSE(suffix.has_value());
-	EXPECT_TRUE(Mentions(suffix.error().format(), "suffix")) << suffix.error().format();
-
-	auto domain = ReadSchema("[table t (key a hash (domain rows) (domain rows)) (column v int)]", "t.tabular");
+	auto domain = ReadSchema("[table t (domain a x) (domain a y)]\n>a, v: int\n", "t.tabular");
 	ASSERT_FALSE(domain.has_value());
 	EXPECT_TRUE(Mentions(domain.error().format(), "domain")) << domain.error().format();
 
@@ -401,7 +374,7 @@ TEST(Document, RepeatedOptionIsRefused)
 
 TEST(Document, OptionOnWrongHeadIsRefused)
 {
-	auto table = ReadSchema("[table t (column a int) (pick none) (cells int)]", "t.tabular");
+	auto table = ReadSchema("[table t (pick none) (cells int)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(table.has_value());
 	EXPECT_TRUE(Mentions(table.error().format(), "cells")) << table.error().format();
 
@@ -412,16 +385,16 @@ TEST(Document, OptionOnWrongHeadIsRefused)
 
 TEST(Document, ABadPickShapeIsRefused)
 {
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick sorted)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick or)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick all bits)]", "t.tabular").has_value());
-	EXPECT_FALSE(ReadSchema("[table t (column a int) (pick weighted)]", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick)]\na: int\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick sorted)]\na: int\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick or)]\na: int\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick all bits)]\na: int\n", "t.tabular").has_value());
+	EXPECT_FALSE(ReadSchema("[table t (pick weighted)]\na: int\n", "t.tabular").has_value());
 }
 
 TEST(Document, AFallThroughKeyDeclaresNoDomain)
 {
-	auto s = ReadSchema("[table t (key a hash (domain rows) fallthrough) (column v int)]", "t.tabular");
+	auto s = ReadSchema("[table t (domain a x)]\n>a?, v: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "falls through")) << s.error().format();
 }
@@ -430,12 +403,13 @@ TEST(Document, RefusalNamesFileLine)
 {
 	auto s = ReadSchema(
 		"[table t\n"
-		"  (column a int)\n"
-		"  (column b int)\n"
+		"  # columns a and b,\n"
+		"  # in the header row\n"
 		"  # a note\n"
 		"  (pick none)\n"
 		"  (order a)\n"
-		"  (uniqe a)]\n", "t.tabular");
+		"  (uniqe a)]\n"
+		"a: int, b: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_EQ(Where(s.error()), "t.tabular:7") << s.error().format();
 	EXPECT_FALSE(Mentions(s.error().message, "t.tabular")) << "the message carries no position";
@@ -445,13 +419,13 @@ TEST(Document, RefusalNamesFileLine)
 TEST(Document, RowsAreKeptForTablesWithBodies)
 {
 	auto d = ReadDocument(
-		"[table a (pick none) (column v int)]\n"
-		"v\n"
+		"[table a (pick none)]\n"
+		"v: int\n"
 		"1\n"
-		"[table b (pick none) (column v int)]\n"
-		"# no rows here\n"
-		"[table c (pick none) (column v int)]\n"
-		"v\n"
+		"[table b (pick none)]\n"
+		"v: int\n"
+		"[table c (pick none)]\n"
+		"v: int\n"
 		"3\n", "t.tabular");
 	ASSERT_TRUE(d.has_value()) << d.error().format();
 	ASSERT_EQ(d->rows().size(), 2u);
@@ -464,7 +438,7 @@ TEST(Document, RowsAreKeptForTablesWithBodies)
 
 TEST(Document, ASchemaAloneRefusesWhatItWouldDrop)
 {
-	auto rows = ReadSchema("[table a (pick none) (column v int)]\nv\n1\n", "t.tabular");
+	auto rows = ReadSchema("[table a (pick none)]\nv: int\n1\n", "t.tabular");
 	ASSERT_FALSE(rows.has_value());
 	EXPECT_TRUE(Mentions(rows.error().format(), "ReadDocument")) << rows.error().format();
 }
@@ -484,24 +458,17 @@ int64_t Hash(std::string_view text)
 // clause reads the coalesced answer. A clause in each of the other lists too.
 constexpr std::string_view kModded = R"(
 [table brain
-  (key mode hash (domain rows))
-  (column next hash)
-  (column steps int)
-  (order mode)
-  (suffix command)]
-[table brain_mod
-  (key mode hash (domain rows))
-  (column next hash)
-  (order mode)
-  (suffix command)]
-[table label
-  (key mode hash (domain rows))
-  (column code int)
   (order mode)]
+>mode, next, steps: int, command
+[table brain_mod
+  (order mode)]
+>mode, next, command
+[table label
+  (order mode)]
+>mode, code: int
 [table tally
-  (key level int (domain rows))
-  (column count int)
   (order level)]
+>level: int, count: int
 [machine grazer
   (state mode hash (members idle walk sleep) (initial idle))
   (state steps int (initial 0))
@@ -517,7 +484,7 @@ exit, label, mode=state.mode, , code=code, ,
 )";
 
 constexpr std::string_view kSmall =
-	"[table t (key mode hash (domain rows)) (column next hash) (order mode)]\n"
+	"[table t (order mode)]\n>mode, next\n"
 	"[machine m (state mode hash (members a b) (initial a))]\n"
 	"list,from,where,given,set,emit,overrides\n"
 	"step,t,mode=state.mode,,mode=next,,\n";
@@ -590,7 +557,7 @@ TEST(Document, LiteralReadsByTargetType)
 	EXPECT_EQ(idle.literal.i, Hash("idle"));
 
 	auto numbered = ReadDocument(
-		"[table tally (key level int (domain rows)) (column count int) (order level)]\n"
+		"[table tally (order level)]\n>level: int, count: int\n"
 		"[machine m (state count int (initial 0))]\n"
 		"list,from,where,given,set,emit,overrides\n"
 		"step,tally,level=(literal 3),,count=count,,\n", "t.tabular");
@@ -598,7 +565,7 @@ TEST(Document, LiteralReadsByTargetType)
 	EXPECT_EQ(numbered->machines()[0].step[0].where[0].from.literal.i, 3);
 
 	auto quoted = ReadDocument(
-		"[table t (key mode hash (domain rows)) (column next hash) (order mode)]\n"
+		"[table t (order mode)]\n>mode, next\n"
 		"[machine m (state mode hash (members \"a b\" c) (initial \"a b\"))]\n"
 		"list,from,where,given,set,emit,overrides\n"
 		"step,t,\"mode=(literal \"\"a b\"\")\",,mode=next,,\n", "t.tabular");
@@ -610,7 +577,8 @@ TEST(Document, LiteralReadsByTargetType)
 TEST(Document, AMachineMayComeBeforeItsTables)
 {
 	std::string text(kSmall);
-	std::string const tableLine = text.substr(0, text.find('\n') + 1);
+	// The table is its bracket line and its header row.
+	std::string const tableLine = text.substr(0, text.find('\n', text.find('\n') + 1) + 1);
 	text.erase(0, tableLine.size());
 	text += tableLine;
 	auto d = ReadDocument(text, "m.tabular");
@@ -633,7 +601,7 @@ TEST(Document, PairWithoutEqualsIsRefused)
 	auto d = ReadDocument(text, "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "mode")) << d.error().format();
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:4")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:5")) << d.error().format();
 
 	std::string empty(kSmall);
 	empty.replace(empty.find("mode=state.mode"), 15, "mode=");
@@ -659,7 +627,7 @@ TEST(Document, UnknownListIsRefused)
 	auto d = ReadDocument(text, "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "'walk'")) << d.error().format();
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:4")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:5")) << d.error().format();
 }
 
 TEST(Document, WrongClauseHeaderIsRefused)
@@ -669,7 +637,7 @@ TEST(Document, WrongClauseHeaderIsRefused)
 	auto d = ReadDocument(swapped, "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "list, from, where, given, set, emit, overrides")) << d.error().format();
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:3")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:4")) << d.error().format();
 
 	std::string shorter(kSmall);
 	shorter.replace(shorter.find(",overrides"), 10, "");
@@ -685,7 +653,7 @@ TEST(Document, ClauseRefusalNamesFileLine)
 	text += "step,t,mode=bogus.x,,mode=next,,\n";
 	auto d = ReadDocument(text, "t.tabular");
 	ASSERT_FALSE(d.has_value());
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:5")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:6")) << d.error().format();
 	EXPECT_TRUE(Mentions(d.error().format(), "bogus.x")) << d.error().format();
 	EXPECT_TRUE(Mentions(d.error().format(), "machine 'm'")) << d.error().format();
 	EXPECT_FALSE(Mentions(d.error().message, "t.tabular")) << d.error().message;
@@ -727,10 +695,10 @@ TEST(Document, AMachineOptionIsKnown)
 	auto d = ReadDocument(text, "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "'stat'")) << d.error().format();
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:2")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:3")) << d.error().format();
 
 	auto twice = ReadDocument(
-		"[table t (key mode hash (domain rows)) (column next hash) (order mode)]\n"
+		"[table t (order mode)]\n>mode, next\n"
 		"[machine m (state mode hash (members a) (initial a)) (state mode hash (members a) (initial a))]\n", "t.tabular");
 	EXPECT_FALSE(twice.has_value()) << "two state columns named mode";
 	auto noInitial = ReadDocument("[machine m (state mode hash (members a))]\n", "t.tabular");
@@ -751,10 +719,8 @@ std::string Failure(tl::expected<void, ErrorContext> const& r)
 
 constexpr std::string_view kLookupFile = R"(
 [table lookup
-  (key label int (domain rows))
-  (column v int)
   (order label)]
-label, v
+>label: int, v: int
 1, 10
 2, 20
 3, 30
@@ -782,13 +748,10 @@ TEST(Document, PivotAndGridBodiesLoad)
 {
 	auto d = ReadDocument(R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label)
-  (pivot req clip)]
-label,None,Injured,Crouch,Injured|Crouch
+  (pivot req clip: string)]
+>label: int, None, Injured, Crouch, Injured|Crouch
 1,c1_none,c1_injured,c1_crouch,
 2,c2_none,c2_injured,c2_crouch,c2_combo
 [grid g (rows r int) (columns c int) (cells int)]
@@ -817,10 +780,10 @@ TEST(Document, BodyRefusalNamesFileLine)
 {
 	auto d = ReadDocument(
 		"[table lookup\n"
-		"  (key label int (domain rows))\n"
-		"  (column v int)\n"
+		"  # a key, label, and a value, v,\n"
+		"  # declared by the header row\n"
 		"  (order label)]\n"
-		"label,v\n"
+		">label: int, v: int\n"
 		"1,10\n"
 		"2,20\n"
 		"# a note\n"
@@ -839,16 +802,12 @@ TEST(Document, ARefusedBodyNamesItsTable)
 {
 	auto d = ReadDocument(R"(
 [table first
-  (key label int (domain rows))
-  (column v int)
   (order label)]
-label, v
+>label: int, v: int
 1, 10
 [table second
-  (key label int (domain rows))
-  (column v int)
   (order label)]
-label, v
+>label: int, v: int
 1, oops
 )", "t.tabular");
 	ASSERT_TRUE(d.has_value()) << d.error().format();
@@ -880,18 +839,17 @@ size_t Count(std::string const& text, std::string_view piece)
 TEST(Document, RowsIntoAStoreFromAnotherSchemaAreRefused)
 {
 	auto d = ReadDocument(R"(
-[table first (pick none) (column v int)]
+[table first (pick none)]
+v: int
 [table second
-  (key label int (domain rows))
-  (column v int)
   (order label)]
-label, v
+>label: int, v: int
 1, 10
 )", "t.tabular");
 	ASSERT_TRUE(d.has_value()) << d.error().format();
 
 	// Fewer tables than the document's body points at.
-	auto fewer = ReadSchema("[table first (pick none) (column v int)]", "other.tabular");
+	auto fewer = ReadSchema("[table first (pick none)]\nv: int\n", "other.tabular");
 	ASSERT_TRUE(fewer.has_value()) << fewer.error().format();
 	relation_store small(std::move(*fewer));
 	auto tooFew = LoadDocumentRows(small, *d, 1, condition_reader());
@@ -900,11 +858,12 @@ label, v
 
 	// The same count, another table at that index.
 	auto renamed = ReadSchema(R"(
-[table first (pick none) (column v int)]
+[table first (pick none)]
+v: int
 [table other
-  (key label int (domain rows))
-  (column v int)
-  (order label)])", "other.tabular");
+  (order label)]
+>label: int, v: int
+)", "other.tabular");
 	ASSERT_TRUE(renamed.has_value()) << renamed.error().format();
 	relation_store other(std::move(*renamed));
 	auto wrong = LoadDocumentRows(other, *d, 1, condition_reader());
@@ -924,14 +883,14 @@ TEST(Document, CheckMachineRefusalNamesTheRowLine)
 	auto d = ReadDocument(text, "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "nope")) << d.error().format();
-	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:4")) << d.error().format();
+	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:5")) << d.error().format();
 
 	// A refusal about the machine itself, with no clause in it, names its bracket.
 	std::string initial(kSmall);
 	initial.replace(initial.find("(initial a)"), 11, "(initial c)");
 	auto machine = ReadDocument(initial, "t.tabular");
 	ASSERT_FALSE(machine.has_value());
-	EXPECT_TRUE(Mentions(machine.error().format(), "t.tabular:2")) << machine.error().format();
+	EXPECT_TRUE(Mentions(machine.error().format(), "t.tabular:3")) << machine.error().format();
 }
 
 TEST(Document, QuotedNamesAreRefused)
@@ -940,22 +899,22 @@ TEST(Document, QuotedNamesAreRefused)
 	{
 		return !ReadDocument(text, "t.tabular").has_value();
 	};
-	EXPECT_TRUE(refused("[table \"my table\" (pick none) (column a int)]"));
-	EXPECT_TRUE(refused("[table t (pick none) (column \"my col\" int)]"));
-	EXPECT_TRUE(refused("[table t (pick none) (key \"k\" int)]"));
-	EXPECT_TRUE(refused("[table t (pick none) (input \"in put\" double) (column a int)]"));
+	EXPECT_TRUE(refused("[table \"my table\" (pick none)]\na: int\n"));
+	EXPECT_TRUE(refused("[table t (pick none)]\nmy col: int\n"));
+	EXPECT_TRUE(refused("[table t (pick none)]\n>\"k\": int\n"));
+	EXPECT_TRUE(refused("[table t (pick none) (input \"in put\" double)]\na: int\n"));
 	EXPECT_TRUE(refused("[grid \"g g\" (rows r int) (columns c int) (cells int)]"));
 	EXPECT_TRUE(refused("[grid g (rows \"r\" int) (columns c int) (cells int)]"));
-	EXPECT_TRUE(refused("[table t (pick none) (column a int) (suffix \"then it\")]"));
+	EXPECT_TRUE(refused("[table t (pick none)]\na: int, then it: command\n"));
 	EXPECT_TRUE(refused("[machine \"m m\"]"));
 	EXPECT_TRUE(refused("[machine m (state \"mo de\" int (initial 0))]"));
 	EXPECT_TRUE(refused("[machine m (input \"in put\" double)]"));
 
-	auto d = ReadDocument("[table \"my table\" (pick none) (column a int)]", "t.tabular");
+	auto d = ReadDocument("[table \"my table\" (pick none)]\na: int\n", "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_TRUE(Mentions(d.error().format(), "my table")) << d.error().format();
 	EXPECT_TRUE(Mentions(d.error().format(), "t.tabular:1")) << d.error().format();
-	EXPECT_TRUE(ReadDocument("[table t (pick none) (column a int)]", "t.tabular").has_value());
+	EXPECT_TRUE(ReadDocument("[table t (pick none)]\na: int\n", "t.tabular").has_value());
 }
 
 TEST(Document, AMalformedLiteralNamesItsClauseOnce)
@@ -968,7 +927,7 @@ TEST(Document, AMalformedLiteralNamesItsClauseOnce)
 		ASSERT_FALSE(d.has_value()) << bad;
 		std::string const all = d.error().format();
 		EXPECT_EQ(Count(all, "machine 'm' step clause 0"), 1u) << bad << "\n" << all;
-		EXPECT_EQ(Count(all, "t.tabular:4"), 1u) << bad << "\n" << all;
+		EXPECT_EQ(Count(all, "t.tabular:5"), 1u) << bad << "\n" << all;
 	}
 }
 
@@ -976,13 +935,12 @@ TEST(Document, SchemaRefusalNamesTheTableLine)
 {
 	auto s = ReadSchema(
 		"# two tables\n"
-		"[table fine (pick none) (column v int)]\n"
-		"\n"
+		"[table fine (pick none)]\nv: int\n"
 		"[table keyed\n"
-		"  # no domain on the key\n"
-		"  (key k int)\n"
-		"  (column v int)\n"
-		"  (order k)]\n", "t.tabular");
+		"  # a fall-through key is a hash\n"
+		"  # and this one is an int\n"
+		"  (order k)]\n"
+		">k?: int, v: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular:4")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "keyed")) << s.error().format();
@@ -991,9 +949,10 @@ TEST(Document, SchemaRefusalNamesTheTableLine)
 TEST(Document, ADomainCycleNamesALine)
 {
 	auto s = ReadSchema(
-		"[table fine (pick none) (column v int)]\n"
-		"[table a (key k int (domain (from b k))) (column v int) (order k)]\n"
-		"[table b (key k int (domain (from a k))) (column v int) (order k)]\n", "t.tabular");
+		"# a cycle\n"
+		"[table a (order k) (domain k b.k)]\n>k: int, v: int\n"
+		"[table b (order k) (domain k a.k)]\n>k: int, v: int\n"
+		"[table fine (pick none)]\nv: int\n", "t.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "cycle")) << s.error().format();
 	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular:2")) << s.error().format();
@@ -1001,14 +960,14 @@ TEST(Document, ADomainCycleNamesALine)
 
 TEST(Document, AnUnclosedQuoteInABodyDoesNotSwallowTheNextSection)
 {
-	auto d = ReadDocument("[table t (key k hash (domain rows)) (order k)]\nk\n\"open\n[table u (column v int) (pick none)]\n", "t.tabular");
+	auto d = ReadDocument("[table t (order k)]\n>k\n\"open\n[table u (pick none)]\nv: int\n", "t.tabular");
 	ASSERT_FALSE(d.has_value());
 	EXPECT_EQ(Where(d.error()), "t.tabular:3") << d.error().format();
 }
 
 TEST(Document, ATableWithOnlyAHeaderLineHasNoRows)
 {
-	constexpr std::string_view headerOnly = "[table t (key k hash (domain rows)) (column v int) (order k)]\nk,v\n# a note\n,\n\n";
+	constexpr std::string_view headerOnly = "[table t (order k)]\n>k, v: int\n# a note\n,\n\n";
 	auto s = ReadSchema(headerOnly, "t.tabular");
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	auto d = ReadDocument(headerOnly, "t.tabular");
@@ -1017,7 +976,7 @@ TEST(Document, ATableWithOnlyAHeaderLineHasNoRows)
 
 	// A comment is a row whose first unquoted character is '#': a comma before
 	// it makes a row, as csv_text reads it.
-	auto row = ReadSchema("[table t (key k hash (domain rows)) (column v int) (order k)]\nk,v\n,# x\n", "t.tabular");
+	auto row = ReadSchema("[table t (order k)]\n>k, v: int\n,# x\n", "t.tabular");
 	EXPECT_FALSE(row.has_value());
 }
 
@@ -1033,11 +992,9 @@ TEST(Document, AGridsHeaderLineIsPartOfItsBody)
 TEST(Document, TheHeaderCommentsExampleIsAValidFile)
 {
 	constexpr std::string_view example = R"([table grazer_brain
-  (key mode hash (domain (members idle walk)))
-  (column next hash)
   (order mode)
-  (suffix command)]
-mode,next,command
+  (domain mode idle walk)]
+>mode, next, command
 idle,walk,go
 walk,idle,stop
 
@@ -1164,4 +1121,691 @@ TEST(Document, ReadCellsUndoesQuotes)
 	auto open = ReadCells("a\n\"never closed\n", "t", 7);
 	ASSERT_FALSE(open.has_value());
 	EXPECT_EQ(Where(open.error()), "t:8") << open.error().format();
+}
+
+namespace
+{
+
+// Every field of a table a declaration sets, as one text, so two tables
+// compare whole and a failure says which field differs.
+std::string Describe(table_def const& def)
+{
+	std::ostringstream out;
+	out << def.name << " pick=" << int(def.pick) << " output=" << def.output << " weight=" << def.weight
+		<< " ranking=" << def.ranking << " keys=" << def.key_count << " suffix=" << def.suffix << " unique=" << def.unique
+		<< " pivot=" << def.pivot_headers << "/" << def.pivot_cells << " edges=" << def.edges << " grid=" << def.is_grid
+		<< "\n";
+	for (column_def const& c : def.columns)
+	{
+		out << "  column " << c.name << " type=" << int(c.type) << " key=" << c.key << " input=" << c.input
+			<< " edge=" << c.edge << "\n";
+	}
+	for (input_def const& i : def.inputs)
+	{
+		out << "  input " << i.name << " type=" << int(i.type) << " ranged=" << i.ranged << " " << i.lo << ".." << i.hi
+			<< " cyclic=" << i.cyclic << "\n";
+	}
+	for (uint32_t o : def.order)
+	{
+		out << "  order " << o << "\n";
+	}
+	for (domain_def const& d : def.domains)
+	{
+		out << "  domain kind=" << int(d.kind) << " table=" << d.table << " column=" << d.column << " members=";
+		for (int64_t m : d.members)
+		{
+			out << m << " ";
+		}
+		out << "\n";
+	}
+	return out.str();
+}
+
+std::string Describe(schema const& s)
+{
+	std::string out;
+	for (table_def const& def : s.tables())
+	{
+		out += Describe(def);
+	}
+	return out;
+}
+
+std::string DescribeFile(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	return d ? Describe(d->tables) : "refused: " + d.error().format();
+}
+
+std::string DescribeBuilt(std::span<create_table const> tables)
+{
+	auto built = BuildSchema(tables);
+	return built ? Describe(*built) : "refused: " + built.error().format();
+}
+
+std::string RefusalOf(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	return d ? std::string("read") : d.error().format();
+}
+
+}
+
+TEST(Document, AHeaderDeclaresWhatTheOptionsDid)
+{
+	EXPECT_EQ(DescribeFile(R"(
+[table spawn_points
+  (pick none)
+  (order section package unique)]
+>package, section, x: double, y: double
+[table rules
+  (pick none)]
+when, then: command, mask: flags, count: int
+)"), DescribeFile(kSpawnPoints));
+
+	EXPECT_EQ(DescribeFile(R"(
+[table grazer_brain
+  (domain mode idle walk)
+  (order mode)]
+>mode, next, command
+idle,walk,go
+walk,idle,stop
+)"), ([] {
+		cell const      walks[]  = {cell::Integer(Hash("idle")), cell::Integer(Hash("walk"))};
+		add_column const cols[] = {{"mode", column_type::Hash, true, UINT32_MAX, {domain_kind::Members, walks, {}, {}}},
+			{"next", column_type::Hash}};
+		uint32_t const  byMode[] = {0};
+		order_by const  order{byMode};
+		create_table const t[] = {{"grazer_brain", cols, &order, true, {}, pick_policy::Best, UINT32_MAX, nullptr,
+			nullptr, "command"}};
+		return DescribeBuilt(t);
+	}()));
+
+	EXPECT_EQ(DescribeFile(R"(
+[table keys
+  (domain a x y)
+  (domain n 1 2)
+  (order a b n unique)]
+>a, >b?, >n: int, v: double, then: command
+[table foreign
+  (domain f keys.a)
+  (order f)]
+>f, v: int
+[table bands
+  (input win double 0..1 cyclic)
+  (input m flags)
+  (pick all)
+  (order clip)]
+>clip: int, ^win
+[table ors
+  (pick or bits)
+  (order clip)]
+>clip: int, bits: flags
+[table weights
+  (pick weighted w)
+  (order clip)]
+>clip: int, w: double
+[table pivoted
+  (input mood flags)
+  (order label)
+  (pivot mood cell: string)]
+>label: int
+[table ranked
+  (input rank flags)
+  (order clip)]
+>clip: int, rank: flags
+)"), ([] {
+		cell const      xy[]       = {cell::Integer(Hash("x")), cell::Integer(Hash("y"))};
+		cell const      oneTwo[]   = {cell::Integer(1), cell::Integer(2)};
+		add_column const keys[] = {{"a", column_type::Hash, true, UINT32_MAX, {domain_kind::Members, xy, {}, {}}},
+			{"b", column_type::Hash, true, UINT32_MAX, key_domain::FallThrough()},
+			{"n", column_type::Int, true, UINT32_MAX, {domain_kind::Members, oneTwo, {}, {}}},
+			{"v", column_type::Double}};
+		add_column const foreign[] = {{"f", column_type::Hash, true, UINT32_MAX, {domain_kind::Column, {}, "keys", "a"}},
+			{"v", column_type::Int}};
+		add_input const  bandInputs[] = {{"win", column_type::Double, true, 0, 1, true}, {"m", column_type::Flags}};
+		add_column const bands[]   = {{"clip", column_type::Int, true}, {"win", column_type::Band, false, 0, {}, true}};
+		add_column const ors[]     = {{"clip", column_type::Int, true}, {"bits", column_type::Flags}};
+		add_column const weights[] = {{"clip", column_type::Int, true}, {"w", column_type::Double}};
+		add_input const  mood[]    = {{"mood", column_type::Flags}};
+		add_column const pivoted[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"mood", column_type::Flags, false, 0}, {"cell", column_type::String}};
+		add_input const  rank[]    = {{"rank", column_type::Flags}};
+		add_column const ranked[]  = {{"clip", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"rank", column_type::Flags, false, 0}};
+		uint32_t const   abn[]   = {0, 1, 2};
+		uint32_t const   first[] = {0};
+		order_by const   unique{abn, true};
+		order_by const   byFirst{first};
+		pivot_by const   pivot{1, 2};
+		create_table const t[] = {
+			{"keys", keys, &unique, true, {}, pick_policy::Best, UINT32_MAX, nullptr, nullptr, "then"},
+			{"foreign", foreign, &byFirst, true, {}, pick_policy::Best},
+			{"bands", bands, &byFirst, true, bandInputs, pick_policy::All},
+			{"ors", ors, &byFirst, true, {}, pick_policy::Or, 1},
+			{"weights", weights, &byFirst, true, {}, pick_policy::Weighted, UINT32_MAX, nullptr, nullptr, {}, 1},
+			{"pivoted", pivoted, &byFirst, true, mood, pick_policy::Best, UINT32_MAX, &pivot},
+			{"ranked", ranked, &byFirst, true, rank, pick_policy::Best},
+		};
+		return DescribeBuilt(t);
+	}()));
+}
+
+TEST(Document, ALastCommandCellIsTheSuffix)
+{
+	auto d = ReadDocument("[table t (pick none)]\nk: int, then: command\n1, (a b), (c d)\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	table_def const& def = d->tables.tables()[0];
+	EXPECT_TRUE(def.suffix);
+	ASSERT_EQ(def.columns.size(), 2u);
+	EXPECT_EQ(def.columns[1].name, "then");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(*store.CommandAt(0, 0, 1), "((a b) (c d))") << "the suffix takes the rest of the row";
+}
+
+TEST(Document, AMiddleCommandCellIsOneCell)
+{
+	auto d = ReadDocument("[table t (pick none)]\nthen: command, k: int\n(a b), 1\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	table_def const& def = d->tables.tables()[0];
+	EXPECT_FALSE(def.suffix);
+	EXPECT_EQ(def.columns[0].type, column_type::Command);
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(*store.CommandAt(0, 0, 0), "((a b))");
+	EXPECT_EQ(store.Value(0, 0, 1)->i, 1);
+}
+
+TEST(Document, AWeightColumnMakesTheTableWeighted)
+{
+	auto weighted = ReadDocument("[table t (order clip)]\n>clip: int, weight\n", "t.tabular");
+	ASSERT_TRUE(weighted.has_value()) << weighted.error().format();
+	EXPECT_EQ(weighted->tables.tables()[0].pick, pick_policy::Weighted);
+	EXPECT_EQ(weighted->tables.tables()[0].weight, 1u);
+	EXPECT_EQ(weighted->tables.tables()[0].columns[1].type, column_type::Double);
+
+	auto best = ReadDocument("[table t (pick best) (order clip)]\n>clip: int, weight\n", "t.tabular");
+	ASSERT_TRUE(best.has_value()) << best.error().format();
+	EXPECT_EQ(best->tables.tables()[0].pick, pick_policy::Best) << "a (pick ..) overrides the weight column";
+	EXPECT_EQ(best->tables.tables()[0].weight, UINT32_MAX);
+}
+
+TEST(Document, ABandMustBeNamedForAnInput)
+{
+	EXPECT_EQ(DescribeFile("[table t (input hp double 0..10) (pick all)]\nhp: band, v: int\n"),
+		([] {
+			add_input const  hp[]   = {{"hp", column_type::Double, true, 0, 10}};
+			add_column const cols[] = {{"hp", column_type::Band, false, 0}, {"v", column_type::Int}};
+			create_table const t[] = {{"t", cols, nullptr, true, hp, pick_policy::All}};
+			return DescribeBuilt(t);
+		}()));
+	std::string const refused = RefusalOf("[table t (input t double 0..10) (pick all)]\nhp: band, v: int\n");
+	EXPECT_TRUE(Mentions(refused, "'hp'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "input")) << refused;
+	EXPECT_TRUE(Mentions(refused, "t.tabular:2")) << refused;
+	std::string const edge = RefusalOf("[table t (input t double 0..10) (pick all)]\n^x, v: int\n");
+	EXPECT_TRUE(Mentions(edge, "'x'")) << edge;
+}
+
+TEST(Document, AFlagsColumnNamedForAnInputRanks)
+{
+	auto s = ReadSchema("[table t (input mode flags) (order clip)]\n>clip: int, mode: flags, bits: flags\n", "t.tabular");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	table_def const& def = s->tables()[0];
+	EXPECT_EQ(def.columns[1].input, 0u) << "named for an input: ranking";
+	EXPECT_EQ(def.ranking, 1u);
+	EXPECT_EQ(def.columns[2].input, UINT32_MAX) << "no input of its name: a value";
+}
+
+TEST(Document, DomainOptionsDeclareMembersAndOtherTables)
+{
+	auto s = ReadSchema(R"(
+[table kinds (pick none)]
+>kind
+[table t
+  (domain mode idle walk)
+  (domain level 1 3)
+  (domain kind kinds.kind)
+  (order mode level kind)]
+>mode, >level: int, >kind, v: int
+)", "t.tabular");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	table_def const& def = s->tables()[1];
+	ASSERT_EQ(def.domains.size(), 3u);
+	EXPECT_EQ(def.domains[0].kind, domain_kind::Members);
+	EXPECT_EQ(def.domains[0].members.size(), 2u);
+	EXPECT_EQ(def.domains[1].kind, domain_kind::Members);
+	EXPECT_EQ(def.domains[1].members[0], 1);
+	EXPECT_EQ(def.domains[2].kind, domain_kind::Column);
+	EXPECT_EQ(def.domains[2].table, 0u);
+
+	std::string const noKey = RefusalOf("[table t (domain nokey a) (order mode)]\n>mode, v: int\n");
+	EXPECT_TRUE(Mentions(noKey, "'nokey'")) << noKey;
+	EXPECT_TRUE(Mentions(noKey, "t.tabular:1")) << noKey;
+	std::string const fall = RefusalOf("[table t (domain sub a) (order mode)]\n>mode, >sub?, v: int\n");
+	EXPECT_TRUE(Mentions(fall, "'sub'")) << fall;
+	EXPECT_TRUE(Mentions(fall, "falls through")) << fall;
+	std::string const twice = RefusalOf("[table t (domain mode a) (domain mode b) (order mode)]\n>mode, v: int\n");
+	EXPECT_TRUE(Mentions(twice, "'mode'")) << twice;
+	EXPECT_FALSE(ReadSchema("[table t (domain mode) (order mode)]\n>mode, v: int\n", "t.tabular").has_value());
+}
+
+TEST(Document, APivotDeclaresItsTwoColumnsInTheBracket)
+{
+	constexpr std::string_view kHeaderForm = R"(
+[table lookup
+  (input req flags)
+  (order label)
+  (pivot req clip: string)]
+>label: int, None, Injured, Crouch, Injured|Crouch
+1,c1_none,c1_injured,c1_crouch,
+2,c2_none,c2_injured,c2_crouch,c2_combo
+)";
+	EXPECT_EQ(DescribeFile(kHeaderForm), ([] {
+		add_input const  req[]  = {{"req", column_type::Flags}};
+		add_column const cols[] = {{"label", column_type::Int, true, UINT32_MAX, key_domain::Rows()},
+			{"req", column_type::Flags, false, 0}, {"clip", column_type::String}};
+		uint32_t const   first[] = {0};
+		order_by const   order{first};
+		pivot_by const   pivot{1, 2};
+		create_table const t[] = {{"lookup", cols, &order, true, req, pick_policy::Best, UINT32_MAX, &pivot}};
+		return DescribeBuilt(t);
+	}()));
+	auto d = ReadDocument(kHeaderForm, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	cell const keys[]   = {cell::Integer(2)};
+	cell const inputs[] = {cell::Integer(3)};
+	auto picked = PickBest(store, 0, pick_query{keys, inputs});
+	ASSERT_TRUE(picked.has_value() && picked->has_value());
+	EXPECT_EQ(std::string_view(*store.StringAt(0, **picked, 2)), "c2_combo");
+
+	// The cells column untyped is a hash, and a band when named for an input.
+	auto bands = ReadSchema("[table b (input req flags) (input t double 0..1) (order label) (pivot req t)]\n>label: int\n",
+		"t.tabular");
+	ASSERT_TRUE(bands.has_value()) << bands.error().format();
+	EXPECT_EQ(bands->tables()[0].columns[2].type, column_type::Band);
+	EXPECT_EQ(bands->tables()[0].columns[2].input, 1u);
+	auto hashes = ReadSchema("[table h (input req flags) (order label) (pivot req clip)]\n>label: int\n", "t.tabular");
+	ASSERT_TRUE(hashes.has_value()) << hashes.error().format();
+	EXPECT_EQ(hashes->tables()[0].columns[2].type, column_type::Hash);
+}
+
+TEST(Document, ATableWithoutAHeaderRowIsRefused)
+{
+	std::string const neither = RefusalOf("[table t (pick none)]\n");
+	EXPECT_TRUE(Mentions(neither, "no columns")) << neither;
+}
+
+TEST(Document, ACompiledRowRefusalNamesItsSourceLine)
+{
+	auto d = ReadDocument(
+		"[table t (order k)]\n"
+		"# the header follows a note\n"
+		">k: int, v: int\n"
+		"1, 10\n"
+		"\n"
+		"\"2\", \"20,\"\"x\"\"\"\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	ASSERT_EQ(d->rows().size(), 1u);
+	EXPECT_EQ(d->rows()[0].text, "k,v\n1,10\n2,\"20,\"\"x\"\"\"\n") << "cells are re-quoted only where they must be";
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:6") << loaded.error().format();
+}
+
+TEST(Document, TheRemovedOptionsAreUnknown)
+{
+	for (std::string_view option : {"(key k hash (domain rows))", "(column v int)", "(suffix command)"})
+	{
+		std::string const text = cc(std::string("[table t "), option, "]\n>k, v: int\n");
+		std::string const refused = RefusalOf(text);
+		EXPECT_TRUE(Mentions(refused, "unknown option")) << option << ": " << refused;
+		EXPECT_TRUE(Mentions(refused, "t.tabular:1")) << refused;
+	}
+}
+
+namespace
+{
+
+// The row of table 0 whose key column 0 holds key.
+size_t RowOf(relation_store const& store, cell key)
+{
+	auto rows = store.Find(0, 0, key);
+	EXPECT_TRUE(rows.has_value() && rows->size() == 1u);
+	return rows.has_value() && rows->size() == 1u ? (*rows)[0] : SIZE_MAX;
+}
+
+}
+
+TEST(Document, ABlankCellTakesTheColumnDefault)
+{
+	auto d = ReadDocument("[table t (order k)]\n>k: int, status = None, n: int = 3, command = (idle)\n"
+		"1, , \n"
+		"2, Hurt, 4, (run) (stop)\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->rows()[0].text, "k,status,n,command\n1,None,3,(idle)\n2,Hurt,4,(run) (stop)\n");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	size_t const one = RowOf(store, cell::Integer(1));
+	size_t const two = RowOf(store, cell::Integer(2));
+	EXPECT_EQ(store.Value(0, one, 1)->i, Hash("None"));
+	EXPECT_EQ(store.Value(0, one, 2)->i, 3);
+	EXPECT_EQ(*store.CommandAt(0, one, 3), "((idle))");
+	EXPECT_EQ(store.Value(0, two, 1)->i, Hash("Hurt")) << "a written cell is not defaulted";
+	EXPECT_EQ(store.Value(0, two, 2)->i, 4);
+	EXPECT_EQ(*store.CommandAt(0, two, 3), "((run) (stop))");
+}
+
+TEST(Document, ADefaultNamingAKeyTakesThatRowsKey)
+{
+	auto d = ReadDocument("[table t (order mode)]\n>mode, next = mode\nidle,\nwalk, idle\neat,\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	for (auto [mode, next] : {std::pair{"idle", "idle"}, std::pair{"walk", "idle"}, std::pair{"eat", "eat"}})
+	{
+		size_t const row = RowOf(store, cell::Integer(Hash(mode)));
+		EXPECT_EQ(store.Value(0, row, 1)->i, Hash(next)) << mode;
+	}
+}
+
+TEST(Document, ABlankBandIsTheInputsWholeRange)
+{
+	constexpr std::string_view kBracket = "[table t (input hp double -100..1000) (pick all) (order k)]\n>k: int, hp: band, v: int\n";
+	auto blank   = ReadDocument(cc(std::string(kBracket), "1, , 10\n2, 0..5, 20\n3,,30\n"), "t.tabular");
+	auto written = ReadDocument(cc(std::string(kBracket), "1, -100..1000, 10\n2, 0..5, 20\n3,-100..1000,30\n"), "t.tabular");
+	ASSERT_TRUE(blank.has_value()) << blank.error().format();
+	ASSERT_TRUE(written.has_value()) << written.error().format();
+	// A store reads no band cell back, so the compiled rows are compared: the
+	// blank compiles to what the author could have written.
+	EXPECT_EQ(blank->rows()[0].text, written->rows()[0].text);
+	relation_store a(std::move(blank->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(a, *blank, 1, condition_reader())), "");
+	EXPECT_EQ(a.Value(0, RowOf(a, cell::Integer(3)), 2)->i, 30);
+}
+
+TEST(Document, ABlankBandOnAnUnrangedInputIsRefused)
+{
+	std::string const refused = RefusalOf("[table t (input hp double) (pick all)]\nk: int, hp: band\n1, 0..1\n2, \n");
+	EXPECT_TRUE(Mentions(refused, "t.tabular:4")) << refused;
+	EXPECT_TRUE(Mentions(refused, "'hp'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "range")) << refused;
+}
+
+TEST(Document, ABlankEdgeIsStillNoEdge)
+{
+	auto d = ReadDocument("[table t (input x double 0..1) (pick all)]\nk: int, ^x\n1,\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->rows()[0].text, "k,x\n1,\n");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(store.RowCount(0), 1u) << "the loader reads a blank edge cell as no edge";
+}
+
+namespace
+{
+
+// The compiled rows of a file's one table, or its refusal.
+std::string CompiledOf(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	if (!d)
+	{
+		return "refused: " + d.error().format();
+	}
+	return d->rows().empty() ? std::string("no rows") : std::string(d->rows()[0].text);
+}
+
+// What a best pick of table 0 answers in column 2, keyed on mode with one
+// double input.
+int64_t Picked(relation_store const& store, std::string_view mode, double hp)
+{
+	cell const keys[]   = {cell::Integer(Hash(mode))};
+	cell const inputs[] = {cell::Real(hp)};
+	auto       picked   = PickBest(store, 0, pick_query{keys, inputs});
+	EXPECT_TRUE(picked.has_value() && picked->has_value()) << mode << " " << hp;
+	return picked.has_value() && picked->has_value() ? store.Value(0, **picked, 2)->i : 0;
+}
+
+}
+
+TEST(Document, AStarRowIsCopiedPerKeyValueWhereItIsWritten)
+{
+	constexpr std::string_view kTable = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\n"
+		"*, 0..0.5, flee\n"
+		"idle, 0..1, idle\n"
+		"walk, 0..1, walk\n";
+	EXPECT_EQ(CompiledOf(kTable), "mode,hp,next\nidle,0..0.5,flee\nwalk,0..0.5,flee\nidle,0..1,idle\nwalk,0..1,walk\n");
+	auto d = ReadDocument(kTable, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(Picked(store, "idle", 0.25), Hash("flee")) << "the * row is first, so it beats idle's own row";
+	EXPECT_EQ(Picked(store, "walk", 0.25), Hash("flee"));
+	EXPECT_EQ(Picked(store, "idle", 0.75), Hash("idle"));
+}
+
+TEST(Document, ABottomStarRowYieldsToAKeysOwnUnconditionalRow)
+{
+	constexpr std::string_view kTable = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\n"
+		"idle, , idle\n"
+		"walk, 0..0.5, walk\n"
+		"*, , rest\n";
+	EXPECT_EQ(CompiledOf(kTable), "mode,hp,next\nidle,0..1,idle\nwalk,0..0.5,walk\nwalk,0..1,rest\n")
+		<< "idle's copy is dropped: idle's own row answers every input first";
+	auto d = ReadDocument(kTable, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(Picked(store, "idle", 0.75), Hash("idle"));
+	EXPECT_EQ(Picked(store, "walk", 0.25), Hash("walk"));
+	EXPECT_EQ(Picked(store, "walk", 0.75), Hash("rest")) << "walk's own row is conditional, so the * row is its fallback";
+}
+
+TEST(Document, AStarRowAfterAConditionalRowIsNotDropped)
+{
+	EXPECT_EQ(CompiledOf("[table t (order mode)]\n>mode, when, next\nidle, (near), idle\n*, , rest\n"),
+		"mode,when,next\nidle,(near),idle\nidle,,rest\n") << "a condition";
+	EXPECT_EQ(CompiledOf("[table t (input x double 0..1) (order mode)]\n>mode, ^x, next\nidle, 0..1, idle\n*, , rest\n"),
+		"mode,x,next\nidle,0..1,idle\nidle,,rest\n") << "an edge";
+	EXPECT_EQ(CompiledOf("[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next\nidle, 0..1, idle\n"
+		"walk, 0..0.75, walk\n*, , rest\n"),
+		"mode,hp,next\nidle,0..1,idle\nwalk,0..0.75,walk\nwalk,0..1,rest\n") << "a band short of the range; a whole range written out is unconditional";
+	EXPECT_EQ(CompiledOf("[table t (input m flags) (order mode)]\n>mode, m: flags, next\nidle, A, idle\n*, , rest\n"),
+		"mode,m,next\nidle,A,idle\nidle,,rest\n") << "other ranking flags";
+}
+
+TEST(Document, AStarUsesDomainMembersOverRowValues)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain mode idle walk eat) (order mode)]\n>mode, next\nwalk, idle\n*, rest\n"),
+		"mode,next\nwalk,idle\nidle,rest\neat,rest\n");
+}
+
+TEST(Document, TwoStarsGiveTheProductTheFirstKeySlowest)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain a x y) (domain b p q) (order a b)]\n>a, >b, v: int\n*, *, 1\n"),
+		"a,b,v\nx,p,1\nx,q,1\ny,p,1\ny,q,1\n");
+}
+
+TEST(Document, AStarOnAnotherTablesDomainIsRefused)
+{
+	std::string const refused = RefusalOf(
+		"[table kinds (pick none)]\n>kind\n[table t (domain kind kinds.kind) (order kind)]\n>kind, v: int\n*, 1\n");
+	EXPECT_TRUE(Mentions(refused, "'kind'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "members")) << refused;
+	EXPECT_TRUE(Mentions(refused, "t.tabular:5")) << refused;
+}
+
+TEST(Document, AStarDefaultTakesTheExpandedKey)
+{
+	EXPECT_EQ(CompiledOf("[table t (domain mode idle walk) (order mode)]\n>mode, next = mode\n*,\n"),
+		"mode,next\nidle,idle\nwalk,walk\n") << "next = mode reads the copy's mode, not '*'";
+}
+
+TEST(Document, AnExpandedRowRefusalNamesTheStarRowsLine)
+{
+	auto d = ReadDocument("[table t (domain mode idle walk) (order mode)]\n>mode, n: int\n# a note\n*, many\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:4") << loaded.error().format();
+}
+
+TEST(Document, AFragmentAppendsRowsInSectionOrder)
+{
+	EXPECT_EQ(CompiledOf("[table t (pick none)]\nk: int, v: int\n1, 10\n"
+		"[fragment t]\nk, v\n2, 20\n"
+		"[table u (pick none)]\nk: int\n"
+		"[fragment t]\nv, k\n30, 3\n"),
+		"k,v\n1,10\n2,20\n3,30\n");
+	EXPECT_EQ(CompiledOf("[table t (pick none)]\nk: int, v: int\n[fragment t]\nk, v\n2, 20\n"), "k,v\n2,20\n")
+		<< "a table with no rows of its own takes a fragment's";
+}
+
+TEST(Document, AFragmentConstantCopiesPerListedValue)
+{
+	EXPECT_EQ(CompiledOf("[table t (pick none) (order k mode)]\n>k: int, >mode, v: int\n"
+		"[fragment t (mode idle walk)]\nk, v\n1, 10\n2, 20\n"),
+		"k,mode,v\n1,idle,10\n1,walk,10\n2,idle,20\n2,walk,20\n");
+	EXPECT_EQ(CompiledOf("[table b (domain mode idle walk) (order mode)]\n>mode, next\n[fragment b (mode *)]\nnext\nrest\n"),
+		"mode,next\nidle,rest\nwalk,rest\n") << "(mode *) copies per value as a * cell does";
+	std::string const both = RefusalOf("[table t (pick none) (order k mode)]\n>k: int, >mode, v: int\n"
+		"[fragment t (mode idle)]\nmode, k, v\nwalk, 1, 10\n");
+	EXPECT_TRUE(Mentions(both, "'mode'")) << both;
+	EXPECT_TRUE(Mentions(both, "t.tabular:3")) << both;
+	std::string const unknown = RefusalOf("[table t (pick none)]\nk: int\n[fragment t (nope 1)]\nk\n1\n");
+	EXPECT_TRUE(Mentions(unknown, "'nope'")) << unknown;
+}
+
+TEST(Document, AFragmentLeavesOutColumnsBlankThenDefaulted)
+{
+	constexpr std::string_view kFile = "[table t (input hp double 0..1) (order mode)]\n>mode, hp: band, next = mode, command\n"
+		"idle, , , (stand)\n"
+		"[fragment t]\nmode\nwalk\n";
+	EXPECT_EQ(CompiledOf(kFile), "mode,hp,next,command\nidle,0..1,idle,(stand)\nwalk,0..1,walk,\n");
+	auto d = ReadDocument(kFile, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(store.RowCount(0), 2u);
+}
+
+TEST(Document, AFragmentHeaderNamesOnlyDeclaredColumns)
+{
+	for (std::string_view header : {"k, nope", "k, v: int", ">k, v", "k, v = 1", "k, k"})
+	{
+		std::string const refused = RefusalOf(cc(std::string("[table t (pick none)]\nk: int, v: int\n[fragment t]\n"),
+			header, "\n1, 2\n"));
+		EXPECT_TRUE(Mentions(refused, "fragment")) << header << ": " << refused;
+		EXPECT_TRUE(Mentions(refused, "t.tabular:4")) << header << ": " << refused;
+	}
+}
+
+TEST(Document, AFragmentBeforeItsTableIsRefused)
+{
+	std::string const before = RefusalOf("[fragment t]\nk\n1\n[table t (pick none)]\nk: int\n");
+	EXPECT_TRUE(Mentions(before, "'t'")) << before;
+	EXPECT_TRUE(Mentions(before, "t.tabular:1")) << before;
+	std::string const unknown = RefusalOf("[table t (pick none)]\nk: int\n[fragment u]\nk\n1\n");
+	EXPECT_TRUE(Mentions(unknown, "'u'")) << unknown;
+	std::string const grid = RefusalOf("[grid g (rows r int) (columns c int) (cells int)]\n,1\n1,2\n[fragment g]\nr\n1\n");
+	EXPECT_TRUE(Mentions(grid, "grid")) << grid;
+	std::string const pivot = RefusalOf("[table p (input req flags) (order label) (pivot req clip: string)]\n>label: int, None\n"
+		"[fragment p]\nlabel\n1\n");
+	EXPECT_TRUE(Mentions(pivot, "pivot")) << pivot;
+}
+
+TEST(Document, AFragmentRowRefusalNamesItsOwnLine)
+{
+	auto d = ReadDocument("[table t (pick none)]\nk: int, v: int\n1, 10\n[fragment t]\nk, v\n# a note\n2, many\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:7") << loaded.error().format();
+}
+
+TEST(Document, TheShorthandGrazerCompilesToTheExplicitRows)
+{
+	constexpr std::string_view kBracket = R"([table grazer_brain
+  (input energy double 0..1)
+  (input threat double 0..1)
+  (domain mode idle walk eat panic)
+  (order mode)]
+)";
+	// next = mode, blank bands, a top * that bolts from any mode, and a
+	// fragment's bottom * that holds a mode its own rows leave unanswered.
+	std::string const shorthand = cc(std::string(kBracket), R"(>mode, threat: band, energy: band, next = mode, command
+*,     0.8..1, ,        panic, (flee)
+idle,  ,       0..0.3,  eat,   (graze)
+walk,  ,       0.3..1,  ,      (amble)
+eat,   ,       ,        ,      (chew)
+panic, ,       ,        idle,  (calm)
+[fragment grazer_brain]
+mode, command
+*,    (hold)
+)");
+	std::string const explicitRows = cc(std::string(kBracket), R"(>mode, threat: band, energy: band, next, command
+idle,0.8..1,0..1,panic,(flee)
+walk,0.8..1,0..1,panic,(flee)
+eat,0.8..1,0..1,panic,(flee)
+panic,0.8..1,0..1,panic,(flee)
+idle,0..1,0..0.3,eat,(graze)
+walk,0..1,0.3..1,walk,(amble)
+eat,0..1,0..1,eat,(chew)
+panic,0..1,0..1,idle,(calm)
+idle,0..1,0..1,idle,(hold)
+walk,0..1,0..1,walk,(hold)
+)");
+	auto a = ReadDocument(shorthand, "shorthand.tabular");
+	auto b = ReadDocument(explicitRows, "explicit.tabular");
+	ASSERT_TRUE(a.has_value()) << a.error().format();
+	ASSERT_TRUE(b.has_value()) << b.error().format();
+	EXPECT_EQ(Describe(a->tables), Describe(b->tables));
+	ASSERT_EQ(a->rows().size(), 1u);
+	EXPECT_EQ(a->rows()[0].text, b->rows()[0].text);
+
+	relation_store sa(std::move(a->tables));
+	relation_store sb(std::move(b->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(sa, *a, 1, condition_reader())), "");
+	ASSERT_EQ(Failure(LoadDocumentRows(sb, *b, 1, condition_reader())), "");
+	size_t swept = 0;
+	for (std::string_view mode : {"idle", "walk", "eat", "panic"})
+	{
+		for (double threat : {0.0, 0.5, 0.79, 0.8, 0.99})
+		{
+			for (double energy : {0.0, 0.29, 0.3, 0.6, 0.99})
+			{
+				cell const keys[]   = {cell::Integer(Hash(mode))};
+				cell const inputs[] = {cell::Real(energy), cell::Real(threat)};
+				auto       pa       = PickBest(sa, 0, pick_query{keys, inputs});
+				auto       pb       = PickBest(sb, 0, pick_query{keys, inputs});
+				ASSERT_TRUE(pa.has_value() && pa->has_value()) << mode << " " << threat << " " << energy;
+				ASSERT_TRUE(pb.has_value() && pb->has_value()) << mode << " " << threat << " " << energy;
+				EXPECT_EQ(sa.Value(0, **pa, 3)->i, sb.Value(0, **pb, 3)->i) << mode << " " << threat << " " << energy;
+				EXPECT_EQ(*sa.CommandAt(0, **pa, 4), *sb.CommandAt(0, **pb, 4)) << mode << " " << threat << " " << energy;
+				++swept;
+			}
+		}
+	}
+	EXPECT_EQ(swept, 100u);
+	cell const walkKey[]   = {cell::Integer(Hash("walk"))};
+	cell const lowEnergy[] = {cell::Real(0.1), cell::Real(0.1)};
+	auto       held        = PickBest(sa, 0, pick_query{walkKey, lowEnergy});
+	ASSERT_TRUE(held.has_value() && held->has_value());
+	EXPECT_EQ(*sa.CommandAt(0, **held, 4), "((hold))") << "the fragment's * answers what walk's own row leaves";
+}
+
+TEST(Document, OnlyABestTableDropsAStarCopy)
+{
+	// Outside a best table no row is dead: a later row of the same keys is
+	// another answer (all), another candidate (weighted) or another value (or).
+	EXPECT_EQ(CompiledOf("[table fx (pick all) (order k)]\n>k, v: int\na, 1\n*, 2\n"), "k,v\na,1\na,2\n");
+	EXPECT_EQ(CompiledOf("[table w (order k)]\n>k, weight\na, 1\n*, 2\n"), "k,weight\na,1\na,2\n");
+	EXPECT_EQ(CompiledOf("[table b (order k)]\n>k, v: int\na, 1\n*, 2\n"), "k,v\na,1\n") << "a best table's copy yields";
 }

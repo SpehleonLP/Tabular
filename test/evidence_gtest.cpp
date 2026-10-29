@@ -310,40 +310,25 @@ std::string CommandOf(TableVersion const& version, size_t row)
 constexpr std::string_view kLife = R"(
 [table brain
   (input energy double 0..1)
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column when condition)
-  (column next hash)
+  (input near flags)
   (order mode message)]
+>mode, >message?, energy: band, near: flags, when, next
 [table leave
   (input energy double 0..1)
-  (key mode hash (domain rows))
-  (column energy band (input energy))
-  (column when condition)
-  (column left int)
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, energy: band, when, left: int, command
 [table arrive
   (input energy double 0..1)
-  (key mode hash)
-  (column energy band (input energy))
-  (column when condition)
-  (column bits flags)
   (pick or bits)
   (order mode)]
+>mode, energy: band, when, bits: flags
 [table settle
-  (key bits flags (domain rows))
-  (column tone int)
   (order bits)]
+>bits: flags, tone: int
 [table mood
-  (key mode hash)
-  (column w double)
-  (column mood int)
   (pick weighted w)
   (order mode)]
+>mode, w: double, mood: int
 [machine life
   (state mode hash (members idle walk eat panic) (initial idle))
   (state left int (initial 0))
@@ -357,7 +342,7 @@ create,mood,mode=state.mode,,mood=mood,,
 entry,arrive,mode=state.mode,energy=input.energy,,,
 entry,settle,bits=clause.0.bits,,tone=tone,,
 entry,mood,mode=state.mode,,mood=mood,,
-step,brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+step,brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,
 exit,leave,mode=state.mode,energy=input.energy,left=left,command,
 )";
 
@@ -966,17 +951,15 @@ namespace
 // An edge (P13) over t: its entry keeps the previous value it crossed from.
 constexpr std::string_view kZone = R"(
 [table zone
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column zone band (input t) edge)
-  (column clip int)
+  (input zone double 0..1)
   (order label)]
+>label: int, ^zone, clip: int
 [machine zoner
   (state label int (initial 1))
   (state clip int (initial 0))
   (input t double 0..1)]
 list,from,where,given,set,emit,overrides
-step,zone,label=state.label,t=input.t,clip=clip,,
+step,zone,label=state.label,zone=input.t,clip=clip,,
 )";
 
 }

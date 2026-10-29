@@ -20,12 +20,10 @@ namespace
 
 constexpr std::string_view kLookup = R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label)
-  (pivot req clip)]
+  (pivot req clip: string)]
+>label: int
 )";
 
 // animation's bit_value lookup fixture with int labels for its cases.
@@ -140,13 +138,11 @@ TEST(PivotCsv, APhaseTableHasNoNoneColumn)
 {
 	relation_store store = StoreFrom(R"(
 [table phase
-  (input t double)
-  (key clip int)
-  (column bits flags)
-  (column window band (input t))
+  (input window double)
   (pick or bits)
   (order clip)
   (pivot bits window)]
+>clip: int
 )");
 	std::vector<std::string> names;
 	csv_rows rows{0, 1, "clip,Footstep,Pivot\n1,0.0..0.4,\n2,0.0..0.3,0.4..0.5\n2,0.6..0.9,\n", "phase.csv"};
@@ -169,32 +165,18 @@ TEST(PivotCsv, APhaseTableHasNoNoneColumn)
 
 TEST(PivotCsv, APivotIsDeclaredOnAShapeThatCanHoldIt)
 {
-	auto withExtra = ReadSchema(R"(
-[table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip string)
-  (column extra int)
-  (order label)
-  (pivot req clip)]
-)", "x.tabular");
-	ASSERT_FALSE(withExtra.has_value());
-	EXPECT_TRUE(Mentions(withExtra.error().format(), "'extra'")) << withExtra.error().format();
-
 	auto unranked = ReadSchema(R"(
 [table lookup
-  (key label int (domain rows))
-  (column req flags)
-  (column clip string)
   (order label)
-  (pivot req clip)]
+  (pivot req clip: string)]
+>label: int
 )", "x.tabular");
 	ASSERT_FALSE(unranked.has_value());
 	EXPECT_TRUE(Mentions(unranked.error().format(), "ranking column")) << unranked.error().format();
 
 	relation_store plain = StoreFrom(R"(
-[table t (column x int) (pick none)]
+[table t (pick none)]
+x: int
 )");
 	csv_rows rows{0, 1, "x\n1\n", "t.csv"};
 	rows.pivoted = true;
@@ -252,12 +234,10 @@ TEST(PivotCsv, KeysThatCollideAreRefused)
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (input mode flags)
-  (key label hash (domain rows))
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label)
-  (pivot req clip)]
+  (pivot req clip: string)]
+>label
 )");
 	std::string error = Error(LoadPivot(store, "label,None,Injured\nn26963,a,b\nn50336,c,d\n"));
 	EXPECT_TRUE(Mentions(error, "'n26963'")) << error;
@@ -268,12 +248,10 @@ TEST(PivotCsv, HashCellsThatCollideAreRefused)
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column clip hash)
+  (input req flags)
   (order label)
   (pivot req clip)]
+>label: int
 )");
 	std::string error = Error(LoadPivot(store, "label,None,Injured\n1,n26963,n50336\n"));
 	EXPECT_TRUE(Mentions(error, "'n50336' has the same hash as 'n26963'")) << error;
@@ -287,13 +265,11 @@ TEST(PivotCsv, RowsAndPivotedCsvGiveOneOutcome)
 {
 	constexpr std::string_view kBands = R"(
 [table lookup
-  (input mode flags)
-  (input t double 0..1)
-  (key label int (domain rows))
-  (column req flags (input mode))
-  (column window band (input t))
+  (input req flags)
+  (input window double 0..1)
   (order label)
   (pivot req window)]
+>label: int
 )";
 	for (bool pivoted : {false, true})
 	{
@@ -318,12 +294,11 @@ TEST(PivotCsv, APivotedLoadFillsTheReportWithItsOrphans)
 {
 	relation_store store = StoreFrom(R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain (members 1)))
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label)
-  (pivot req clip)]
+  (pivot req clip: string)
+  (domain label 1)]
+>label: int
 )");
 	std::vector<run_note> report;
 	csv_rows rows{0, 1, "label,None,A\n1,c1,c1a\n2,c2,\n", "lookup.csv"};
@@ -334,4 +309,19 @@ TEST(PivotCsv, APivotedLoadFillsTheReportWithItsOrphans)
 	EXPECT_EQ(report[0].status, run_status::Orphan);
 	ASSERT_EQ(report[0].key.size(), 1u);
 	EXPECT_EQ(report[0].key[0].i, 2);
+}
+
+TEST(PivotCsv, RecordLinesNameTheSourceLine)
+{
+	relation_store store = StoreFrom(kLookup);
+	uint32_t const lines[] = {10, 40, 41};
+	csv_rows rows{0, 1,
+		"label,None,Injured\n"
+		"1,c1_none,c1_injured\n"
+		"notanumber,c2_none,c2_injured\n", "lookup.csv"};
+	rows.pivoted      = true;
+	rows.record_lines = lines;
+	auto loaded = LoadCsv(store, rows);
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_TRUE(Mentions(loaded.error().format(), "lookup.csv:41")) << loaded.error().format();
 }
