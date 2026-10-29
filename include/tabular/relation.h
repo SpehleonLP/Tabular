@@ -90,7 +90,7 @@ enum class domain_kind : uint8_t
 	Members,   // a literal list
 	Column,    // the distinct values another table's column holds in its current rows
 	Rows,      // the table's own rows: the keys over their rows together take the sub-tuples the rows name
-	// A fall-through key (YAML `fallthrough: true`; a hash key, at most eight
+	// A fall-through key (`fallthrough` in a file; a hash key, at most eight
 	// per table). Open: any value may arrive, and keys no
 	// run has fall through to blanks (key 0, a blank CSV cell, which only such
 	// a key may hold): with several, they give way in key order, tried as bits

@@ -48,8 +48,6 @@ struct DocumentStorage
 	std::deque<detail::csv_text> bodies;
 	// Names that had escapes in the file and so are not a view of it.
 	std::deque<std::string>      owned;
-	// What an older reader keeps its views alive with.
-	std::shared_ptr<void>        keepalive;
 };
 
 namespace detail

@@ -3,7 +3,7 @@
 #
 # Added with add_subdirectory by the host (the engine's CMakeLists.txt), which links the
 # objects into its executable. Tabular is not yet self-contained: it includes
-# Spehleon/lib's Errors, Support and Yaml, ThirdParty's cityhash and
+# Spehleon/lib's Errors and Support, ThirdParty's cityhash and
 # tl::expected, and the tests include gtest and the engine's allocation counter
 # (src/Support/allocationtestingsupport.h). The host supplies those include roots and
 # links their objects; scripts/test-tabular-budgets.sh lists what a standalone link needs.
@@ -37,7 +37,6 @@ set(TABULAR_SOURCES
 	src/machine.cpp
 	src/instance.cpp
 	src/grid.cpp
-	src/schema_yaml.cpp
 	src/document.cpp
 	src/document_tables.cpp
 	src/document_machines.cpp
@@ -61,7 +60,6 @@ set(TABULAR_HEADERS
 	include/tabular/pick.h
 	include/tabular/relation.h
 	include/tabular/rows_csv.h
-	include/tabular/schema_yaml.h
 	src/csv_cells.h
 	src/command_text.h
 	src/document_internal.h
@@ -89,7 +87,6 @@ set(TABULAR_TEST_SOURCES
 	test/relation_load_gtest.cpp
 	test/relation_load_conditions_gtest.cpp
 	test/relation_columns_gtest.cpp
-	test/schema_yaml_gtest.cpp
 	test/sexpr_gtest.cpp
 	test/document_sections_gtest.cpp
 	test/document_gtest.cpp

@@ -128,7 +128,7 @@ the feature is wrong, not the rule.
   function; a blank condition cell in CSV is one. A row with no edge holds `NoEdge()` in the
   edge column; a blank edge cell in CSV is one.
 - **At most one weight** per row, and only in a table with no conditions (see Picking).
-  Built: a `pick: weighted` table names its one `double` weight column (`weight:` in YAML,
+  Built: a `(pick weighted w)` table names its one `double` weight column (in a file;
   `create_table::weight` in the builder).
 - **Values:** several allowed. A value is a **write** to the instance's own state vector.
   Writes always go to the *next* vector, which is swapped in at the end of the step. **What
@@ -145,7 +145,7 @@ the feature is wrong, not the rule.
   s-expression list `(C D E)`, to whoever consumes it, and that consumer interprets it. Tabular
   does not.
   Bridge steps are such a command.
-  Built (2026-10-18): a table declares `suffix: <name>` (YAML) or `create_table::suffix`
+  Built (2026-10-18): a table declares `(suffix name)` (in a file) or `create_table::suffix`
   (builder), which adds one Command column of that name after its declared columns, so the
   store and the picks see an ordinary command column. **Commands as lists** (built
   2026-10-19, commands-and-messages spec Part 2). In CSV the suffix is the row's cells after the
@@ -239,21 +239,21 @@ through an input, and only a best table ranks:
   and a best table's key that declares none is refused (see Key domains).
 
 **Key domains (owner, 2026-10-18).** Every key column of a best table says where its domain
-comes from; nothing is inferred. The builder takes `add_column::domain` (`key_domain`), YAML
-the column's `domain:`:
+comes from; nothing is inferred. The builder takes `add_column::domain` (`key_domain`), a file
+the column's `(domain ..)`:
 
-- `members` (`domain: {members: [idle, walk]}`): a literal list, on a hash key (texts, hashed
+- `members` (`(domain (members idle walk))`): a literal list, on a hash key (texts, hashed
   as a CSV cell is) or an int key (integers). A duplicate, an empty list, or members on any
   other key type are refused.
-- a foreign column (`domain: {table: display, column: display}`): the distinct values that
+- a foreign column (`(domain (from display display))`): the distinct values that
   column holds in the other table's current rows, read-only or mutable. A missing table or
   column, or a column of another type than the key, is refused. Tables whose domains come from
   other tables form a DAG; a cycle, a table naming itself included, is refused naming it. A
   foreign column that is the other table's fall-through key gives its values without its 0:
   the blank is the blank run's, not a value the dependent key could name (and a hash 0 is
   refused in its CSV), so the dependent is total over the real values alone.
-- `rows` (`domain: rows`): the key's own table's rows name its values.
-- fall-through (`fallthrough: true` in place of `domain:`; `key_domain::FallThrough()` in the
+- `rows` (`(domain rows)`): the key's own table's rows name its values.
+- fall-through (`fallthrough` in place of `(domain ..)`; `key_domain::FallThrough()` in the
   builder; commands-and-messages spec Part 3, built 2026-10-19; several, Part 4, built
   2026-10-19): an open key, on a hash key, at most eight per table. Any value may come, and keys
   no run has fall through to blanks. Each contributes the blank, 0, so every tuple of the other
@@ -324,8 +324,8 @@ leaves it empty: the refusal says why. One list of one note type (table, status,
 a caller needs to find what to fix or retract; there is no callback.
 
 **Machines.** A machine is one query, prepared
-once. `create_machine` (`tabular/machine.h`) is a command struct like `create_table`; YAML
-writes it under `machines:` beside `tables:`, read by `DocumentFromYaml` (`SchemaFromYaml`
+once. `create_machine` (`tabular/machine.h`) is a command struct like `create_table`; a file
+writes it as a `[machine]` declaration whose CSV body is its clauses, read by `ReadDocument` (`ReadSchema`
 refuses a document with machines rather than drop them). It holds:
 
 - a **state vector**: named columns, each a `hash` with members and an initial member, or an
@@ -348,7 +348,7 @@ clauses, so a list is a DAG by how it is written and there is no cycle check; a 
 itself or a later one is refused. Two clauses setting one state column are ordered by
 position, and the later write wins (R4); one clause setting a column twice is refused.
 
-The definition build (`CheckMachine`, which `DocumentFromYaml` runs on every machine and
+The definition build (`CheckMachine`, which `ReadDocument` runs on every machine and
 `Prepare` runs first) refuses: an unknown table, column, input or state column; a clause on a
 table with no pick, or on an all table (an all pick answers every row that holds, not one value
 per column); a key or table input left unbound, or
@@ -373,8 +373,8 @@ source (the two give way level by level, Hierarchy); a clause reading an overrid
 coalesced answer), or reading an overridden column whose override's same-named column has
 another type; a hash state with no members, a duplicate member, or an initial value that is not
 a member. Both the
-YAML front end and the definition build name a clause the same way: `machine 'grazer' step
-clause 0 (table 'grazer_brain')`. In YAML, members
+file reader and the definition build name a clause the same way: `machine 'grazer' step
+clause 0 (table 'grazer_brain')`. In a file, members
 and literals are hashed as CSV cells are, so within one machine a name hashing to 0 or two names
 with one hash are refused.
 
@@ -838,7 +838,7 @@ input whose bands read it declares it, and the machine's would be accepted and i
 in every table whatever its input's range, checked where the cell enters a table. The range
 check then only tests containment.
 
-**Edges (P13).** A band column marked `edge` (`edge: true` in YAML,
+**Edges (P13).** A band column marked `edge` (`edge` in a file,
 `add_column::edge` in the builder) holds when its input **crossed into** the band between its
 previous value and this one, not when the input is in it. Both values are clamped as a band
 input is. With the band `[lo, hi)`, previous `p` and current `x`, the edge holds when `p < lo`
@@ -893,7 +893,7 @@ test, and the interpreted picks and a machine's step both call it through one ro
   kept). The buffers are sized at creation or rebind, so a step with edges allocates
   nothing (tested). A rebind crosses no edge and spends none (see Reload).
 
-**Surface.** A builder API is the core, fed command structs. YAML (definitions) and CSV (rows) are
+**Surface.** A builder API is the core, fed command structs. The `.tabular` file (bracket declarations, CSV rows beneath) and CSV (rows) are
 front ends that produce those commands. Public headers live in `include/`; everything else is private.
 
 ## The host interface
@@ -998,7 +998,7 @@ grow 10× into the game (owner, 2026-10-19).
 
 | Cost | Paid | Budget |
 |---|---|---|
-| build a definition from text | per section, on load and reload | 1.8 µs per CSV row loaded (YAML, CSV and `Prepare`); 1200 µs for the spec grazer whole; 260,000 bytes for the 9,000-row brain's prepared machine |
+| build a definition from text | per section, on load and reload | 1.8 µs per CSV row loaded (file, CSV and `Prepare`); 1200 µs for the spec grazer whole; 260,000 bytes for the 9,000-row brain's prepared machine |
 | bind | per definition × object type (shared by every instance) | 150 µs and 47,000 bytes for the 30-clause brain; 1.8 µs and 1,300 bytes for the grazer |
 | create an instance | per object | 0.9 µs; 1,400 bytes (brain), 820 bytes (grazer), release build |
 | step | per instance per tick | 250 ns per row evaluated; 550 ns per grazer step |
@@ -1099,17 +1099,16 @@ changed through the table's generation counter (see Generation).
 1. **Table definitions are command-pattern structs** (built: `tabular/relation.h`). Creating a
    table, declaring its columns, inserting and retracting rows are each a flat command record
    handed to the builder. The core is complete and testable with no parser.
-2. **YAML front end** (built: `tabular/schema_yaml.h`): a table definition written in YAML
-   becomes those commands, through the `Spehleon/lib/Yaml` markup walker. A `tables:` sequence;
-   each table has `name`, `columns` (`{name, type, key, input}`, type one of hash, flags, int,
-   double, condition, command, vec2, string, band), an optional `order_by: {columns: [names],
-   unique}`, an optional `read_only`, and for a picked table `inputs` (`{name, type, range, cyclic}`),
-   `pick` (none, best, all, or, weighted), a key column's `domain` (see Key domains),
-   `output` (an or table's flags column), `weight` (a
-   weighted table's double column), `suffix` (the name of a trailing command column, see Suffix)
-   and `pivot: {headers, cells}`. A grid is `grid: {rows, columns, cells}` instead of columns. A grid and a picked
-   table are read-only when the key is left out (it is read as `true`); `read_only: false` is
-   refused on either, except on a best table, which may be mutable. The builder takes `read_only` explicitly. Any diagnostic fails the definition, an unknown key included, because a
+2. **File front end** (built: `tabular/document.h`): a `.tabular` file of bracket declarations
+   becomes those commands. `[table name ..]` takes `(key|column name type ..)` (a key's `(domain ..)`,
+   `fallthrough`, `(input t)` and `edge`; see Key domains), `(input name type [lo..hi] [cyclic])`,
+   `(pick none|best|all|(or col)|(weighted col))`, `(order cols.. [unique])`, `(suffix name)` (the
+   trailing command column, see Suffix) and `(pivot headers cells)`; types are hash, flags, int,
+   double, condition, command, vec2, string, band. `[grid g (rows r type) (columns c type) (cells type)]`
+   is a grid. `[machine ..]` declares state and inputs, and its CSV body is the clauses. A CSV body
+   under a table or grid is its rows. A table with no `(pick)` is `best`, and every table a file declares is
+   read-only; a table that is written to at run time is built with `create_table`, whose `read_only`
+   is explicit. Any diagnostic fails the definition, an unknown option included, because a
    misspelled `unique` silently ignored is a table that is not unique.
 3. **CSV front end** (built: `tabular/rows_csv.h`): rows loaded from CSV text into a read-only
    table. The header names the columns in any order, every non-condition column exactly once.
@@ -1143,8 +1142,8 @@ changed through the table's generation counter (see Generation).
    hold conditions, each released once when the last version holding its row lets go.
    **Picking and grids** (built: `tabular/pick.h`, `tabular/grid.h`): inputs, bands and a ranking
    column; `PickBest`, `PickAll`, `PickOr`; pivoted CSV; grid tables and grid CSV.
-4. **Machines** built from tables (definition, YAML `machines:`, `Prepare`, `Bind`,
-   instances and `Step` built: `tabular/machine.h`, `tabular/instance.h`, `DocumentFromYaml`;
+4. **Machines** built from tables (definition, `[machine]`, `Prepare`, `Bind`,
+   instances and `Step` built: `tabular/machine.h`, `tabular/instance.h`, `ReadDocument`;
    see Machines).
 
 **Two kinds of table (owner, 2026-10-15).**

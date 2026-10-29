@@ -1,8 +1,8 @@
 # Tabular
 
-Tabular is a small relational store plus a compiler for table-driven state machines. Game data and behaviour live in typed tables, usually authored as YAML schemas and CSV rows. A *machine* is a fixed query over those tables. It is proved total and conflict-free once, when it is prepared. After that, each instance steps it with no allocation, no name lookups and no generator state.
+Tabular is a small relational store plus a compiler for table-driven state machines. Game data and behaviour live in typed tables, usually authored in `.tabular` files: bracket declarations with CSV rows beneath. A *machine* is a fixed query over those tables. It is proved total and conflict-free once, when it is prepared. After that, each instance steps it with no allocation, no name lookups and no generator state.
 
-The core (`relation.cpp`) depends only on the standard library and Spehleon/lib's `Errors` and `Support`. The YAML and CSV front ends add Spehleon/lib's readers. Every fallible call returns `tl::expected<T, ErrorContext>`. Refusals are values, never exceptions or aborts, and they name the table, row, line or clause at fault.
+The core (`relation.cpp`) depends only on the standard library and Spehleon/lib's `Errors` and `Support`. The file reader and the CSV front end add only Tabular's own parsers. Every fallible call returns `tl::expected<T, ErrorContext>`. Refusals are values, never exceptions or aborts, and they name the table, row, line or clause at fault.
 
 The library and test sources are listed in this directory's `CMakeLists.txt`, which the engine adds with `add_subdirectory`. Public headers are in `include/tabular/`. Everything in `src/` is internal.
 
@@ -17,7 +17,7 @@ The library and test sources are listed in this directory's `CMakeLists.txt`, wh
 | `owner_handle.h` | An RAII handle that retracts an owner's rows when it is destroyed |
 | `pick.h` | Interpreted picks over a table version: `PickBest`, `PickAll`, `PickOr`, `PickWeighted` |
 | `draw.h` | `Draw(seed, site)`, stateless randomness |
-| `schema_yaml.h` | YAML front end for tables and machines |
+| `document.h` | `.tabular` file reader: tables, grids, machines and rows |
 | `rows_csv.h` | CSV front end for rows, pivoted rows and grids |
 | `machine.h` | Machine definitions, `CheckMachine`, `Prepare` → `Machine` |
 | `instance.h` | `Bind` → `Binding`, plus `instance`, `CreateInstance`, `Step`, `Rebind` and `Close` |
@@ -25,7 +25,7 @@ The library and test sources are listed in this directory's `CMakeLists.txt`, wh
 The usual pipeline:
 
 ```
-YAML ──DocumentFromYaml──► schema + create_machine[]
+file ──ReadDocument──► schema + create_machine[] (+ rows)
                               │
                      relation_store(schema)
 CSV ──LoadCsv / LoadGridCsv──►│   (owners load and retract rows)
@@ -138,51 +138,35 @@ A grid table (`grid: {rows, columns, cells}`) is a dense 2D array keyed by `Hash
 
 ## Front ends
 
-### YAML (`schema_yaml.h`)
+### The `.tabular` file (`document.h`)
 
-`DocumentFromYaml(text, label)` reads a `tables:` list and an optional `machines:` list. `SchemaFromYaml` is the same, except that it refuses a document that defines machines. Any unknown key fails the load, so a typo such as `uniqe` is never silently ignored.
+`ReadDocument(text, label)` reads a file of bracket declarations; `ReadSchema` is the same, except that it refuses a file that declares machines or carries rows. A declaration is an s-expression in `[...]`, and the CSV lines beneath it are its rows. An unknown option fails the load, so a typo such as `uniqe` is never silently ignored. Every table a file declares is read-only: a reload loads a new version. A table that scripts insert into is built in C++ with `create_table` and `BuildSchema`.
 
-```yaml
-tables:
-  - name: grazer_brain
-    columns:
-      - {name: mode,   type: hash, key: true, domain: {members: [idle, walk]}}
-      - {name: hunger, type: band, input: energy}
-      - {name: next,   type: hash}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-    order_by: {columns: [mode]}
-    pick: best                 # none | best | all | or | weighted
-    # output: <flags col>      # or tables
-    # weight: <double col>     # weighted tables
-    # suffix: command          # trailing Command column; CSV joins every cell from it on into one list
-    # pivot: {headers: <flags col>, cells: <col>}
-    # grid:  {rows: {name, type}, columns: {name, type}, cells: <type>}
-    # read_only: defaults to true for picked tables and grids; stating false is refused
-    #            except on a best table, which is how a mutable best table is declared
+```
+[table grazer_brain
+  (input energy double 0..1)
+  (key mode hash (domain (members idle walk)))
+  (column hunger band (input energy))
+  (column next hash)
+  (order mode)]
+mode,hunger,next
+idle,0..1,walk
+walk,0..1,idle
 
-machines:
-  - name: grazer
-    state:
-      - {name: mode, type: hash, members: [idle, walk], initial: idle}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-    step:                                       # also: create, entry, exit
-      - from:  grazer_brain
-        where: {mode: state.mode}               # one per key column
-        given: {energy: input.energy}           # one per table input
-        set:   {mode: next}                     # state column: value column
-        emit:  command                          # optional Command column
-      # - from: grazer_brain_detail             # an override of the clause above
-      #   overrides: 0                          # its position in the same list
-      #   ...
+[machine grazer
+  (state mode hash (members idle walk) (initial idle))
+  (input energy double 0..1)]
+list,from,where,given,set,emit,overrides
+step,grazer_brain,mode=state.mode,energy=input.energy,mode=next,,
 ```
 
-Column types are `hash`, `flags`, `int`, `double`, `condition`, `command`, `vec2`, `string` and `band`. The type list in `schema_yaml.h`'s comment names only the first six.
+With no `(pick ..)` a table is `best`. A table takes `(key|column name type ..)`, `(input name type [lo..hi] [cyclic])`, `(pick none|best|all|(or col)|(weighted col))`, `(order cols.. [unique])`, `(suffix name)` and `(pivot headers cells)`. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
 
-A domain is written as `domain: rows`, `domain: {members: [...]}` or `domain: {table: t, column: c}`. A fall-through key writes `fallthrough: true` instead; declaring both is refused, and so is a fall-through key on a table that isn't `best`.
+Column types are `hash`, `flags`, `int`, `double`, `condition`, `command`, `vec2`, `string` and `band`.
 
-Machine sources are written as `state.<col>`, `input.<name>`, `clause.<n>.<col>` (an earlier clause in the same list) or `{literal: <text>}`.
+A domain is written `(domain rows)`, `(domain (members ..))` or `(domain (from table column))`. A fall-through key writes `fallthrough` instead; declaring both is refused, and so is a fall-through key on a table that isn't `best`.
+
+Machine sources are written as `state.<col>`, `input.<name>`, `clause.<n>.<col>` (an earlier clause in the same list) or `(literal <text>)`.
 
 ### CSV (`rows_csv.h`)
 

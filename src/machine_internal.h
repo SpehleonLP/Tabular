@@ -87,7 +87,7 @@ struct machine_def
 
 tl::expected<machine_def, ErrorContext> ResolveMachine(create_machine const& definition, schema const& tables);
 
-// Where a refusal is, in the author's terms, for the YAML front end and the
+// Where a refusal is, in the author's terms, for the file reader and the
 // definition build alike: "machine 'grazer' step clause 0 (table 'grazer_brain')".
 std::string ClausePlace(std::string_view machine, size_t list, size_t index, std::string_view table);
 
