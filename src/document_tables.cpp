@@ -573,8 +573,9 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 {
 	table_build&           build = in.build;
 	std::string_view const label = in.label;
-	uint32_t const         line  = body.line_of_row(0);
-	size_t const           width = body.used_width(0);
+	bool const             any   = body.rows() > 0;   // a keyless pivot may have no header row
+	uint32_t const         line  = any ? body.line_of_row(0) : 0;
+	size_t const           width = any ? body.used_width(0) : 0;
 	std::vector<bool>      fallsThrough;
 	for (size_t h = 0; h < width; ++h)
 	{
@@ -639,10 +640,10 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 			return tl::make_unexpected(std::move(cell.error()).with("the pivot of table '", build.name, "'")
 				.with(Place(label, line)));
 		}
-		if (cell->what != header_cell::mark::None || cell->fallback)
+		if (cell->what == header_cell::mark::Key || cell->fallback)
 		{
 			return Refuse(label, line, "the pivot of table '", build.name, "' declares its cells column '", cell->text,
-				"'; it is a name and a type");
+				"'; it is a name, a type and '^' for an edge");
 		}
 		auto type = TypeOfCell(*cell);
 		if (!type)
@@ -664,7 +665,8 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 		build.columns.push_back(add_column{build.pivotNames[0].name, column_type::Flags, false,
 			IndexOfInput(build, build.pivotNames[0].name)});
 		build.columns.push_back(add_column{cell->name, *type, false,
-			*type == column_type::Band || *type == column_type::Flags ? input : UINT32_MAX});
+			*type == column_type::Band || *type == column_type::Flags ? input : UINT32_MAX, {},
+			cell->what == header_cell::mark::Edge});
 		build.columnInputs.resize(build.columns.size());
 		build.pivot = pivot_by{keys, keys + 1};
 	}
@@ -1100,7 +1102,9 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			}
 			else
 			{
-				if (body.rows() == 0)
+				// A pivot's bracket declares its two columns, so one with no keys
+				// needs no header row.
+				if (body.rows() == 0 && !build.pivoted)
 				{
 					return Refuse(label, header.line, "table '", build.name,
 						"' has no columns; the first row of its body declares them, as `>key, name: type`");
