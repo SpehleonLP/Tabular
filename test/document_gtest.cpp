@@ -6,6 +6,7 @@
 #include "cityhash/src/city.h"
 
 #include <functional>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -1049,4 +1050,337 @@ step,grazer_brain,mode=state.mode,,mode=next,command,
 	ASSERT_TRUE(d.has_value()) << d.error().format();
 	EXPECT_EQ(d->machines().size(), 1u);
 	EXPECT_EQ(d->rows().size(), 1u);
+}
+
+namespace
+{
+
+// Every field of a table a declaration sets, as one text, so two tables
+// compare whole and a failure says which field differs.
+std::string Describe(table_def const& def)
+{
+	std::ostringstream out;
+	out << def.name << " pick=" << int(def.pick) << " output=" << def.output << " weight=" << def.weight
+		<< " ranking=" << def.ranking << " keys=" << def.key_count << " suffix=" << def.suffix << " unique=" << def.unique
+		<< " pivot=" << def.pivot_headers << "/" << def.pivot_cells << " edges=" << def.edges << " grid=" << def.is_grid
+		<< "\n";
+	for (column_def const& c : def.columns)
+	{
+		out << "  column " << c.name << " type=" << int(c.type) << " key=" << c.key << " input=" << c.input
+			<< " edge=" << c.edge << "\n";
+	}
+	for (input_def const& i : def.inputs)
+	{
+		out << "  input " << i.name << " type=" << int(i.type) << " ranged=" << i.ranged << " " << i.lo << ".." << i.hi
+			<< " cyclic=" << i.cyclic << "\n";
+	}
+	for (uint32_t o : def.order)
+	{
+		out << "  order " << o << "\n";
+	}
+	for (domain_def const& d : def.domains)
+	{
+		out << "  domain kind=" << int(d.kind) << " table=" << d.table << " column=" << d.column << " members=";
+		for (int64_t m : d.members)
+		{
+			out << m << " ";
+		}
+		out << "\n";
+	}
+	return out.str();
+}
+
+std::string Describe(schema const& s)
+{
+	std::string out;
+	for (table_def const& def : s.tables())
+	{
+		out += Describe(def);
+	}
+	return out;
+}
+
+std::string DescribeFile(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	return d ? Describe(d->tables) : "refused: " + d.error().format();
+}
+
+std::string RefusalOf(std::string_view text)
+{
+	auto d = ReadDocument(text, "t.tabular");
+	return d ? std::string("read") : d.error().format();
+}
+
+}
+
+TEST(Document, AHeaderDeclaresWhatTheOptionsDid)
+{
+	EXPECT_EQ(DescribeFile(R"(
+[table spawn_points
+  (pick none)
+  (order section package unique)]
+>package, section, x: double, y: double
+[table rules
+  (pick none)]
+when, then: command, mask: flags, count: int
+)"), DescribeFile(kSpawnPoints));
+
+	EXPECT_EQ(DescribeFile(R"(
+[table grazer_brain
+  (domain mode idle walk)
+  (order mode)]
+>mode, next, command
+idle,walk,go
+walk,idle,stop
+)"), DescribeFile(R"(
+[table grazer_brain
+  (key mode hash (domain (members idle walk)))
+  (column next hash)
+  (order mode)
+  (suffix command)]
+mode,next,command
+idle,walk,go
+walk,idle,stop
+)"));
+
+	EXPECT_EQ(DescribeFile(R"(
+[table keys
+  (domain a x y)
+  (domain n 1 2)
+  (order a b n unique)]
+>a, >b?, >n: int, v: double, then: command
+[table foreign
+  (domain f keys.a)
+  (order f)]
+>f, v: int
+[table bands
+  (input win double 0..1 cyclic)
+  (input m flags)
+  (pick all)
+  (order clip)]
+>clip: int, ^win
+[table ors
+  (pick or bits)
+  (order clip)]
+>clip: int, bits: flags
+[table weights
+  (pick weighted w)
+  (order clip)]
+>clip: int, w: double
+[table pivoted
+  (input mood flags)
+  (order label)
+  (pivot mood cell: string)]
+>label: int
+[table ranked
+  (input rank flags)
+  (order clip)]
+>clip: int, rank: flags
+)"), DescribeFile(R"(
+[table keys
+  (key a hash (domain (members x y)))
+  (key b hash fallthrough)
+  (key n int (domain (members 1 2)))
+  (column v double)
+  (order a b n unique)
+  (suffix then)]
+[table foreign
+  (key f hash (domain (from keys a)))
+  (column v int)
+  (order f)]
+[table bands
+  (input win double 0..1 cyclic)
+  (input m flags)
+  (key clip int)
+  (column win band (input win) edge)
+  (pick all)
+  (order clip)]
+[table ors
+  (key clip int)
+  (column bits flags)
+  (pick or bits)
+  (order clip)]
+[table weights
+  (key clip int)
+  (column w double)
+  (pick weighted w)
+  (order clip)]
+[table pivoted
+  (input mood flags)
+  (key label int (domain rows))
+  (column mood flags (input mood))
+  (column cell string)
+  (order label)
+  (pivot mood cell)]
+[table ranked
+  (input rank flags)
+  (key clip int (domain rows))
+  (column rank flags (input rank))
+  (order clip)]
+)"));
+}
+
+TEST(Document, ALastCommandCellIsTheSuffix)
+{
+	auto d = ReadDocument("[table t (pick none)]\nk: int, then: command\n1, (a b), (c d)\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	table_def const& def = d->tables.tables()[0];
+	EXPECT_TRUE(def.suffix);
+	ASSERT_EQ(def.columns.size(), 2u);
+	EXPECT_EQ(def.columns[1].name, "then");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(*store.CommandAt(0, 0, 1), "((a b) (c d))") << "the suffix takes the rest of the row";
+}
+
+TEST(Document, AMiddleCommandCellIsOneCell)
+{
+	auto d = ReadDocument("[table t (pick none)]\nthen: command, k: int\n(a b), 1\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	table_def const& def = d->tables.tables()[0];
+	EXPECT_FALSE(def.suffix);
+	EXPECT_EQ(def.columns[0].type, column_type::Command);
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(*store.CommandAt(0, 0, 0), "((a b))");
+	EXPECT_EQ(store.Value(0, 0, 1)->i, 1);
+}
+
+TEST(Document, AWeightColumnMakesTheTableWeighted)
+{
+	auto weighted = ReadDocument("[table t (order clip)]\n>clip: int, weight\n", "t.tabular");
+	ASSERT_TRUE(weighted.has_value()) << weighted.error().format();
+	EXPECT_EQ(weighted->tables.tables()[0].pick, pick_policy::Weighted);
+	EXPECT_EQ(weighted->tables.tables()[0].weight, 1u);
+	EXPECT_EQ(weighted->tables.tables()[0].columns[1].type, column_type::Double);
+
+	auto best = ReadDocument("[table t (pick best) (order clip)]\n>clip: int, weight\n", "t.tabular");
+	ASSERT_TRUE(best.has_value()) << best.error().format();
+	EXPECT_EQ(best->tables.tables()[0].pick, pick_policy::Best) << "a (pick ..) overrides the weight column";
+	EXPECT_EQ(best->tables.tables()[0].weight, UINT32_MAX);
+}
+
+TEST(Document, ABandMustBeNamedForAnInput)
+{
+	EXPECT_EQ(DescribeFile("[table t (input hp double 0..10) (pick all)]\nhp: band, v: int\n"),
+		DescribeFile("[table t (input hp double 0..10) (pick all) (column hp band (input hp)) (column v int)]"));
+	std::string const refused = RefusalOf("[table t (input t double 0..10) (pick all)]\nhp: band, v: int\n");
+	EXPECT_TRUE(Mentions(refused, "'hp'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "input")) << refused;
+	EXPECT_TRUE(Mentions(refused, "t.tabular:2")) << refused;
+	std::string const edge = RefusalOf("[table t (input t double 0..10) (pick all)]\n^x, v: int\n");
+	EXPECT_TRUE(Mentions(edge, "'x'")) << edge;
+}
+
+TEST(Document, AFlagsColumnNamedForAnInputRanks)
+{
+	auto s = ReadSchema("[table t (input mode flags) (order clip)]\n>clip: int, mode: flags, bits: flags\n", "t.tabular");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	table_def const& def = s->tables()[0];
+	EXPECT_EQ(def.columns[1].input, 0u) << "named for an input: ranking";
+	EXPECT_EQ(def.ranking, 1u);
+	EXPECT_EQ(def.columns[2].input, UINT32_MAX) << "no input of its name: a value";
+}
+
+TEST(Document, DomainOptionsDeclareMembersAndOtherTables)
+{
+	auto s = ReadSchema(R"(
+[table kinds (pick none)]
+>kind
+[table t
+  (domain mode idle walk)
+  (domain level 1 3)
+  (domain kind kinds.kind)
+  (order mode level kind)]
+>mode, >level: int, >kind, v: int
+)", "t.tabular");
+	ASSERT_TRUE(s.has_value()) << s.error().format();
+	table_def const& def = s->tables()[1];
+	ASSERT_EQ(def.domains.size(), 3u);
+	EXPECT_EQ(def.domains[0].kind, domain_kind::Members);
+	EXPECT_EQ(def.domains[0].members.size(), 2u);
+	EXPECT_EQ(def.domains[1].kind, domain_kind::Members);
+	EXPECT_EQ(def.domains[1].members[0], 1);
+	EXPECT_EQ(def.domains[2].kind, domain_kind::Column);
+	EXPECT_EQ(def.domains[2].table, 0u);
+
+	std::string const noKey = RefusalOf("[table t (domain nokey a) (order mode)]\n>mode, v: int\n");
+	EXPECT_TRUE(Mentions(noKey, "'nokey'")) << noKey;
+	EXPECT_TRUE(Mentions(noKey, "t.tabular:1")) << noKey;
+	std::string const fall = RefusalOf("[table t (domain sub a) (order mode)]\n>mode, >sub?, v: int\n");
+	EXPECT_TRUE(Mentions(fall, "'sub'")) << fall;
+	EXPECT_TRUE(Mentions(fall, "falls through")) << fall;
+	std::string const twice = RefusalOf("[table t (domain mode a) (domain mode b) (order mode)]\n>mode, v: int\n");
+	EXPECT_TRUE(Mentions(twice, "'mode'")) << twice;
+	EXPECT_FALSE(ReadSchema("[table t (domain mode) (order mode)]\n>mode, v: int\n", "t.tabular").has_value());
+}
+
+TEST(Document, APivotDeclaresItsTwoColumnsInTheBracket)
+{
+	constexpr std::string_view kHeaderForm = R"(
+[table lookup
+  (input req flags)
+  (order label)
+  (pivot req clip: string)]
+>label: int, None, Injured, Crouch, Injured|Crouch
+1,c1_none,c1_injured,c1_crouch,
+2,c2_none,c2_injured,c2_crouch,c2_combo
+)";
+	EXPECT_EQ(DescribeFile(kHeaderForm), DescribeFile(R"(
+[table lookup
+  (input req flags)
+  (key label int (domain rows))
+  (column req flags (input req))
+  (column clip string)
+  (order label)
+  (pivot req clip)]
+label,None,Injured,Crouch,Injured|Crouch
+)"));
+	auto d = ReadDocument(kHeaderForm, "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	cell const keys[]   = {cell::Integer(2)};
+	cell const inputs[] = {cell::Integer(3)};
+	auto picked = PickBest(store, 0, pick_query{keys, inputs});
+	ASSERT_TRUE(picked.has_value() && picked->has_value());
+	EXPECT_EQ(std::string_view(*store.StringAt(0, **picked, 2)), "c2_combo");
+
+	// The cells column untyped is a hash, and a band when named for an input.
+	auto bands = ReadSchema("[table b (input req flags) (input t double 0..1) (order label) (pivot req t)]\n>label: int\n",
+		"t.tabular");
+	ASSERT_TRUE(bands.has_value()) << bands.error().format();
+	EXPECT_EQ(bands->tables()[0].columns[2].type, column_type::Band);
+	EXPECT_EQ(bands->tables()[0].columns[2].input, 1u);
+	auto hashes = ReadSchema("[table h (input req flags) (order label) (pivot req clip)]\n>label: int\n", "t.tabular");
+	ASSERT_TRUE(hashes.has_value()) << hashes.error().format();
+	EXPECT_EQ(hashes->tables()[0].columns[2].type, column_type::Hash);
+}
+
+TEST(Document, MixingHeaderAndColumnOptionsIsRefused)
+{
+	std::string const mixed = RefusalOf("[table t (pick none) (column a int)]\nb: int\n");
+	EXPECT_TRUE(Mentions(mixed, "header")) << mixed;
+	EXPECT_TRUE(Mentions(mixed, "t.tabular:2")) << mixed;
+	std::string const neither = RefusalOf("[table t (pick none)]\n");
+	EXPECT_TRUE(Mentions(neither, "no columns")) << neither;
+}
+
+TEST(Document, ACompiledRowRefusalNamesItsSourceLine)
+{
+	auto d = ReadDocument(
+		"[table t (order k)]\n"
+		"# the header follows a note\n"
+		">k: int, v: int\n"
+		"1, 10\n"
+		"\n"
+		"\"2\", \"20,\"\"x\"\"\"\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	ASSERT_EQ(d->rows().size(), 1u);
+	EXPECT_EQ(d->rows()[0].text, "k,v\n1,10\n2,\"20,\"\"x\"\"\"\n") << "cells are re-quoted only where they must be";
+	relation_store store(std::move(d->tables));
+	auto loaded = LoadDocumentRows(store, *d, 1, condition_reader());
+	ASSERT_FALSE(loaded.has_value());
+	EXPECT_EQ(Where(loaded.error()), "t.tabular:6") << loaded.error().format();
 }

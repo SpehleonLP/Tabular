@@ -12,7 +12,7 @@ namespace
 
 enum class option : uint8_t
 {
-	Key, Column, Input, Pick, Order, Suffix, Pivot, Rows, Columns, Cells, Count
+	Key, Column, Input, Pick, Order, Suffix, Pivot, Domain, Rows, Columns, Cells, Count
 };
 
 struct option_name
@@ -31,6 +31,7 @@ constexpr option_name kOptions[] = {
 	{"order",   option::Order,   false, false},
 	{"suffix",  option::Suffix,  false, false},
 	{"pivot",   option::Pivot,   false, false},
+	{"domain",  option::Domain,  false, true},
 	{"rows",    option::Rows,    true,  false},
 	{"columns", option::Columns, true,  false},
 	{"cells",   option::Cells,   true,  false},
@@ -65,7 +66,14 @@ struct table_build
 	pivot_by                      pivot;
 	bool                          pivoted = false;
 	std::array<reference, 2>      pivotNames;
+	std::string                   pivotCells;    // the cells column as the bracket writes it, `clip: string`
 	grid_shape                    grid;
+	bool                          pickGiven = false;
+	// `(domain key ..)` options, resolved against the header's keys.
+	std::vector<sexpr const*>     domains;
+	// The header row's column names, bare, as the compiled body's header says
+	// them; a pivot's flag headers follow its keys.
+	std::vector<std::string_view> headerNames;
 };
 
 // Whether a body has any row. A table's first record is its header, so it needs
@@ -166,13 +174,20 @@ struct reader
 			return Refuse(label, what.line, "column '", column, "' has the unknown domain form '", what.items[0].text,
 				"'", kShapes);
 		}
+		return ReadMembers(std::span<sexpr const>(what.items).subspan(1), column, type);
+	}
+
+	// A key's literal members, read as cells of its type.
+	tl::expected<key_domain, ErrorContext> ReadMembers(std::span<sexpr const> items, std::string_view column,
+		column_type type)
+	{
 		build.members.emplace_back();
 		std::vector<cell>& members = build.members.back();
 		hash_names         names;
 		column_def const   asColumn{std::string(column), type};
-		for (size_t m = 1; m < what.items.size(); ++m)
+		for (size_t m = 0; m < items.size(); ++m)
 		{
-			auto text = NameOf(what.items[m], storage, label, "a domain member");
+			auto text = NameOf(items[m], storage, label, "a domain member");
 			if (!text)
 			{
 				return tl::make_unexpected(std::move(text.error()));
@@ -184,15 +199,36 @@ struct reader
 				members.push_back(cell::Integer(0));
 				continue;
 			}
-			auto value = ReadCell(asColumn, *text, names, what.items[m].line);
+			auto value = ReadCell(asColumn, *text, names, items[m].line);
 			if (!value)
 			{
-				return tl::make_unexpected(std::move(value.error()).with("member ", m - 1, " of the domain of column '",
-					column, "'").with(Place(label, what.items[m].line)));
+				return tl::make_unexpected(std::move(value.error()).with("member ", m, " of the domain of column '",
+					column, "'").with(Place(label, items[m].line)));
 			}
 			members.push_back(*value);
 		}
 		return key_domain{domain_kind::Members, members, {}, {}};
+	}
+
+	// `(domain key a b ..)` for members, `(domain key table.column)` for
+	// another table's column.
+	tl::expected<key_domain, ErrorContext> ReadDomainOption(sexpr const& option, std::string_view column,
+		column_type type)
+	{
+		sexpr const& first = option.items[2];
+		size_t const dot   = first.what == sexpr::kind::Atom ? first.text.find('.') : std::string_view::npos;
+		if (option.items.size() == 3 && dot != std::string_view::npos)
+		{
+			std::string_view const table = first.text.substr(0, dot);
+			std::string_view const other = first.text.substr(dot + 1);
+			if (table.empty() || other.empty() || other.find('.') != std::string_view::npos)
+			{
+				return Refuse(label, first.line, "the domain of column '", column, "' names '", first.text,
+					"'; another table's column is written table.column");
+			}
+			return key_domain{domain_kind::Column, {}, table, other};
+		}
+		return ReadMembers(std::span<sexpr const>(option.items).subspan(2), column, type);
 	}
 
 	// `(key|column name type [(domain ..)] [fallthrough] [(input t)] [edge])`
@@ -291,6 +327,7 @@ struct reader
 		{
 			return Refuse(label, option.line, "(pick ..) names a policy", kShapes);
 		}
+		build.pickGiven = true;
 		std::string_view const policy = option.items[1].text;
 		size_t                 arity  = 2;
 		if (policy == "best")
@@ -421,7 +458,7 @@ struct reader
 		}
 		case option::Pivot:
 		{
-			if (option.items.size() != 3)
+			if (option.items.size() < 3)
 			{
 				return Refuse(label, option.line, "(pivot headers cells) names the flags column of the headers and the column of the cells");
 			}
@@ -434,9 +471,27 @@ struct reader
 				}
 				build.pivotNames[i] = reference{*name, option.line, true};
 			}
+			// The cells column is declared here, as a header cell is: `clip: string`
+			// may be read as one atom or as several.
+			for (size_t i = 2; i < option.items.size(); ++i)
+			{
+				if (option.items[i].what == sexpr::kind::List)
+				{
+					return Refuse(label, option.items[i].line, "(pivot headers cells) has a list where the cells column belongs");
+				}
+				build.pivotCells += (i > 2 ? " " : "");
+				build.pivotCells += option.items[i].text;
+			}
 			build.pivoted = true;
 			return {};
 		}
+		case option::Domain:
+			if (option.items.size() < 3)
+			{
+				return Refuse(label, option.line, "(domain key ..) names a key and its members, or a key and table.column");
+			}
+			build.domains.push_back(&option);
+			return {};
 		case option::Rows:
 		{
 			auto axis = ReadAxis(option);
@@ -502,8 +557,229 @@ uint32_t IndexOfInput(table_build const& build, std::string_view name)
 	return UINT32_MAX;
 }
 
+// Whether a header cell says more than a name. A table declared by options has
+// a header row of bare names; a typed one means the header declares the columns.
+bool IsTyped(std::string_view cell)
+{
+	return cell.starts_with('>') || cell.starts_with('^') || cell.find_first_of(":=?") != std::string_view::npos;
+}
+
+// The columns a header row declares, in its order, as the Spellings in the
+// shorthand plan have them: `>key`, `>key?`, `^edge`, `name: type`, a band or a
+// ranking flags column named for its input, and a last command cell that is the
+// suffix. A pivot's row is its keys, then flag headers; its other two columns
+// are the bracket's.
+tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
+{
+	table_build&           build = in.build;
+	std::string_view const label = in.label;
+	uint32_t const         line  = body.line_of_row(0);
+	size_t const           width = body.used_width(0);
+	std::vector<bool>      fallsThrough;
+	for (size_t h = 0; h < width; ++h)
+	{
+		std::string_view const text = body.cell(h, 0);
+		if (build.pivoted && !text.starts_with('>'))
+		{
+			for (size_t f = h; f < width; ++f)
+			{
+				build.headerNames.push_back(body.cell(f, 0));
+			}
+			break;
+		}
+		auto cell = ParseHeaderCell(text);
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("table '", build.name, "'").with(Place(label, line)));
+		}
+		auto type = TypeOfCell(*cell);
+		if (!type)
+		{
+			return tl::make_unexpected(std::move(type.error()).with("table '", build.name, "'").with(Place(label, line)));
+		}
+		if (build.pivoted && cell->what != header_cell::mark::Key)
+		{
+			return Refuse(label, line, "pivoted table '", build.name, "' has '", cell->text,
+				"' among its keys; a pivot's header row is its keys, then its flag headers");
+		}
+		build.headerNames.push_back(cell->name);
+		bool const key = cell->what == header_cell::mark::Key;
+		if (!key && *type == column_type::Command && h + 1 == width)
+		{
+			build.suffix = cell->name;
+			continue;
+		}
+		add_column column{cell->name, *type, key};
+		column.edge          = cell->what == header_cell::mark::Edge;
+		uint32_t const input = IndexOfInput(build, cell->name);
+		if (*type == column_type::Band)
+		{
+			if (input == UINT32_MAX)
+			{
+				return Refuse(label, line, "column '", cell->name, "' of table '", build.name,
+					"' is a band, and the table has no input '", cell->name, "'; a band is named for the input it bands");
+			}
+			column.input = input;
+		}
+		else if (*type == column_type::Flags)
+		{
+			column.input = input;   // named for an input, it ranks; otherwise it is a value
+		}
+		build.columns.push_back(column);
+		build.columnInputs.push_back(reference{});
+		fallsThrough.push_back(cell->fallthrough);
+	}
+
+	if (build.pivoted)
+	{
+		uint32_t const line = build.pivotNames[0].line;
+		auto           cell = ParseHeaderCell(build.pivotCells);
+		if (!cell)
+		{
+			return tl::make_unexpected(std::move(cell.error()).with("the pivot of table '", build.name, "'")
+				.with(Place(label, line)));
+		}
+		if (cell->what != header_cell::mark::None || cell->fallback)
+		{
+			return Refuse(label, line, "the pivot of table '", build.name, "' declares its cells column '", cell->text,
+				"'; it is a name and a type");
+		}
+		auto type = TypeOfCell(*cell);
+		if (!type)
+		{
+			return tl::make_unexpected(std::move(type.error()).with("the pivot of table '", build.name, "'")
+				.with(Place(label, line)));
+		}
+		uint32_t const input = IndexOfInput(build, cell->name);
+		if (!cell->type && *type == column_type::Hash && input != UINT32_MAX)
+		{
+			*type = column_type::Band;   // named for an input, the cells band it
+		}
+		if (*type == column_type::Band && input == UINT32_MAX)
+		{
+			return Refuse(label, line, "the pivot of table '", build.name, "' has the band '", cell->name,
+				"', and the table has no input '", cell->name, "'; a band is named for the input it bands");
+		}
+		uint32_t const keys = static_cast<uint32_t>(build.columns.size());
+		build.columns.push_back(add_column{build.pivotNames[0].name, column_type::Flags, false,
+			IndexOfInput(build, build.pivotNames[0].name)});
+		build.columns.push_back(add_column{cell->name, *type, false,
+			*type == column_type::Band || *type == column_type::Flags ? input : UINT32_MAX});
+		build.columnInputs.resize(build.columns.size());
+		build.pivot = pivot_by{keys, keys + 1};
+	}
+
+	// A column named weight weighs the rows unless a (pick ..) says otherwise.
+	if (!build.pickGiven && IndexOfColumn(build, "weight") != UINT32_MAX)
+	{
+		build.pick   = pick_policy::Weighted;
+		build.weight = reference{"weight", line, true};
+	}
+	// Only a best table's keys have domains: its rows unless a (domain ..)
+	// lists them.
+	bool const best = build.pick == pick_policy::Best;
+	for (size_t c = 0; c < fallsThrough.size(); ++c)
+	{
+		if (build.columns[c].key)
+		{
+			build.columns[c].domain = fallsThrough[c] ? key_domain::FallThrough() : best ? key_domain::Rows() : key_domain{};
+		}
+	}
+	std::vector<bool> given(build.columns.size(), false);
+	for (sexpr const* option : build.domains)
+	{
+		auto name = NameOf(option->items[1], in.storage, label, "a domain's key");
+		if (!name)
+		{
+			return tl::make_unexpected(std::move(name.error()));
+		}
+		uint32_t const c = IndexOfColumn(build, *name);
+		if (c == UINT32_MAX || !build.columns[c].key)
+		{
+			return Refuse(label, option->line, "(domain ", *name, " ..) on table '", build.name, "' names '", *name,
+				"', which is not one of its keys");
+		}
+		if (fallsThrough[c])
+		{
+			return Refuse(label, option->line, "key '", *name, "' of table '", build.name,
+				"' falls through, so its domain is open; it takes no (domain ..)");
+		}
+		if (given[c])
+		{
+			return Refuse(label, option->line, "table '", build.name, "' gives key '", *name, "' a second (domain ..)");
+		}
+		given[c]    = true;
+		auto domain = in.ReadDomainOption(*option, *name, build.columns[c].type);
+		if (!domain)
+		{
+			return tl::make_unexpected(std::move(domain.error()));
+		}
+		build.columns[c].domain = *domain;
+	}
+	return {};
+}
+
+bool IsBlank(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r';
+}
+
+// A cell as plain CSV: quoted only where csv_text would otherwise read other
+// text, so the cell comes back exactly.
+void AppendCell(std::string& out, std::string_view text, bool first)
+{
+	bool const quote = text.find_first_of(",\"\n") != std::string_view::npos
+		|| (!text.empty() && (IsBlank(text.front()) || IsBlank(text.back())))
+		|| (first && text.starts_with('#'));
+	if (!quote)
+	{
+		out += text;
+		return;
+	}
+	out += '"';
+	for (char c : text)
+	{
+		if (c == '"')
+		{
+			out += '"';
+		}
+		out += c;
+	}
+	out += '"';
+}
+
+// The one place a table's rows are rewritten into the plain CSV the loaders
+// read: a header-form header becomes bare names, and every record keeps the
+// file line it came from.
+void CompileBody(table_build const& build, csv_text const& body, bool headerForm, std::string& text,
+	shared_array<uint32_t>& lines)
+{
+	lines = shared_array<uint32_t>(body.rows());
+	for (size_t r = 0; r < body.rows(); ++r)
+	{
+		if (r == 0 && headerForm)
+		{
+			for (size_t h = 0; h < build.headerNames.size(); ++h)
+			{
+				text += h == 0 ? "" : ",";
+				AppendCell(text, build.headerNames[h], h == 0);
+			}
+		}
+		else
+		{
+			for (size_t c = 0; c < body.width(r); ++c)
+			{
+				text += c == 0 ? "" : ",";
+				AppendCell(text, body.cell(c, r), c == 0);
+			}
+		}
+		text += '\n';
+		lines[r] = body.line_of_row(r);
+	}
+}
+
 // Options come in any order, so the names they refer to resolve after the last.
-tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view label)
+tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view label, bool headerForm)
 {
 	for (size_t c = 0; c < build.columns.size(); ++c)
 	{
@@ -556,7 +832,7 @@ tl::expected<void, ErrorContext> Resolve(table_build& build, std::string_view la
 	{
 		return weight;
 	}
-	if (build.pivoted)
+	if (build.pivoted && !headerForm)
 	{
 		for (reference const& ref : build.pivotNames)
 		{
@@ -679,6 +955,9 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 	DocumentStorage& storage)
 {
 	std::deque<table_build>  builds;
+	// Each table's body as records. Header-form names view into them, so they
+	// live until the schema is built.
+	std::deque<csv_text>      bodies;
 	std::vector<create_table> commands;
 	std::vector<uint32_t>     headerLines;   // per table, the line its bracket opens on
 
@@ -694,7 +973,9 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		}
 	}
 	storage.table_names = shared_array<std::string>(tableCount);
-	storage.rows        = shared_array<section_rows>(rowsCount);
+	storage.rows           = shared_array<section_rows>(rowsCount);
+	storage.compiled       = shared_array<std::string>(rowsCount);
+	storage.compiled_lines = shared_array<shared_array<uint32_t>>(rowsCount);
 	size_t rowsAt       = 0;
 
 	for (size_t s = 0; s < sections.size(); ++s)
@@ -783,7 +1064,55 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 				}
 			}
 		}
-		auto resolved = Resolve(build, label);
+		// A table declares its columns by options or by its header row, never
+		// both: the header replaces the options.
+		bool const options = seen[static_cast<size_t>(option::Key)] || seen[static_cast<size_t>(option::Column)]
+			|| seen[static_cast<size_t>(option::Suffix)];
+		if (!isGrid)
+		{
+			auto read = csv_text::Read(section.body, label, section.body_line);
+			if (!read)
+			{
+				return tl::make_unexpected(std::move(read.error()));
+			}
+			bodies.push_back(std::move(*read));
+			csv_text const& body = bodies.back();
+			if (options)
+			{
+				if (!build.domains.empty())
+				{
+					return Refuse(label, build.domains.front()->line, "table '", build.name,
+						"' declares its columns with (key ..) and (column ..); (domain ..) goes with a header row that declares them");
+				}
+				if (build.pivoted && build.pivotCells != build.pivotNames[1].name)
+				{
+					return Refuse(label, build.pivotNames[1].line, "table '", build.name,
+						"' declares its columns with (key ..) and (column ..); a pivot's cells column is typed with a header row");
+				}
+				for (size_t h = 0; body.rows() > 0 && h < body.used_width(0); ++h)
+				{
+					if (IsTyped(body.cell(h, 0)))
+					{
+						return Refuse(label, body.line_of_row(0), "table '", build.name, "' declares its columns with options and its header cell '",
+							body.cell(h, 0), "' declares one too; the header row declares the columns and replaces (key ..), (column ..) and (suffix ..)");
+					}
+				}
+			}
+			else
+			{
+				if (body.rows() == 0)
+				{
+					return Refuse(label, header.line, "table '", build.name,
+						"' has no columns; the first row of its body declares them, as `>key, name: type`");
+				}
+				auto declared = ReadHeader(in, body);
+				if (!declared)
+				{
+					return tl::make_unexpected(std::move(declared.error()));
+				}
+			}
+		}
+		auto resolved = Resolve(build, label, !options);
 		if (!resolved)
 		{
 			return tl::make_unexpected(std::move(resolved.error()));
@@ -795,7 +1124,20 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			isGrid ? &build.grid : nullptr, build.suffix, build.weightColumn});
 		if (HasRows(section.body, isGrid))
 		{
-			storage.rows[rowsAt++] = section_rows{static_cast<uint32_t>(commands.size() - 1), section.body, section.body_line};
+			uint32_t const table = static_cast<uint32_t>(commands.size() - 1);
+			if (isGrid)
+			{
+				storage.rows[rowsAt] = section_rows{table, section.body, section.body_line};
+			}
+			else
+			{
+				std::string&            text  = storage.compiled[rowsAt];
+				shared_array<uint32_t>& lines = storage.compiled_lines[rowsAt];
+				CompileBody(build, bodies.back(), !options, text, lines);
+				storage.rows[rowsAt] = section_rows{table, text, section.body_line,
+					std::span<uint32_t const>(lines.begin(), lines.size())};
+			}
+			++rowsAt;
 		}
 	}
 

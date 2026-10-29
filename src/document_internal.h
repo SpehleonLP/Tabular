@@ -38,6 +38,10 @@ struct DocumentStorage
 	std::string                    text;    // the file, which every view below points into
 	std::string                    label;
 	shared_array<section_rows>     rows;
+	// Per entry of rows: a table's body compiled to plain CSV, and the file
+	// line of each of its records. A grid's entry is unused; its rows view text.
+	shared_array<std::string>              compiled;
+	shared_array<shared_array<uint32_t>>   compiled_lines;
 	// Every table's name, by table number, so rows can be refused a store built
 	// from another schema.
 	shared_array<std::string>      table_names;
