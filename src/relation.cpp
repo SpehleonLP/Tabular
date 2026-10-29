@@ -663,7 +663,8 @@ tl::expected<immutable_array<domain_def>, ErrorContext> BuildDomains(create_tabl
 // domain is decided by tables whose own domains never wait on it: a change
 // re-checks its dependents one step deep, and a machine's proof has an order
 // to read domains in.
-tl::expected<void, ErrorContext> CheckDomainCycles(std::span<table_def const> tables)
+// cycle_start, if given, is set to the first table of a loop it refuses.
+tl::expected<void, ErrorContext> CheckDomainCycles(std::span<table_def const> tables, uint32_t* cycle_start)
 {
 	enum : uint8_t { Unseen, Open, Done };
 	std::vector<uint8_t>  state(tables.size(), Unseen);
@@ -688,6 +689,10 @@ tl::expected<void, ErrorContext> CheckDomainCycles(std::span<table_def const> ta
 					cycle = cc(cycle, "'", tables[*it].name, "' -> ");
 				}
 				cycle = cc(cycle, "'", tables[d.table].name, "'");
+				if (cycle_start != nullptr)
+				{
+					*cycle_start = d.table;
+				}
 				return tl::make_unexpected(ErrorContext("key domains form a cycle: ", cycle,
 					"; a key over its own table's rows says rows"));
 			}
@@ -720,7 +725,7 @@ tl::expected<void, ErrorContext> CheckDomainCycles(std::span<table_def const> ta
 
 }
 
-tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables)
+tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables, uint32_t* refused_table)
 {
 	shared_array<table_def> out(tables.size());
 	for (uint32_t t = 0; t < tables.size(); ++t)
@@ -728,6 +733,10 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tab
 		auto built = BuildTable(tables[t], std::span<table_def const>(out.begin(), t));
 		if (!built)
 		{
+			if (refused_table != nullptr)
+			{
+				*refused_table = t;
+			}
 			return tl::make_unexpected(ErrorContext("table ", t, ": ", built.error().message));
 		}
 		out[t] = std::move(*built);
@@ -738,11 +747,15 @@ tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tab
 		auto domains = BuildDomains(tables[t], out[t], std::span<table_def const>(out.begin(), out.size()));
 		if (!domains)
 		{
+			if (refused_table != nullptr)
+			{
+				*refused_table = t;
+			}
 			return tl::make_unexpected(ErrorContext("table ", t, ": ", domains.error().message));
 		}
 		out[t].domains = std::move(*domains);
 	}
-	auto acyclic = CheckDomainCycles(std::span<table_def const>(out.begin(), out.size()));
+	auto acyclic = CheckDomainCycles(std::span<table_def const>(out.begin(), out.size()), refused_table);
 	if (!acyclic)
 	{
 		return tl::make_unexpected(std::move(acyclic.error()));

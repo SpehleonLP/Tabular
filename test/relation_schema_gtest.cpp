@@ -210,3 +210,39 @@ TEST(RelationSchema, BadOrdersAreRefused)
 	ASSERT_FALSE(onCondition.has_value());
 	EXPECT_TRUE(Mentions(onCondition.error().message, "'when'")) << onCondition.error().message;
 }
+
+TEST(RelationSchema, ARefusalReportsTheTableItRefused)
+{
+	uint32_t const   byKey[] = {0};
+	order_by const   order{byKey, false};
+	add_column const fine[]   = {{"v", column_type::Int}};
+	add_column const noDomain[] = {{"k", column_type::Int, true}, {"v", column_type::Int}};
+	create_table const tables[] = {
+		{"fine", fine},
+		{"keyed", noDomain, &order, true, {}, pick_policy::Best},
+	};
+	uint32_t refused = UINT32_MAX;
+	auto s = BuildSchema(tables, &refused);
+	ASSERT_FALSE(s.has_value());
+	EXPECT_EQ(refused, 1u);
+
+	refused = UINT32_MAX;
+	auto good = BuildSchema(std::span<create_table const>(tables, 1), &refused);
+	ASSERT_TRUE(good.has_value());
+	EXPECT_EQ(refused, UINT32_MAX) << "left alone when nothing is refused";
+
+	// A cycle is reported at the first table of the loop.
+	add_column const aColumns[] = {{"k", column_type::Int, true, UINT32_MAX, {domain_kind::Column, {}, "b", "k"}},
+	                               {"v", column_type::Int}};
+	add_column const bColumns[] = {{"k", column_type::Int, true, UINT32_MAX, {domain_kind::Column, {}, "a", "k"}},
+	                               {"v", column_type::Int}};
+	create_table const looped[] = {
+		{"fine", fine},
+		{"a", aColumns, &order, true, {}, pick_policy::Best},
+		{"b", bColumns, &order, true, {}, pick_policy::Best},
+	};
+	refused = UINT32_MAX;
+	auto cycle = BuildSchema(looped, &refused);
+	ASSERT_FALSE(cycle.has_value());
+	EXPECT_EQ(refused, 1u);
+}

@@ -969,3 +969,30 @@ TEST(Document, AMalformedLiteralNamesItsClauseOnce)
 		EXPECT_EQ(Count(all, "t.tabular:4"), 1u) << bad << "\n" << all;
 	}
 }
+
+TEST(Document, SchemaRefusalNamesTheTableLine)
+{
+	auto s = ReadSchema(
+		"# two tables\n"
+		"[table fine (pick none) (column v int)]\n"
+		"\n"
+		"[table keyed\n"
+		"  # no domain on the key\n"
+		"  (key k int)\n"
+		"  (column v int)\n"
+		"  (order k)]\n", "t.tabular");
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular:4")) << s.error().format();
+	EXPECT_TRUE(Mentions(s.error().format(), "keyed")) << s.error().format();
+}
+
+TEST(Document, ADomainCycleNamesALine)
+{
+	auto s = ReadSchema(
+		"[table fine (pick none) (column v int)]\n"
+		"[table a (key k int (domain (from b k))) (column v int) (order k)]\n"
+		"[table b (key k int (domain (from a k))) (column v int) (order k)]\n", "t.tabular");
+	ASSERT_FALSE(s.has_value());
+	EXPECT_TRUE(Mentions(s.error().format(), "cycle")) << s.error().format();
+	EXPECT_TRUE(Mentions(s.error().format(), "t.tabular:2")) << s.error().format();
+}

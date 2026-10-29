@@ -665,7 +665,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 {
 	std::deque<table_build>  builds;
 	std::vector<create_table> commands;
-	std::vector<uint32_t>     bodies;   // the section of each table that has rows
+	std::vector<uint32_t>     headerLines;   // per table, the line its bracket opens on
 
 	for (size_t s = 0; s < sections.size(); ++s)
 	{
@@ -698,6 +698,7 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		}
 		build.name = *name;
 		storage.tableNames.push_back(std::string(*name));
+		headerLines.push_back(header.line);
 		if (isGrid)
 		{
 			build.pick = pick_policy::None;
@@ -768,9 +769,16 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 		}
 	}
 
-	auto built = BuildSchema(commands);
+	uint32_t refused = UINT32_MAX;
+	auto     built   = BuildSchema(commands, &refused);
 	if (!built)
 	{
+		// The builder numbers the table it refused; the header's line is where
+		// the author finds it.
+		if (refused < headerLines.size())
+		{
+			return tl::make_unexpected(std::move(built.error()).with(Place(label, headerLines[refused])));
+		}
 		return tl::make_unexpected(std::move(built.error()).with(std::string(label)));
 	}
 	return std::move(*built);

@@ -282,12 +282,15 @@ public:
 
 private:
 	explicit schema(immutable_array<table_def>&& tables) : _tables(std::move(tables)) {}
-	friend tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables);
+	friend tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables, uint32_t* refused_table);
 
 	immutable_array<table_def> _tables;
 };
 
-tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables);
+// refused_table, if given, is set to the number of the table whose definition
+// was refused (for a domain cycle, the first table of the loop), and otherwise
+// left alone, so a front end can name the table's place in its source.
+tl::expected<schema, ErrorContext> BuildSchema(std::span<create_table const> tables, uint32_t* refused_table = nullptr);
 
 // ---- Row commands -----------------------------------------------------------
 // Every row records the owner that contributed it. Reloading a contributor is
