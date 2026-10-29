@@ -40,6 +40,8 @@ set(TABULAR_SOURCES
 	src/schema_yaml.cpp
 	src/command_text.cpp
 	src/csv_text.cpp
+	src/sexpr.cpp
+	src/document_sections.cpp
 	src/rows_csv.cpp
 	src/pivot_csv.cpp
 	src/grid_csv.cpp
@@ -58,6 +60,8 @@ set(TABULAR_HEADERS
 	include/tabular/schema_yaml.h
 	src/csv_cells.h
 	src/command_text.h
+	src/document_sections.h
+	src/sexpr.h
 	src/csv_text.h
 	src/float_text.h
 	src/layout.h
@@ -81,6 +85,8 @@ set(TABULAR_TEST_SOURCES
 	test/relation_load_conditions_gtest.cpp
 	test/relation_columns_gtest.cpp
 	test/schema_yaml_gtest.cpp
+	test/sexpr_gtest.cpp
+	test/document_sections_gtest.cpp
 	test/rows_csv_gtest.cpp
 	test/csv_hash_gtest.cpp
 	test/csv_quoting_gtest.cpp
