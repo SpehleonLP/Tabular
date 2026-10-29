@@ -268,7 +268,8 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 			continue;
 		}
 		hasMembers = true;
-		store.members[index] = shared_array<cell>(part.items.size() - 1);
+		store.members[index]      = shared_array<cell>(part.items.size() - 1);
+		store.member_names[index] = shared_array<std::string_view>(part.items.size() - 1);
 		for (size_t m = 1; m < part.items.size(); ++m)
 		{
 			auto text = NameOf(part.items[m], storage, label, "a member");
@@ -282,7 +283,8 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 				return tl::make_unexpected(std::move(value.error()).with("member ", m - 1, " of state column '", *name, "'")
 					.with(Place(label, part.items[m].line)));
 			}
-			store.members[index][m - 1] = *value;
+			store.members[index][m - 1]      = *value;
+			store.member_names[index][m - 1] = *text;
 		}
 	}
 	if (initial == nullptr || initial->items.size() != 2)
@@ -300,7 +302,7 @@ tl::expected<void, ErrorContext> ReadState(sexpr const& option, size_t index, ha
 		return tl::make_unexpected(std::move(value.error()).with("the initial value of state column '", *name, "'")
 			.with(Place(label, initial->line)));
 	}
-	store.state[index] = add_state{*name, *type, store.members[index], *value};
+	store.state[index] = add_state{*name, *type, store.members[index], *value, store.member_names[index]};
 	return {};
 }
 
@@ -359,7 +361,8 @@ tl::expected<void, ErrorContext> ReadMachines(std::span<section const> sections,
 				++inputCount;
 			}
 		}
-		store.members = shared_array<shared_array<cell>>(stateCount);
+		store.members      = shared_array<shared_array<cell>>(stateCount);
+		store.member_names = shared_array<shared_array<std::string_view>>(stateCount);
 		store.state   = shared_array<add_state>(stateCount);
 		store.inputs  = shared_array<add_input>(inputCount);
 

@@ -92,6 +92,10 @@ struct add_state
 	column_type           type    = column_type::Hash;   // Hash, Int or Double
 	std::span<cell const> members;                       // Hash only: each as its CityHash32
 	cell                  initial = cell::Integer(0);    // a Hash's must be a member
+	// As written, one per member when read from a document: a host naming a
+	// state's value (a debug line) has only the hash otherwise. Empty when built
+	// by hand.
+	std::span<std::string_view const> member_names;
 };
 
 // When a clause list runs: on creating an instance, on entering a state, every

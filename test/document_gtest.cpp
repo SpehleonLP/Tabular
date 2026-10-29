@@ -1053,6 +1053,23 @@ step,grazer_brain,mode=state.mode,,mode=next,command,
 	EXPECT_EQ(d->rows().size(), 1u);
 }
 
+// A host naming a state's value has only its hash in the cell.
+TEST(Document, StateMembersKeepTheirNames)
+{
+	constexpr std::string_view text = "[machine m (state mode hash (members idle \"far walk\") (initial idle))\n"
+		"  (state count int (initial 0))]\n";
+	auto d = ReadDocument(text, "names.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	ASSERT_EQ(d->machines().size(), 1u);
+	std::span<add_state const> const state = d->machines()[0].state;
+	ASSERT_EQ(state.size(), 2u);
+	ASSERT_EQ(state[0].member_names.size(), state[0].members.size());
+	EXPECT_EQ(state[0].member_names[0], "idle");
+	EXPECT_EQ(state[0].member_names[1], "far walk");
+	EXPECT_EQ(state[0].members[1].i, int64_t(CityHash32("far walk", 8)));
+	EXPECT_TRUE(state[1].member_names.empty()) << "an int state has no members";
+}
+
 // ---- Host sections --------------------------------------------------------------
 
 namespace

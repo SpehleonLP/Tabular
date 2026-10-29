@@ -25,6 +25,7 @@ namespace tabular
 struct machine_storage
 {
 	shared_array<shared_array<cell>>                                     members;   // per state column
+	shared_array<shared_array<std::string_view>>                         member_names;
 	shared_array<add_state>                                              state;
 	shared_array<add_input>                                              inputs;
 	std::array<shared_array<shared_array<clause_bind>>, kTriggerCount> where;     // per clause
