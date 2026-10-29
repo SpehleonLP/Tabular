@@ -345,25 +345,28 @@ private:
 
 	counted_ptr<Binding const> _binding;
 	uint64_t                   _id = 0;
-	std::vector<cell>          _current;
-	std::vector<cell>          _next;
-	std::vector<cell>          _inputs;      // this step's input values, read once per step
-	std::vector<uint8_t>       _inputRead;   // per input: its getter answered
+	// Each buffer is sized once per binding (creation, a rebind) and written in
+	// place by steps. A shared_array copy would alias, which is why the instance
+	// is move-only. current and next trade places by swapping handles.
+	shared_array<cell>          _current;
+	shared_array<cell>          _next;
+	shared_array<cell>          _inputs;      // this step's input values, read once per step
+	shared_array<uint8_t>       _inputRead;   // per input: its getter answered
 	// Per input: what an edge reading it crosses from this step, the last
 	// value read (a getter that answered, not NaN) on an earlier step or at
 	// creation; NaN, which crosses nothing, until one is read (see Step).
-	std::vector<cell>          _previous;
-	std::vector<clause_answer> _answers;     // every list's clauses, end to end
-	std::vector<uint64_t>      _reported;    // one bit per failure that is reported once (see host_binding)
-	std::vector<cell>          _keys;        // scratch: one clause's key values
-	std::vector<cell>          _given;       // scratch: one clause's table inputs
-	std::vector<cell>          _givenBefore; // scratch: one clause's table inputs' previous values, for its edges
-	std::vector<float>         _axes;        // scratch: one best clause's clamped band inputs
+	shared_array<cell>          _previous;
+	shared_array<clause_answer> _answers;     // every list's clauses, end to end
+	shared_array<uint64_t>      _reported;    // one bit per failure that is reported once (see host_binding)
+	shared_array<cell>          _keys;        // scratch: one clause's key values
+	shared_array<cell>          _given;       // scratch: one clause's table inputs
+	shared_array<cell>          _givenBefore; // scratch: one clause's table inputs' previous values, for its edges
+	shared_array<float>         _axes;        // scratch: one best clause's clamped band inputs
 	// The last run's commands: room for every clause that can emit, so a step
 	// that emits allocates nothing.
-	std::vector<emitted>       _emitted;
+	shared_array<emitted>       _emitted;
 	// How many of _emitted the last run filled. Zeroed when moved from, as the
-	// vector is, so a moved-from instance never claims slots it no longer has.
+	// array is, so a moved-from instance never claims slots it no longer has.
 	struct emitted_count
 	{
 		size_t n = 0;
@@ -379,7 +382,7 @@ private:
 	emitted_count              _emittedCount;
 	counted_ptr<Binding const> _left;        // the binding a rebind left, while its exit's commands are returned
 #if TABULAR_PROVENANCE
-	std::vector<provenance_entry> _provenance;           // the ring, kProvenanceDepth entries
+	shared_array<provenance_entry> _provenance;          // the ring, kProvenanceDepth entries
 	size_t                        _provenanceNext  = 0;  // where the next pick goes
 	size_t                        _provenanceCount = 0;
 	uint64_t                      _pass            = 0;

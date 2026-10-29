@@ -128,22 +128,22 @@ struct instance_access
 
 	static counted_ptr<Binding const>& BindingOf(instance& i) { return i._binding; }
 	static uint64_t&                   Id(instance& i) { return i._id; }
-	static std::vector<cell>&          Current(instance& i) { return i._current; }
-	static std::vector<cell>&          Next(instance& i) { return i._next; }
-	static std::vector<cell>&          Inputs(instance& i) { return i._inputs; }
-	static std::vector<uint8_t>&       InputRead(instance& i) { return i._inputRead; }
-	static std::vector<cell>&          Previous(instance& i) { return i._previous; }
-	static std::vector<cell>&          GivenBefore(instance& i) { return i._givenBefore; }
-	static std::vector<clause_answer>& Answers(instance& i) { return i._answers; }
-	static std::vector<uint64_t>&      Reported(instance& i) { return i._reported; }
-	static std::vector<cell>&          Keys(instance& i) { return i._keys; }
-	static std::vector<cell>&          Given(instance& i) { return i._given; }
-	static std::vector<float>&         Axes(instance& i) { return i._axes; }
-	static std::vector<emitted>&       Emitted(instance& i) { return i._emitted; }
+	static shared_array<cell>&          Current(instance& i) { return i._current; }
+	static shared_array<cell>&          Next(instance& i) { return i._next; }
+	static shared_array<cell>&          Inputs(instance& i) { return i._inputs; }
+	static shared_array<uint8_t>&       InputRead(instance& i) { return i._inputRead; }
+	static shared_array<cell>&          Previous(instance& i) { return i._previous; }
+	static shared_array<cell>&          GivenBefore(instance& i) { return i._givenBefore; }
+	static shared_array<clause_answer>& Answers(instance& i) { return i._answers; }
+	static shared_array<uint64_t>&      Reported(instance& i) { return i._reported; }
+	static shared_array<cell>&          Keys(instance& i) { return i._keys; }
+	static shared_array<cell>&          Given(instance& i) { return i._given; }
+	static shared_array<float>&         Axes(instance& i) { return i._axes; }
+	static shared_array<emitted>&       Emitted(instance& i) { return i._emitted; }
 	static size_t&                     EmittedCount(instance& i) { return i._emittedCount.n; }
 	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
 #if TABULAR_PROVENANCE
-	static std::vector<provenance_entry>& Ring(instance& i) { return i._provenance; }
+	static shared_array<provenance_entry>& Ring(instance& i) { return i._provenance; }
 	static size_t&                        RingNext(instance& i) { return i._provenanceNext; }
 	static size_t&                        RingCount(instance& i) { return i._provenanceCount; }
 	static uint64_t&                      Pass(instance& i) { return i._pass; }
@@ -266,17 +266,17 @@ struct list_run
 {
 	binding_access::Data const&        binding;
 	machine_access::Data const&        machine;
-	std::vector<cell>&                 next;
-	std::vector<cell> const&           state;     // what a State source reads: next, or current for exit
-	std::vector<cell> const&           inputs;
-	std::vector<uint8_t> const&        inputRead;
-	std::vector<cell> const&           previous;   // per machine input, for edges
+	shared_array<cell>&                 next;
+	shared_array<cell> const&           state;     // what a State source reads: next, or current for exit
+	shared_array<cell> const&           inputs;
+	shared_array<uint8_t> const&        inputRead;
+	shared_array<cell> const&           previous;   // per machine input, for edges
 	std::span<clause_answer>           answers;   // this list's
-	std::vector<uint64_t>&             reported;
-	std::vector<cell>&                 keys;
-	std::vector<cell>&                 given;
-	std::vector<cell>&                 givenBefore;
-	std::vector<float>&                axes;
+	shared_array<uint64_t>&             reported;
+	shared_array<cell>&                 keys;
+	shared_array<cell>&                 given;
+	shared_array<cell>&                 givenBefore;
+	shared_array<float>&                axes;
 	uint64_t                           id;
 	void const*                        self;
 	uint64_t                           seed;
@@ -302,7 +302,7 @@ cell AnswerValue(prepared_clause const& clause, clause_answer const& answer, uin
 
 // Reads sources into out; false when one has no value this step (an input
 // whose getter failed, or an earlier clause that did not answer).
-bool ReadSources(list_run const& run, std::span<resolved_source const> sources, std::vector<cell>& out)
+bool ReadSources(list_run const& run, std::span<resolved_source const> sources, shared_array<cell>& out)
 {
 	for (size_t s = 0; s < sources.size(); ++s)
 	{
@@ -441,7 +441,7 @@ laid_pick TryGroup(TableVersion const& version, detail::run_layout const& layout
 // rank alone orders them. An unranked table has one group, flags 0, so it is
 // the last-tried group and nothing else.
 laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell const> given,
-	std::span<cell const> before, std::vector<float>& axes, void const* self, ErrorContext& error)
+	std::span<cell const> before, shared_array<float>& axes, void const* self, ErrorContext& error)
 {
 	TableVersion const&        version = *clause.version;
 	table_def const&           def     = version_access::Def(version);
@@ -496,7 +496,7 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 // The report-once memory: whether failure bit has been reported by this
 // instance, marking it if not. Only the first occurrence reaches the host, so
 // only it builds an error.
-bool FirstReport(std::vector<uint64_t>& reported, size_t bit)
+bool FirstReport(shared_array<uint64_t>& reported, size_t bit)
 {
 	uint64_t&      word = reported[bit / 64];
 	uint64_t const mask = uint64_t(1) << (bit % 64);
@@ -733,10 +733,10 @@ void WriteOverridden(list_run const& run, size_t base, size_t over)
 	}
 }
 
-list_run RunOver(instance& subject, size_t list, std::vector<cell> const& state, void const* self, uint64_t seed)
+list_run RunOver(instance& subject, size_t list, shared_array<cell> const& state, void const* self, uint64_t seed)
 {
 	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
-	std::vector<clause_answer>& answers = instance_access::Answers(subject);
+	shared_array<clause_answer>& answers = instance_access::Answers(subject);
 	std::span<clause_answer> const own(answers.data() + binding.answerStart[list],
 		binding.answerStart[list + 1] - binding.answerStart[list]);
 	return list_run{binding, machine_access::Of(*binding.machine), instance_access::Next(subject), state,
@@ -755,11 +755,11 @@ void Record(instance& subject, list_run const& run, size_t index, clause_answer 
 {
 	resolved_clause const& rc  = run.machine.def.lists[run.list][index];
 	table_def const&       def = version_access::Def(*run.machine.lists[run.list][index].version);
-	std::vector<provenance_entry>& ring = instance_access::Ring(subject);
+	shared_array<provenance_entry>& ring = instance_access::Ring(subject);
 	size_t& next = instance_access::RingNext(subject);
 	provenance_entry& entry = ring[next];
 	next = (next + 1) % ring.size();
-	instance_access::RingCount(subject) = std::min(instance_access::RingCount(subject) + 1, ring.size());
+	instance_access::RingCount(subject) = std::min(instance_access::RingCount(subject) + 1, size_t(ring.size()));
 
 	entry        = provenance_entry{};
 	entry.pass   = instance_access::Pass(subject);
@@ -809,8 +809,8 @@ void Record(instance& subject, list_run const& run, size_t index, clause_answer 
 // the state being left), an entry or exit clause runs only when one of the
 // hash columns it is entered on differs between left and next, and answers
 // NotRun otherwise (Part 4: entry and exit run per column).
-void RunList(instance& subject, trigger list, std::vector<cell> const& state, void const* self, uint64_t seed,
-	std::vector<cell> const* left = nullptr)
+void RunList(instance& subject, trigger list, shared_array<cell> const& state, void const* self, uint64_t seed,
+	shared_array<cell> const* left = nullptr)
 {
 	list_run const run = RunOver(subject, size_t(list), state, self, seed);
 	// The level the clause before answered at, which its override is bounded by.
@@ -857,7 +857,7 @@ void RunList(instance& subject, trigger list, std::vector<cell> const& state, vo
 void MarkNotRun(instance& subject, trigger list)
 {
 	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
-	std::vector<clause_answer>& answers = instance_access::Answers(subject);
+	shared_array<clause_answer>& answers = instance_access::Answers(subject);
 	std::fill(answers.begin() + binding.answerStart[size_t(list)], answers.begin() + binding.answerStart[size_t(list) + 1],
 		clause_answer{});
 }
@@ -869,8 +869,8 @@ void ReadInputs(instance& subject, void const* self)
 {
 	binding_access::Data const&  binding = binding_access::Of(*instance_access::BindingOf(subject));
 	detail::machine_def const&   def     = machine_access::Of(*binding.machine).def;
-	std::vector<cell>&    inputs  = instance_access::Inputs(subject);
-	std::vector<uint8_t>& read    = instance_access::InputRead(subject);
+	shared_array<cell>&    inputs  = instance_access::Inputs(subject);
+	shared_array<uint8_t>& read    = instance_access::InputRead(subject);
 	for (size_t i = 0; i < binding.getters.size(); ++i)
 	{
 		input_getter const& g = binding.getters[i];
@@ -890,9 +890,9 @@ void ReadInputs(instance& subject, void const* self)
 // value stays the last one that was, so a crossing is not lost across it.
 void AdvancePrevious(instance& subject)
 {
-	std::vector<cell> const&    inputs   = instance_access::Inputs(subject);
-	std::vector<uint8_t> const& read     = instance_access::InputRead(subject);
-	std::vector<cell>&          previous = instance_access::Previous(subject);
+	shared_array<cell> const&    inputs   = instance_access::Inputs(subject);
+	shared_array<uint8_t> const& read     = instance_access::InputRead(subject);
+	shared_array<cell>&          previous = instance_access::Previous(subject);
 	detail::machine_def const&  def      = machine_access::Of(*binding_access::Of(subject.binding()).machine).def;
 	for (size_t i = 0; i < inputs.size(); ++i)
 	{
@@ -907,7 +907,7 @@ void AdvancePrevious(instance& subject)
 // A state is entered when a hash state column of next differs from current
 // at the end of the step list (so A -> B -> A enters nothing): the hash
 // columns are the machine's states, an int or a double is data it keeps.
-bool Entered(machine_access::Data const& machine, std::vector<cell> const& current, std::vector<cell> const& next)
+bool Entered(machine_access::Data const& machine, shared_array<cell> const& current, shared_array<cell> const& next)
 {
 	for (size_t s = 0; s < machine.def.state.size(); ++s)
 	{
@@ -925,10 +925,10 @@ bool Entered(machine_access::Data const& machine, std::vector<cell> const& curre
 void Emit(instance& subject, trigger list)
 {
 	binding_access::Data const& binding = binding_access::Of(*instance_access::BindingOf(subject));
-	std::vector<emitted>&       results = instance_access::Emitted(subject);
+	shared_array<emitted>&       results = instance_access::Emitted(subject);
 	size_t&                     count   = instance_access::EmittedCount(subject);
 	machine_access::Data const&       machine = machine_access::Of(*binding.machine);
-	std::vector<clause_answer> const& answers = instance_access::Answers(subject);
+	shared_array<clause_answer> const& answers = instance_access::Answers(subject);
 	shared_array<resolved_clause> const& clauses = machine.def.lists[size_t(list)];
 	for (size_t i = 0; i < clauses.size(); ++i)
 	{
@@ -964,17 +964,21 @@ void BeginResults(instance& subject)
 // the caller's: creation fills them with initial values, a rebind migrates.
 void SizeFor(instance& subject, binding_access::Data const& data)
 {
-	instance_access::Inputs(subject).assign(data.getters.size(), cell::Integer(0));
-	instance_access::InputRead(subject).assign(data.getters.size(), 0);
-	instance_access::Answers(subject).assign(data.answerStart[kTriggerCount], clause_answer{});
-	instance_access::Reported(subject).assign((data.reportBits + 63) / 64, 0);
-	instance_access::Keys(subject).assign(data.maxKeys, cell::Integer(0));
-	instance_access::Given(subject).assign(data.maxInputs, cell::Integer(0));
-	instance_access::GivenBefore(subject).assign(data.maxInputs, cell::Integer(0));
-	instance_access::Previous(subject).assign(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
-	instance_access::Axes(subject).assign(data.maxAxes, 0.f);
-	// Results already returned by this run (a rebind's exit) are kept.
-	instance_access::Emitted(subject).resize(instance_access::EmittedCount(subject) + data.emitters);
+	instance_access::Inputs(subject)      = shared_array<cell>(data.getters.size(), cell::Integer(0));
+	instance_access::InputRead(subject)   = shared_array<uint8_t>(data.getters.size());
+	instance_access::Answers(subject)     = shared_array<clause_answer>(data.answerStart[kTriggerCount], clause_answer{});
+	instance_access::Reported(subject)    = shared_array<uint64_t>((data.reportBits + 63) / 64);
+	instance_access::Keys(subject)        = shared_array<cell>(data.maxKeys, cell::Integer(0));
+	instance_access::Given(subject)       = shared_array<cell>(data.maxInputs, cell::Integer(0));
+	instance_access::GivenBefore(subject) = shared_array<cell>(data.maxInputs, cell::Integer(0));
+	instance_access::Previous(subject)    = shared_array<cell>(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
+	instance_access::Axes(subject)        = shared_array<float>(data.maxAxes, 0.f);
+	// Results already returned by this run (a rebind's exit) are kept, in a new
+	// array sized for the new binding.
+	shared_array<emitted>& results = instance_access::Emitted(subject);
+	shared_array<emitted>  resized(instance_access::EmittedCount(subject) + data.emitters);
+	std::copy(results.begin(), results.begin() + instance_access::EmittedCount(subject), resized.begin());
+	results = std::move(resized);
 }
 
 // Reads every input once and makes the values read the
@@ -983,7 +987,7 @@ void SizeFor(instance& subject, binding_access::Data const& data)
 void ReadStill(instance& subject, void const* self)
 {
 	ReadInputs(subject, self);
-	std::vector<cell>& previous = instance_access::Previous(subject);
+	shared_array<cell>& previous = instance_access::Previous(subject);
 	std::fill(previous.begin(), previous.end(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
 	AdvancePrevious(subject);
 }
@@ -1020,12 +1024,12 @@ cell Migrated(detail::state_column const& to, std::span<detail::state_column con
 // commands added to the run's results.
 void Leave(instance& subject, void const* self, uint64_t seed)
 {
-	std::vector<cell>& current = instance_access::Current(subject);
-	std::vector<cell>& next    = instance_access::Next(subject);
+	shared_array<cell>& current = instance_access::Current(subject);
+	shared_array<cell>& next    = instance_access::Next(subject);
 	ReadStill(subject, self);
 	std::copy(current.begin(), current.end(), next.begin());
 	RunList(subject, trigger::Exit, current, self, seed);
-	std::swap(current, next);
+	current.swap(next);
 	Emit(subject, trigger::Exit);
 }
 
@@ -1093,25 +1097,26 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	instance                    out     = instance_access::Make();
 	instance_access::BindingOf(out)     = CountedWrap(&binding);
 	instance_access::Id(out)            = id;
-	std::vector<cell>& current          = instance_access::Current(out);
-	for (detail::state_column const& column : machine.def.state)
+	shared_array<cell>& current         = instance_access::Current(out);
+	current                             = shared_array<cell>(machine.def.state.size());
+	for (uint32_t s = 0; s < machine.def.state.size(); ++s)
 	{
-		current.push_back(column.initial);
+		current[s] = machine.def.state[s].initial;
 	}
-	instance_access::Next(out) = current;
+	instance_access::Next(out) = current.clone();
 	SizeFor(out, data);
 #if TABULAR_PROVENANCE
 	// Sized here only, so a rebind keeps the history it would otherwise lose.
-	instance_access::Ring(out).assign(kProvenanceDepth, provenance_entry{});
+	instance_access::Ring(out) = shared_array<provenance_entry>(kProvenanceDepth, provenance_entry{});
 #endif
 
 	// Creation enters the initial state; nothing is left, so no exit runs. The
 	// values read are their own previous values, so creation crosses no edge.
 	ReadStill(out, self);
-	std::vector<cell> const& next = instance_access::Next(out);
+	shared_array<cell> const& next = instance_access::Next(out);
 	RunList(out, trigger::Create, next, self, seed);
 	RunList(out, trigger::Entry, next, self, seed);
-	std::swap(instance_access::Current(out), instance_access::Next(out));
+	instance_access::Current(out).swap(instance_access::Next(out));
 	Emit(out, trigger::Create);
 	Emit(out, trigger::Entry);
 	return out;
@@ -1122,8 +1127,8 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	// A moved-from instance has no binding, and stepping one is caller misuse.
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is stepped: caller misuse");
 	machine_access::Data const& machine = machine_access::Of(*binding_access::Of(subject.binding()).machine);
-	std::vector<cell>&          current = instance_access::Current(subject);
-	std::vector<cell>&          next    = instance_access::Next(subject);
+	shared_array<cell>&          current = instance_access::Current(subject);
+	shared_array<cell>&          next    = instance_access::Next(subject);
 	BeginResults(subject);
 #if TABULAR_PROVENANCE
 	++instance_access::Pass(subject);
@@ -1147,8 +1152,8 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	}
 	// Whatever the clauses did with them: the inputs were read.
 	AdvancePrevious(subject);
-	// Swapping two vectors moves their buffers, so nothing is allocated.
-	std::swap(current, next);
+	// Swapping two handles trades their buffers, so nothing is allocated.
+	current.swap(next);
 	// In the order the lists ran.
 	Emit(subject, trigger::Step);
 	Emit(subject, trigger::Exit);
@@ -1166,8 +1171,8 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	counted_ptr<Binding const> const fresh = CountedWrap(&binding);
 	detail::machine_def const&       from  = machine_access::Of(old->machine()).def;
 	detail::machine_def const&       to    = machine_access::Of(fresh->machine()).def;
-	std::vector<cell>&               current = instance_access::Current(subject);
-	std::vector<cell>&               next    = instance_access::Next(subject);
+	shared_array<cell>&             current = instance_access::Current(subject);
+	shared_array<cell>&             next    = instance_access::Next(subject);
 	BeginResults(subject);
 #if TABULAR_PROVENANCE
 	++instance_access::Pass(subject);
@@ -1177,15 +1182,16 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	// Leaving, under the old binding, as a step leaves a state: the abort comes
 	// from the code that started what the state runs (R6). The edge history is
 	// kept aside, since a reload neither crosses an edge nor spends one.
-	std::vector<cell> const history = instance_access::Previous(subject);
+	// A copy of the values, not a second handle on the buffer SizeFor replaces.
+	std::vector<cell> const history(instance_access::Previous(subject).begin(), instance_access::Previous(subject).end());
 	Leave(subject, self, seed);
 
 	// Migration by name, from the state exit left.
-	std::vector<cell> migrated;
-	migrated.reserve(to.state.size());
-	for (detail::state_column const& column : to.state)
+	shared_array<cell> migrated(to.state.size());
+	for (uint32_t s = 0; s < to.state.size(); ++s)
 	{
-		migrated.push_back(Migrated(column, std::span<detail::state_column const>(from.state.begin(), from.state.size()), current));
+		migrated[s] = Migrated(to.state[s], std::span<detail::state_column const>(from.state.begin(), from.state.size()),
+			std::span<cell const>(current.begin(), current.size()));
 	}
 	std::vector<std::optional<cell>> carried;
 	carried.reserve(to.inputs.size());
@@ -1198,14 +1204,14 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	instance_access::Left(subject)      = old;
 	instance_access::BindingOf(subject) = fresh;
 	SizeFor(subject, binding_access::Of(binding));
-	current = migrated;
+	current = migrated.clone();
 	next    = std::move(migrated);
 
 	// Entering again, under the new binding.
 	ReadStill(subject, self);
 	RunList(subject, trigger::Entry, next, self, seed);
-	std::swap(current, next);
-	std::vector<cell>& previous = instance_access::Previous(subject);
+	current.swap(next);
+	shared_array<cell>& previous = instance_access::Previous(subject);
 	for (size_t i = 0; i < carried.size(); ++i)
 	{
 		if (carried[i])
