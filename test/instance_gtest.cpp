@@ -260,23 +260,16 @@ std::span<emitted const> StepOn(instance& subject, host_object& host, uint64_t s
 
 constexpr std::string_view kGrazer = R"(
 [table settle
-  (key mode hash (domain rows))
-  (column anim int)
   (order mode)]
+>mode, anim: int
 [table grazer_brain
   (input energy double 0..1)
   (input threat double 0..1)
-  (key mode hash (domain rows))
-  (column energy band (input energy))
-  (column threat band (input threat))
-  (column when condition)
-  (column next hash)
   (order mode)]
+>mode, energy: band, threat: band, when, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (column anim int)
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, anim: int, command
 [machine grazer
   (state mode hash (members graze flee freeze fight) (initial graze))
   (state anim int (initial 0))
@@ -658,13 +651,11 @@ namespace
 // column no clause writes.
 constexpr std::string_view kFlip = R"(
 [table flip
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table show
-  (key mode hash (domain rows))
-  (column label hash)
   (order mode)]
+>mode, label
 [machine flipper
   (state mode hash (members a b) (initial a))
   (state label hash (members x y z) (initial z))
@@ -770,13 +761,11 @@ TEST(MachineStep, AnEarlierClausesAnswerIsReadThisStep)
 {
 	constexpr std::string_view chain = R"(
 [table mood_of
-  (key mode hash (domain rows))
-  (column mood hash)
   (order mode)]
+>mode, mood
 [table react
-  (key mood hash (domain rows))
-  (column next hash)
   (order mood)]
+>mood, next
 [machine chain (state mode hash (members calm alert) (initial calm))]
 list,from,where,given,set,emit,overrides
 step,mood_of,mode=state.mode,,,,
@@ -804,18 +793,12 @@ namespace
 constexpr std::string_view kSpecGrazer = R"(
 [table grazer_brain
   (input energy double 0..1)
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column when condition)
-  (column next hash)
+  (input near flags)
   (order mode message)]
+>mode, >message?, energy: band, near: flags, when, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine grazer
   (state mode hash (members idle walk eat panic) (initial idle))
   (input energy double 0..1)
@@ -823,7 +806,7 @@ constexpr std::string_view kSpecGrazer = R"(
   (input message hash)]
 list,from,where,given,set,emit,overrides
 entry,grazer_enter,mode=state.mode,,,command,
-step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kSpecBrainRows = R"(# grazer_brain
@@ -916,14 +899,11 @@ TEST(MachineStep, AClauseReadingAHeldClauseHolds)
 	constexpr std::string_view chain = R"(
 [table mood_of
   (input threat double 0..1)
-  (key mode hash (domain rows))
-  (column threat band (input threat))
-  (column mood hash)
   (order mode)]
+>mode, threat: band, mood
 [table react
-  (key mood hash (domain rows))
-  (column next hash)
   (order mood)]
+>mood, next
 [machine chain
   (state mode hash (members calm alert) (initial calm))
   (input threat double 0..1)]
@@ -949,18 +929,14 @@ namespace
 // enter answers for the state entered, writing data (an int), never a state.
 constexpr std::string_view kEnter = R"(
 [table start
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table go
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table enter
-  (key mode hash (domain rows))
-  (column next hash)
-  (column count int)
   (order mode)]
+>mode, next, count: int
 [machine door
   (state mode hash (members a b c d) (initial a))
   (state entered int (initial 0))]
@@ -1006,13 +982,11 @@ namespace
 // for each run of the entry list.
 constexpr std::string_view kTally = R"(
 [table go
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table tally
-  (key n int (domain rows))
-  (column next int)
   (order n)]
+>n: int, next: int
 [machine counter
   (state mode hash (members a b c) (initial a))
   (state entered int (initial 0))]
@@ -1195,17 +1169,14 @@ namespace
 // against F = 1, or 5 and 7 against F = 4). b..f each send it back to a.
 constexpr std::string_view kRanker = R"(
 [table ranked
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (column near flags (input food_near))
-  (column when condition)
-  (column next hash)
+  (input near flags)
   (order mode)]
+>mode, near: flags, when, next
 [machine ranker
   (state mode hash (members a b c d e f) (initial a))
   (input food_near flags)]
 list,from,where,given,set,emit,overrides
-step,ranked,mode=state.mode,food_near=input.food_near,mode=next,,
+step,ranked,mode=state.mode,near=input.food_near,mode=next,,
 )";
 
 constexpr std::string_view kRankerRows = R"(mode, near, when, next
@@ -1279,11 +1250,8 @@ namespace
 // below zero as int64 does.
 constexpr std::string_view kWalker = R"(
 [table walk
-  (key x int (domain rows))
-  (key y int (domain rows))
-  (column nx int)
-  (column ny int)
   (order x y)]
+>x: int, >y: int, nx: int, ny: int
 [machine walker
   (state x int (initial -7))
   (state y int (initial -4))]
@@ -1349,22 +1317,16 @@ namespace
 constexpr std::string_view kPhaseChain = R"(
 [table phase
   (input t double 0..1)
-  (key mode hash)
-  (column t band (input t))
-  (column when condition)
-  (column bits flags)
   (pick or bits)
   (order mode)]
+>mode, t: band, when, bits: flags
 [table lookup
-  (key bits flags (domain rows))
-  (column next hash)
   (order bits)]
+>bits: flags, next
 [table wander
-  (key mode hash)
-  (column w double)
-  (column mood hash)
   (pick weighted w)
   (order mode)]
+>mode, w: double, mood
 [machine chain
   (state mode hash (members idle walk) (initial idle))
   (state mood hash (members calm edgy) (initial calm))

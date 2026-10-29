@@ -54,23 +54,17 @@ int64_t Hash(std::string_view text)
 constexpr std::string_view kGrazerTables = R"(
 [table grazer_brain
   (input energy double 0..1)
-  (input food_near flags)
-  (key mode hash (domain rows))
-  (key message hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column when condition)
-  (column next hash)
+  (input near flags)
   (order mode message)]
+>mode, >message?, energy: band, near: flags, when, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [table tally
-  (key level int (domain rows))
-  (column count int)
   (order level)]
-[table kinds (key kind hash) (pick none)]
+>level: int, count: int
+[table kinds (pick none)]
+>kind
 )";
 
 constexpr std::string_view kGrazerMachine = R"(
@@ -81,7 +75,7 @@ constexpr std::string_view kGrazerMachine = R"(
   (input message hash)]
 list,from,where,given,set,emit,overrides
 entry,grazer_enter,mode=state.mode,,,command,
-step,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+step,grazer_brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,
 )";
 
 // The spec's rows, as written: a message no row of a mode keys on falls
@@ -245,8 +239,8 @@ TEST(GrazerMachine, LeavingOutPanicsCatchAllRowIsRefusedByTheLoadWhenTheTableClo
 {
 	// The spec's reading: the table itself declares mode's members, so the load
 	// refuses before any machine is prepared.
-	std::string const tables = Replace(kGrazerTables, "(key mode hash (domain rows))\n  (key message",
-		"(key mode hash (domain (members idle walk eat panic)))\n  (key message");
+	std::string const tables = Replace(kGrazerTables, "(order mode message)]",
+		"(order mode message)\n  (domain mode idle walk eat panic)]");
 	auto doc = Document(tables, kGrazerMachine);
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -311,7 +305,7 @@ TEST(GrazerMachine, TwoClausesWritingOneColumnAreOrderedByPosition)
 {
 	// R4 as accepted: the later write wins, so nothing is refused.
 	std::string const machines = Replace(kGrazerMachine, ",mode=next,,\n",
-		",mode=next,,\nstep,grazer_brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,\n");
+		",mode=next,,\nstep,grazer_brain,mode=state.mode message=input.message,energy=input.energy near=input.food_near,mode=next,,\n");
 	grazer_fixture f(Parsed(kGrazerTables, machines), kBrainRows, kEnterRows);
 	auto machine = Prepare(f.Definition(), f.store);
 	ASSERT_TRUE(machine.has_value()) << RefusalOf(machine);
@@ -352,13 +346,11 @@ namespace
 
 constexpr std::string_view kChain = R"(
 [table mood_of
-  (key mode hash (domain rows))
-  (column mood hash)
   (order mode)]
+>mode, mood
 [table react
-  (key mood hash (domain rows))
-  (column next hash)
   (order mood)]
+>mood, next
 [machine chain (state mode hash (members calm alert) (initial calm))]
 list,from,where,given,set,emit,overrides
 step,mood_of,mode=state.mode,,,,
@@ -512,7 +504,7 @@ TEST(MachineDefinition, UnknownNamesAreRefused)
 		"the clause reads table 'grazer_exit', which the schema does not have"));
 	EXPECT_TRUE(Mentions(BuildRefusal("mode=state.mode message=", "mood=state.mode message="),
 		"where names column 'mood', which table 'grazer_brain' does not have"));
-	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy food_near", "vigour=input.energy food_near"),
+	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy near", "vigour=input.energy near"),
 		"given names input 'vigour', which table 'grazer_brain' does not declare"));
 	EXPECT_TRUE(Mentions(BuildRefusal("mode=state.mode message=", "mode=state.mood message="),
 		"key 'mode' reads state column 'mood', which the machine does not declare"));
@@ -528,9 +520,9 @@ TEST(MachineDefinition, EveryKeyAndInputIsBoundOnceAndOnlyKeysByWhere)
 {
 	EXPECT_TRUE(Mentions(BuildRefusal("mode=state.mode message=input.message", "mode=state.mode"),
 		"key 'message' of table 'grazer_brain' is not bound; where gives every key a source"));
-	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy food_near=input.food_near",
+	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy near=input.food_near",
 		"energy=input.energy"),
-		"input 'food_near' of table 'grazer_brain' is not bound; given gives every input of the table a source"));
+		"input 'near' of table 'grazer_brain' is not bound; given gives every input of the table a source"));
 	EXPECT_TRUE(Mentions(BuildRefusal("message=input.message,", "message=input.message next=state.mode,"),
 		"where binds column 'next' of table 'grazer_brain', which is not a key"));
 }
@@ -539,7 +531,7 @@ TEST(MachineDefinition, ASourceOfAnotherTypeIsRefused)
 {
 	EXPECT_TRUE(Mentions(BuildRefusal("message=input.message,", "message=input.energy,"),
 		"key 'message' is a hash, and the input 'energy' it reads is a double"));
-	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy food_near", "energy=input.food_near food_near"),
+	EXPECT_TRUE(Mentions(BuildRefusal("energy=input.energy near", "energy=input.food_near near"),
 		"input 'energy' is a double, and the input 'food_near' it reads is a flag set"));
 }
 
@@ -585,10 +577,9 @@ TEST(MachineDefinition, AClauseOnAnAllTableIsRefused)
 {
 	std::string const error = RefusalOf(Document(R"(
 [table every
-  (key mode hash)
-  (column next hash)
   (pick all)
   (order mode)]
+>mode, next
 )", R"(
 [machine lister (state mode hash (members a) (initial a))]
 list,from,where,given,set,emit,overrides
@@ -634,7 +625,7 @@ TEST(MachineDefinition, CommandStructsAreCheckedWithoutAFile)
 	near.kind = source_kind::Input;
 	near.name = "food_near";
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
-	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
+	clause_bind const given[] = {{"energy", energy}, {"near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, sets, {}}};
 	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
 	EXPECT_TRUE(Mentions(RefusalOf(CheckMachine(m, doc->tables)), "set writes state column 'mode' twice"));
@@ -701,8 +692,8 @@ TEST(GrazerMachine, AClauseReachingARunTheLoadNeverProvedIsRefused)
 	// The table closes mode without eat, so the load never checks eat's runs; the
 	// machine's state has eat, so its clause reaches them, and eat with no
 	// message has only a flagged row.
-	std::string const tables = Replace(kGrazerTables, "(key mode hash (domain rows))\n  (key message",
-		"(key mode hash (domain (members idle walk panic)))\n  (key message");
+	std::string const tables = Replace(kGrazerTables, "(order mode message)]",
+		"(order mode message)\n  (domain mode idle walk panic)]");
 	std::string const brain = Replace(kBrainRows, "eat,       ,    0..1,    0,    ,            idle",
 		"eat,       ,    0..1,    1,    ,            idle");
 	grazer_fixture    f(Parsed(tables, kGrazerMachine), brain, kEnterRows);
@@ -733,12 +724,13 @@ TEST(MachinePrepare, AnInputKeyOverMembersIsProvedOverEveryMember)
 	// kinds is empty, so the load's domain is empty and c's missing run goes
 	// unchecked; the clause closes mode by the state and keeps who's members.
 	auto doc = ReadDocument(R"(
-[table kinds (key kind hash) (pick none)]
+[table kinds (pick none)]
+>kind
 [table greet
-  (key who hash (domain (members a b c)))
-  (key mode hash (domain (from kinds kind)))
-  (column next hash)
-  (order who mode)]
+  (order who mode)
+  (domain who a b c)
+  (domain mode kinds.kind)]
+>who, >mode, next
 [machine greeter
   (state mode hash (members x) (initial x))
   (input who hash)]
@@ -777,7 +769,7 @@ std::string EnergyLiteralRefusal(schema const& tables, double lit)
 	near.kind = source_kind::Input;
 	near.name = "food_near";
 	clause_bind const where[] = {{"mode", mode}, {"message", message}};
-	clause_bind const given[] = {{"energy", energy}, {"food_near", near}};
+	clause_bind const given[] = {{"energy", energy}, {"near", near}};
 	add_clause const  step[]  = {{"grazer_brain", where, given, {}, {}}};
 	create_machine    m{"grazer", state, inputs, {}, {}, step, {}};
 	return RefusalOf(CheckMachine(m, tables));
@@ -798,7 +790,7 @@ TEST(MachineDefinition, ALiteralForARangedInputIsFiniteAndInItsRange)
 	EXPECT_TRUE(Mentions(inf, "input 'energy' has range 0..1, and its literal is inf")) << inf;
 	std::string const low = EnergyLiteralRefusal(doc->tables, -0.25);
 	EXPECT_TRUE(Mentions(low, "input 'energy' has range 0..1, and its literal is -0.25")) << low;
-	std::string const five = BuildRefusal("energy=input.energy food_near", "energy=(literal 5) food_near");
+	std::string const five = BuildRefusal("energy=input.energy near", "energy=(literal 5) near");
 	EXPECT_TRUE(Mentions(five, "machine 'grazer' step clause 0 (table 'grazer_brain')")) << five;
 	EXPECT_TRUE(Mentions(five, "input 'energy' has range 0..1, and its literal is 5")) << five;
 }
@@ -812,15 +804,12 @@ namespace
 // by flags reads it. bits is no closed set, so lookup keeps its declared rows.
 constexpr std::string_view kPhaseChain = R"(
 [table phase
-  (key mode hash)
-  (column bits flags)
-  (column label hash)
   (pick or bits)
   (order mode)]
+>mode, bits: flags, label
 [table lookup
-  (key bits flags (domain rows))
-  (column next hash)
   (order bits)]
+>bits: flags, next
 [machine chain (state mode hash (members idle walk) (initial idle))]
 list,from,where,given,set,emit,overrides
 step,phase,mode=state.mode,,,,
@@ -887,8 +876,8 @@ TEST(MachinePrepare, AnOrClauseTupleWithNoRunIsAnEmptyRun)
 
 TEST(MachineDefinition, AnOrClauseEmitsNothing)
 {
-	std::string const tables = Replace(kPhaseChain, "(order mode)]\n[table lookup",
-		"(order mode)\n  (suffix say)]\n[table lookup");
+	std::string const tables = Replace(kPhaseChain, ">mode, bits: flags, label\n",
+		">mode, bits: flags, label, say: command\n");
 	std::string const machines = Replace(tables, "step,phase,mode=state.mode,,,,", "step,phase,mode=state.mode,,,say,");
 	std::string const error = RefusalOf(Document(machines, ""));
 	EXPECT_TRUE(Mentions(error, "machine 'chain' step clause 0 (table 'phase')")) << error;
@@ -912,11 +901,9 @@ namespace
 
 constexpr std::string_view kWander = R"(
 [table wander
-  (key mode hash)
-  (column w double)
-  (column next hash)
   (pick weighted w)
   (order mode)]
+>mode, w: double, next
 [machine drift (state mode hash (members idle walk) (initial idle))]
 list,from,where,given,set,emit,overrides
 step,wander,mode=state.mode,,mode=next,,

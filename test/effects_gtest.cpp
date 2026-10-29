@@ -402,24 +402,16 @@ event Message(std::string_view type, std::span<cell const> arguments = {})
 constexpr std::string_view kGrazer = R"(
 [table grazer_brain
   (input energy double 0..1)
-  (input food_near flags)
-  (input distance double 0..10)
-  (key mode hash (domain rows))
-  (key event hash fallthrough)
-  (column energy band (input energy))
-  (column near flags (input food_near))
-  (column dist band (input distance))
-  (column when condition)
-  (column next hash)
+  (input near flags)
+  (input dist double 0..10)
   (order mode event)]
+>mode, >event?, energy: band, near: flags, dist: band, when, next
 [table grazer_enter
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [table grazer_exit
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)]
+  (order mode)]
+>mode, command
 [machine grazer
   (state mode hash (members idle walk eat panic) (initial idle))
   (input energy double 0..1)
@@ -428,7 +420,7 @@ constexpr std::string_view kGrazer = R"(
   (input distance double 0..10)]
 list,from,where,given,set,emit,overrides
 entry,grazer_enter,mode=state.mode,,,command,
-step,grazer_brain,mode=state.mode event=input.event,energy=input.energy food_near=input.food_near distance=input.distance,mode=next,,
+step,grazer_brain,mode=state.mode event=input.event,energy=input.energy near=input.food_near dist=input.distance,mode=next,,
 exit,grazer_exit,mode=state.mode,,,command,
 )";
 
@@ -587,7 +579,7 @@ TEST(FallThroughKey, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 	load.text = noBlank;
 	std::string const error = RefusalOf(LoadCsv(store, load));
 	EXPECT_TRUE(Mentions(error, "table 'grazer_brain' key (" + std::to_string(Hash("walk"))
-		+ ", 0): energy 0, distance 0 has no row with no flags and no script condition; no row has this key, and the key "
+		+ ", 0): energy 0, dist 0 has no row with no flags and no script condition; no row has this key, and the key "
 		"is in the table's domain")) << error;
 
 	// A run keyed on a value is in the domain because it is there, so it is
@@ -596,15 +588,15 @@ TEST(FallThroughKey, ALoadDemandsTheBlankRunOfEveryTupleOfTheOtherKeys)
 	load.text = gap;
 	std::string const gapError = RefusalOf(LoadCsv(store, load));
 	EXPECT_TRUE(Mentions(gapError, "table 'grazer_brain' key (" + std::to_string(Hash("walk")) + ", "
-		+ std::to_string(Hash("food_found")) + "): energy 0, distance 2 has no row")) << gapError;
+		+ std::to_string(Hash("food_found")) + "): energy 0, dist 2 has no row")) << gapError;
 }
 
 TEST(FallThroughKey, ARunKeyedOnAValueWhoseOtherKeysLeftTheDomainIsAnOrphan)
 {
 	// mode closes over members without sleep: sleep's runs, blank or typed,
 	// are outside the domain, reported and unchecked.
-	std::string const tables = Replace(kGrazer, "(key mode hash (domain rows))",
-		"(key mode hash (domain (members idle walk eat panic)))");
+	std::string const tables = Replace(kGrazer, "(order mode event)]",
+		"(order mode event)\n  (domain mode idle walk eat panic)]");
 	auto doc = ReadDocument(tables, "machine.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -663,18 +655,16 @@ TEST(FallThroughKey, AnyHashSourceMayFeedIt)
 
 TEST(FallThroughKey, ItDeclaresNoOtherDomain)
 {
-	std::string const both = BuildRefusal("(key event hash fallthrough)",
-		"(key event hash (domain rows) fallthrough)");
-	EXPECT_TRUE(Mentions(both, "column 'event' of table 'grazer_brain' falls through and declares a domain")) << both;
+	std::string const both = BuildRefusal("(order mode event)]", "(order mode event)\n  (domain event scared calm)]");
+	EXPECT_TRUE(Mentions(both, "key 'event' of table 'grazer_brain' falls through, so its domain is open")) << both;
 }
 
 TEST(FallThroughKey, IsAHashKeyAndATableHasAtMostEight)
 {
 	std::string const flags = RefusalOf(ReadDocument(R"(
 [table t
-  (key m int fallthrough)
-  (column v int)
   (order m)]
+>m?: int, v: int
 )", "t.tabular"));
 	EXPECT_TRUE(Mentions(flags, "key 'm' of table 't' is a int; a fall-through key is a hash")) << flags;
 	// Several give way in key order (Part 4); a miss may try every
@@ -686,10 +676,10 @@ TEST(FallThroughKey, IsAHashKeyAndATableHasAtMostEight)
 		for (int k = 0; k < n; ++k)
 		{
 			std::string const name = "k" + std::to_string(k);
-			columns += "  (key " + name + " hash fallthrough)\n";
+			columns += ">" + name + "?, ";
 			order += (k ? " " : "") + name;
 		}
-		return RefusalOf(ReadDocument("[table t\n" + columns + "  (column v int)\n  (order " + order + ")]\n", "t.tabular"));
+		return RefusalOf(ReadDocument("[table t\n  (order " + order + ")]\n" + columns + "v: int\n", "t.tabular"));
 	};
 	EXPECT_EQ(keys(2), "(accepted)");
 	EXPECT_EQ(keys(8), "(accepted)");
@@ -701,10 +691,9 @@ TEST(FallThroughKey, OnlyABestTablesKeyFallsThrough)
 {
 	std::string const weighted = RefusalOf(ReadDocument(R"(
 [table t
-  (key a hash fallthrough)
-  (column w double)
   (pick weighted w)
   (order a)]
+>a?, w: double
 )", "t.tabular"));
 	EXPECT_TRUE(Mentions(weighted, "key 'a' of table 't' falls through, and only a best table's key falls through"))
 		<< weighted;
@@ -722,11 +711,8 @@ namespace
 constexpr std::string_view kCollision = R"(
 [table contact_kind
   (input ny double -1..1)
-  (input speed double 0..50)
-  (column ny band (input ny))
-  (column speed band (input speed))
-  (column kind hash)
-  (suffix command)]
+  (input speed double 0..50)]
+ny: band, speed: band, kind, command
 [machine on_collision
   (state contact hash (members none floor wall ceiling) (initial none))
   (input ny double -1..1)
@@ -777,12 +763,8 @@ namespace
 // run, and Back's rows are tried in row order through script conditions.
 constexpr std::string_view kBench = R"(
 [table bench_page
-  (key page hash (domain rows))
-  (key kind hash fallthrough)
-  (column when condition)
-  (column next_page hash)
-  (order page kind)
-  (suffix command)]
+  (order page kind)]
+>page, >kind?, when, next_page, command
 [machine craft_bench
   (state page hash (members experiment closed) (initial experiment))
   (input event hash)]
@@ -876,9 +858,8 @@ namespace
 // value then (the host's rule), which those lists see.
 constexpr std::string_view kNudge = R"(
 [table nudge
-  (input ny double -1..1)
-  (column ny band (input ny))
-  (suffix command)]
+  (input ny double -1..1)]
+ny: band, command
 [machine on_nudge
   (state mode hash (members still) (initial still))
   (input ny double -1..1)]
@@ -969,14 +950,11 @@ namespace
 // the brain's blank run answers 0, and 0 looks up mood's blank run itself.
 constexpr std::string_view kMoodChain = R"(
 [table brain
-  (key mode hash (domain rows))
-  (key event hash fallthrough)
-  (column next hash)
   (order mode event)]
+>mode, >event?, next
 [table mood
-  (key kind hash fallthrough)
-  (column v int)
   (order kind)]
+>kind?, v: int
 [machine moody
   (state mode hash (members idle panic) (initial idle))
   (state mood int (initial 0))
@@ -1061,13 +1039,12 @@ panic, ,       (abort run)
 TEST(MachineClose, CloseOnAFallThroughExitFallsThroughAndIsRecordedAsClose)
 {
 	std::string const source = Replace(Replace(kGrazer, R"([table grazer_exit
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix command)])", R"([table grazer_exit
-  (key mode hash (domain rows))
-  (key event hash fallthrough)
-  (order mode event)
-  (suffix command)])"), "exit,grazer_exit,mode=state.mode,,,command,",
+  (order mode)]
+>mode, command
+)", R"([table grazer_exit
+  (order mode event)]
+>mode, >event?, command
+)"), "exit,grazer_exit,mode=state.mode,,,command,",
 		"exit,grazer_exit,mode=state.mode event=input.event,,,command,");
 	effects_fixture f(source, {kBrainRows, kEnterRows, kEventExitRows});
 	ASSERT_TRUE(f.binding);
@@ -1107,19 +1084,14 @@ namespace
 // enter reads the state entered and writes data too, after leave.
 constexpr std::string_view kDoor = R"(
 [table go
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table leave
-  (key mode hash (domain rows))
-  (column code int)
-  (order mode)
-  (suffix say)]
+  (order mode)]
+>mode, code: int, say: command
 [table enter
-  (key mode hash (domain rows))
-  (column code int)
-  (order mode)
-  (suffix say)]
+  (order mode)]
+>mode, code: int, say: command
 [machine door
   (state mode hash (members a b c) (initial a))
   (state left int (initial 0))
@@ -1181,13 +1153,11 @@ namespace
 // step list moved to), leave and enter on a change.
 constexpr std::string_view kTalker = R"(
 [table go
-  (key mode hash (domain rows))
-  (column next hash)
   (order mode)]
+>mode, next
 [table words
-  (key mode hash (domain rows))
-  (order mode)
-  (suffix say)]
+  (order mode)]
+>mode, say: command
 [machine talker (state mode hash (members a b) (initial a))]
 list,from,where,given,set,emit,overrides
 create,words,mode=(literal start),,,say,
@@ -1237,10 +1207,8 @@ TEST(MachineResults, AHeldClauseEmitsNothing)
 	// holds with that row as its answer's row, and its command is not sent.
 	effects_fixture f(R"(
 [table say
-  (key mode hash (domain rows))
-  (column when condition)
-  (order mode)
-  (suffix words)]
+  (order mode)]
+>mode, when, words: command
 [machine speaker (state mode hash (members a) (initial a))]
 list,from,where,given,set,emit,overrides
 step,say,mode=state.mode,,,words,
@@ -1277,21 +1245,16 @@ namespace
 // clause keyed on its answer cascades its hold.
 constexpr std::string_view kCounter = R"(
 [table tally
-  (key level int (domain rows))
-  (column next int)
   (order level)]
+>level: int, next: int
 [table phase
   (input t double 0..1)
-  (key mode hash)
-  (column t band (input t))
-  (column when condition)
-  (column bits flags)
   (pick or bits)
   (order mode)]
+>mode, t: band, when, bits: flags
 [table lookup
-  (key bits flags (domain rows))
-  (column next int)
   (order bits)]
+>bits: flags, next: int
 [machine counter
   (state mode hash (members a) (initial a))
   (state count int (initial 0))
@@ -1462,13 +1425,10 @@ TEST(FallThroughKey, APivotedTablesBlankCellIsTheBlank)
 {
 	auto doc = ReadDocument(R"(
 [table lookup
-  (input mode flags)
-  (key label int (domain rows))
-  (key msg hash fallthrough)
-  (column req flags (input mode))
-  (column clip string)
+  (input req flags)
   (order label msg)
-  (pivot req clip)]
+  (pivot req clip: string)]
+>label: int, >msg?
 )", "pivot.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -1504,16 +1464,12 @@ TEST(MachineReport, AConditionIsAskedOncePerEvaluationAndItsOwnErrorIsReported)
 	// so asking it again to build the report would see it answer.
 	effects_fixture f(R"(
 [table choose
-  (key mode hash (domain rows))
-  (column when condition)
-  (column v int)
   (order mode)]
+>mode, when, v: int
 [table bits
-  (key mode hash)
-  (column when condition)
-  (column flags flags)
   (pick or flags)
   (order mode)]
+>mode, when, flags: flags
 [machine asker
   (state mode hash (members a) (initial a))
   (state count int (initial 0))]
@@ -1575,13 +1531,12 @@ TEST(FallThroughKey, AColumnDomainFromOneHoldsItsValuesWithoutTheBlank)
 {
 	auto doc = ReadDocument(R"(
 [table a
-  (key msg hash fallthrough)
-  (column v int)
   (order msg)]
+>msg?, v: int
 [table b
-  (key msg hash (domain (from a msg)))
-  (column w int)
-  (order msg)]
+  (order msg)
+  (domain msg a.msg)]
+>msg, w: int
 )", "ab.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
@@ -1607,9 +1562,8 @@ TEST(FallThroughKey, AnOrdinaryKeyMayNotReadAnEarlierClausesFallThroughKey)
 	// mood keys on what the brain's fall-through key answered: the brain
 	// answers 0 from its blank run, which no ordinary key can hold.
 	std::string const tables = Replace(kGrazer, "[machine grazer", R"([table mood
-  (key kind hash (domain rows))
-  (column v int)
   (order kind)]
+>kind, v: int
 [machine grazer)");
 	std::string const reader = Replace(tables, "mode=next,,\nexit,", "mode=next,,\nstep,mood,kind=clause.0.event,,,,\nexit,");
 	std::string const error = RefusalOf(ReadDocument(reader, "machine.tabular"));
@@ -1620,8 +1574,7 @@ TEST(FallThroughKey, AnOrdinaryKeyMayNotReadAnEarlierClausesFallThroughKey)
 
 	// Into a fall-through key the blank is a value it holds: 0 looks up the
 	// blank run itself.
-	std::string const intoFallThrough = Replace(Replace(tables, "(key kind hash (domain rows))",
-		"(key kind hash fallthrough)"), "mode=next,,\nexit,", "mode=next,,\nstep,mood,kind=clause.0.event,,,,\nexit,");
+	std::string const intoFallThrough = Replace(Replace(tables, ">kind, v: int", ">kind?, v: int"), "mode=next,,\nexit,", "mode=next,,\nstep,mood,kind=clause.0.event,,,,\nexit,");
 	EXPECT_EQ(RefusalOf(ReadDocument(intoFallThrough, "machine.tabular")), "(accepted)");
 }
 
@@ -1639,10 +1592,8 @@ TEST(MachineReport, EachScriptedRowAmongManyIsReportedOnce)
 	rows += "41,cornered,141\n41,,41\n";
 	effects_fixture f(R"(
 [table tally
-  (key level int (domain rows))
-  (column when condition)
-  (column next int)
   (order level)]
+>level: int, when, next: int
 [machine levels
   (state mode hash (members a) (initial a))
   (state count int (initial 0))
@@ -1677,10 +1628,8 @@ TEST(MachineReport, ANoRunOnAFallThroughKeyNamesTheValueNotTheBlank)
 {
 	effects_fixture f(R"(
 [table poke
-  (key level int (domain rows))
-  (key msg hash fallthrough)
-  (column next int)
   (order level msg)]
+>level: int, >msg?, next: int
 [machine poker
   (state mode hash (members a) (initial a))
   (state count int (initial 0))
