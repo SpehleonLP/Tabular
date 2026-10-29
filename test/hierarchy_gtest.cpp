@@ -5,7 +5,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <cstdint>
@@ -98,8 +98,8 @@ struct machine_fixture
 	counted_ptr<Binding const> binding;
 	std::string                refusal;   // Prepare's, when it refused
 
-	machine_fixture(std::string_view yaml, std::vector<std::string_view> const& rows)
-		: document(Parse(yaml)), store(std::move(document.tables))
+	machine_fixture(std::string_view source, std::vector<std::string_view> const& rows)
+		: document(Parse(source)), store(std::move(document.tables))
 	{
 		if (document.machines().empty())
 		{
@@ -126,9 +126,9 @@ struct machine_fixture
 		}
 	}
 
-	static schema_document Parse(std::string_view yaml)
+	static schema_document Parse(std::string_view source)
 	{
-		auto doc = DocumentFromYaml(yaml, "machine.yaml");
+		auto doc = ReadDocument(source, "machine.tabular");
 		EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 		return doc ? std::move(*doc) : schema_document{};
 	}
@@ -172,70 +172,39 @@ std::string Replace(std::string_view text, std::string_view from, std::string_vi
 // The craft bench's two state columns: a page and a modal on it. Each has its
 // own entry and exit table, keyed on its own column.
 constexpr std::string_view kBench = R"(
-tables:
-  - name: bench
-    read_only: true
-    pick: best
-    columns:
-      - {name: page,  type: hash, key: true, domain: rows}
-      - {name: modal, type: hash, key: true, domain: rows}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: next_page,  type: hash}
-      - {name: next_modal, type: hash}
-    order_by: {columns: [page, modal, kind]}
-  - name: page_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: page, type: hash, key: true, domain: rows}
-    order_by: {columns: [page]}
-    suffix: command
-  - name: page_leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: page, type: hash, key: true, domain: rows}
-    order_by: {columns: [page]}
-    suffix: command
-  - name: modal_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: modal, type: hash, key: true, domain: rows}
-    order_by: {columns: [modal]}
-    suffix: command
-  - name: modal_leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: modal, type: hash, key: true, domain: rows}
-    order_by: {columns: [modal]}
-    suffix: command
-machines:
-  - name: craft_bench
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: page,  type: hash, members: [experiment, recipes], initial: experiment}
-      - {name: modal, type: hash, members: [none, confirm, result], initial: none}
-    step:
-      - from:  bench
-        where: {page: state.page, modal: state.modal, kind: input.kind}
-        set:   {page: next_page, modal: next_modal}
-    exit:
-      - from:  page_leave
-        where: {page: state.page}
-        emit:  command
-      - from:  modal_leave
-        where: {modal: state.modal}
-        emit:  command
-    entry:
-      - from:  page_enter
-        where: {page: state.page}
-        emit:  command
-      - from:  modal_enter
-        where: {modal: state.modal}
-        emit:  command
+[table bench
+  (key page hash (domain rows))
+  (key modal hash (domain rows))
+  (key kind hash fallthrough)
+  (column next_page hash)
+  (column next_modal hash)
+  (order page modal kind)]
+[table page_enter
+  (key page hash (domain rows))
+  (order page)
+  (suffix command)]
+[table page_leave
+  (key page hash (domain rows))
+  (order page)
+  (suffix command)]
+[table modal_enter
+  (key modal hash (domain rows))
+  (order modal)
+  (suffix command)]
+[table modal_leave
+  (key modal hash (domain rows))
+  (order modal)
+  (suffix command)]
+[machine craft_bench
+  (state page hash (members experiment recipes) (initial experiment))
+  (state modal hash (members none confirm result) (initial none))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+entry,page_enter,page=state.page,,,command,
+entry,modal_enter,modal=state.modal,,,command,
+step,bench,page=state.page modal=state.modal kind=input.kind,,page=next_page modal=next_modal,,
+exit,page_leave,page=state.page,,,command,
+exit,modal_leave,modal=state.modal,,,command,
 )";
 
 constexpr std::string_view kBenchRows = R"(page,       modal,   kind,    next_page,  next_modal
@@ -289,23 +258,9 @@ TEST(EntryPerColumn, AClauseKeyedOnNoStateColumnRunsOnAnyChange)
 {
 	// A third entry clause keys on no state column (a constant table): it runs
 	// whenever any hash column changed, as every clause did before Part 4.
-	std::string const yaml = Replace(Replace(kBench, "machines:\n", R"(  - name: chime
-    read_only: true
-    pick: best
-    columns:
-      - {name: v, type: int}
-    suffix: command
-machines:
-)"), R"(      - from:  modal_enter
-        where: {modal: state.modal}
-        emit:  command
-)", R"(      - from:  modal_enter
-        where: {modal: state.modal}
-        emit:  command
-      - from:  chime
-        emit:  command
-)");
-	machine_fixture f(yaml, {kBenchRows, kPageEnterRows, kPageLeaveRows, kModalEnterRows, kModalLeaveRows,
+	std::string const source = Replace(Replace(kBench, "[machine craft_bench", "[table chime (column v int) (suffix command)]\n[machine craft_bench"),
+		"entry,modal_enter,modal=state.modal,,,command,\n", "entry,modal_enter,modal=state.modal,,,command,\nentry,chime,,,,command,\n");
+	machine_fixture f(source, {kBenchRows, kPageEnterRows, kPageLeaveRows, kModalEnterRows, kModalLeaveRows,
 		"v,command\n1,chime\n"});
 	ASSERT_TRUE(f.binding) << f.refusal;
 	host_object host;
@@ -319,41 +274,12 @@ TEST(EntryPerColumn, ClausesThatReadOneAnotherRunAsOne)
 	// The modal's entry reads what the page's entry answered: they run on the
 	// union of their columns, so a modal-only change runs the page's entry too
 	// rather than leaving its reader without a source.
-	std::string const yaml = Replace(Replace(kBench, R"(  - name: modal_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: modal, type: hash, key: true, domain: rows}
-    order_by: {columns: [modal]}
-    suffix: command)", R"(  - name: modal_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: modal, type: hash, key: true, domain: rows}
-      - {name: page,  type: int, key: true, domain: rows}
-    order_by: {columns: [modal, page]}
-    suffix: command
-  - name: page_code
-    read_only: true
-    pick: best
-    columns:
-      - {name: page, type: hash, key: true, domain: rows}
-      - {name: code, type: int}
-    order_by: {columns: [page]})"), R"(    entry:
-      - from:  page_enter
-        where: {page: state.page}
-        emit:  command
-      - from:  modal_enter
-        where: {modal: state.modal}
-        emit:  command
-)", R"(    entry:
-      - from:  page_code
-        where: {page: state.page}
-      - from:  modal_enter
-        where: {modal: state.modal, page: clause.0.code}
-        emit:  command
-)");
-	machine_fixture f(yaml, {kBenchRows, kPageEnterRows, kPageLeaveRows,
+	std::string const source = Replace(Replace(kBench, "[table modal_enter\n  (key modal hash (domain rows))\n  (order modal)\n  (suffix command)]\n",
+		"[table modal_enter\n  (key modal hash (domain rows))\n  (key page int (domain rows))\n  (order modal page)\n  (suffix command)]\n"
+		"[table page_code\n  (key page hash (domain rows))\n  (column code int)\n  (order page)]\n"),
+		"entry,page_enter,page=state.page,,,command,\nentry,modal_enter,modal=state.modal,,,command,\n",
+		"entry,page_code,page=state.page,,,,\nentry,modal_enter,modal=state.modal page=clause.0.code,,,command,\n");
+	machine_fixture f(source, {kBenchRows, kPageEnterRows, kPageLeaveRows,
 		"modal,page,command\nnone,1,()\nnone,2,()\nconfirm,1,show-modal confirm on 1\nconfirm,2,()\nresult,1,()\nresult,2,()\n",
 		"page,code\nexperiment,1\nrecipes,2\n", kModalLeaveRows});
 	ASSERT_TRUE(f.binding) << f.refusal;
@@ -372,49 +298,29 @@ namespace
 // through first (it is listed before kind). A walk that is hit has no run of
 // its own and answers from the superstate's row; a run overrides it.
 constexpr std::string_view kHfsm = R"(
-tables:
-  - name: behaviour
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-      - {name: sub,   type: hash, key: true, fallthrough: true}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: next_super, type: hash}
-      - {name: next_sub,   type: hash}
-    order_by: {columns: [super, sub, kind]}
-  - name: super_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-    order_by: {columns: [super]}
-    suffix: command
-  - name: sub_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: sub, type: hash, key: true, domain: rows}
-    order_by: {columns: [sub]}
-    suffix: command
-machines:
-  - name: creature
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: super, type: hash, members: [move, rest], initial: move}
-      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}
-    step:
-      - from:  behaviour
-        where: {super: state.super, sub: state.sub, kind: input.kind}
-        set:   {super: next_super, sub: next_sub}
-    entry:
-      - from:  super_enter
-        where: {super: state.super}
-        emit:  command
-      - from:  sub_enter
-        where: {sub: state.sub}
-        emit:  command
+[table behaviour
+  (key super hash (domain rows))
+  (key sub hash fallthrough)
+  (key kind hash fallthrough)
+  (column next_super hash)
+  (column next_sub hash)
+  (order super sub kind)]
+[table super_enter
+  (key super hash (domain rows))
+  (order super)
+  (suffix command)]
+[table sub_enter
+  (key sub hash (domain rows))
+  (order sub)
+  (suffix command)]
+[machine creature
+  (state super hash (members move rest) (initial move))
+  (state sub hash (members walk run sit sleep) (initial walk))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+entry,super_enter,super=state.super,,,command,
+entry,sub_enter,sub=state.sub,,,command,
+step,behaviour,super=state.super sub=state.sub kind=input.kind,,super=next_super sub=next_sub,,
 )";
 
 constexpr std::string_view kBehaviourRows = R"(super, sub,   kind,   next_super, next_sub
@@ -497,15 +403,11 @@ namespace
 
 // Two fall-through keys, a then b: a is the lowest bit, so it gives way first.
 constexpr std::string_view kTwo = R"(
-tables:
-  - name: two
-    read_only: true
-    pick: best
-    columns:
-      - {name: a, type: hash, key: true, fallthrough: true}
-      - {name: b, type: hash, key: true, fallthrough: true}
-      - {name: said, type: hash}
-    order_by: {columns: [a, b]}
+[table two
+  (key a hash fallthrough)
+  (key b hash fallthrough)
+  (column said hash)
+  (order a b)]
 )";
 
 constexpr std::string_view kTwoRows = R"(a, b, said
@@ -519,7 +421,7 @@ x, y, both
 
 TEST(Hierarchy, TwoFallThroughKeysGiveWayInKeyOrderTheFirstAsTheLowestBit)
 {
-	auto s = SchemaFromYaml(kTwo, "two.yaml");
+	auto s = ReadSchema(kTwo, "two.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	relation_store store(std::move(*s));
 	ASSERT_EQ(RefusalOf(LoadCsv(store, csv_rows{0, 1, kTwoRows, "two.csv"})), "(accepted)");
@@ -539,7 +441,7 @@ TEST(Hierarchy, TwoFallThroughKeysGiveWayInKeyOrderTheFirstAsTheLowestBit)
 
 TEST(Hierarchy, ALoadDemandsTheRunWithEveryFallThroughKeyBlank)
 {
-	auto s = SchemaFromYaml(kTwo, "two.yaml");
+	auto s = ReadSchema(kTwo, "two.tabular");
 	ASSERT_TRUE(s.has_value()) << RefusalOf(s);
 	relation_store store(std::move(*s));
 	std::string const refused = RefusalOf(LoadCsv(store, csv_rows{0, 1, "a,b,said\n,y,b-held\nx,,a-held\n", "two.csv"}));
@@ -557,50 +459,29 @@ namespace
 // clause overrides the first's.
 // Clause 2 reads the base clause's next, which is the coalesced answer.
 constexpr std::string_view kModded = R"(
-tables:
-  - name: brain
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode,  type: hash, key: true, domain: rows}
-      - {name: next,  type: hash}
-      - {name: steps, type: int}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: brain_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: label
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: code, type: int}
-    order_by: {columns: [mode]}
-machines:
-  - name: grazer
-    state:
-      - {name: mode,  type: hash, members: [idle, walk, sleep], initial: idle}
-      - {name: steps, type: int, initial: 0}
-      - {name: code,  type: int, initial: 0}
-    step:
-      - from:  brain
-        where: {mode: state.mode}
-        set:   {mode: next, steps: steps}
-        emit:  command
-      - from:  brain_mod
-        overrides: 0
-        where: {mode: state.mode}
-        set:   {mode: next}
-        emit:  command
-      - from:  label
-        where: {mode: clause.0.next}
-        set:   {code: code}
+[table brain
+  (key mode hash (domain rows))
+  (column next hash)
+  (column steps int)
+  (order mode)
+  (suffix command)]
+[table brain_mod
+  (key mode hash (domain rows))
+  (column next hash)
+  (order mode)
+  (suffix command)]
+[table label
+  (key mode hash (domain rows))
+  (column code int)
+  (order mode)]
+[machine grazer
+  (state mode hash (members idle walk sleep) (initial idle))
+  (state steps int (initial 0))
+  (state code int (initial 0))]
+list,from,where,given,set,emit,overrides
+step,brain,mode=state.mode,,mode=next steps=steps,command,
+step,brain_mod,mode=state.mode,,mode=next,command,0
+step,label,mode=clause.0.next,,code=code,,
 )";
 
 constexpr std::string_view kBaseRows  = "mode,next,steps,command\nidle,walk,1,anim walk\nwalk,idle,2,anim stand\nsleep,idle,3,anim wake\n";
@@ -682,44 +563,26 @@ TEST(OverrideClause, TheOverridesTableNeedNotBeTotalButItsRunsAreProved)
 
 TEST(OverrideClause, ItsShapeIsChecked)
 {
-	auto refusal = [](std::string const& yaml) { return RefusalOf(DocumentFromYaml(yaml, "machine.yaml")); };
-	std::string const notNext = refusal(Replace(kModded, "        overrides: 0\n", "        overrides: 2\n"));
+	auto refusal = [](std::string const& source) { return RefusalOf(ReadDocument(source, "machine.tabular")); };
+	std::string const notNext = refusal(Replace(kModded, "mode=next,command,0\n", "mode=next,command,2\n"));
 	EXPECT_TRUE(Mentions(notNext, "an override names the clause directly before it")) << notNext;
 
-	std::string const gap = refusal(Replace(kModded, "      - from:  brain_mod\n        overrides: 0\n",
-		"      - from:  label\n        where: {mode: state.mode}\n      - from:  brain_mod\n        overrides: 0\n"));
+	std::string const gap = refusal(Replace(kModded, "step,brain_mod,", "step,label,mode=state.mode,,,,\nstep,brain_mod,"));
 	EXPECT_TRUE(Mentions(gap, "which does not directly precede it")) << gap;
 
-	std::string const wider = refusal(Replace(Replace(kModded, R"(      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: label)", R"(      - {name: next, type: hash}
-      - {name: code, type: int}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: label)"), "        set:   {mode: next}\n        emit:  command\n      - from:  label",
-		"        set:   {mode: next, code: code}\n        emit:  command\n      - from:  label"));
+	std::string const wider = refusal(Replace(Replace(kModded, "  (column next hash)\n  (order mode)\n  (suffix command)]\n[table label",
+		"  (column next hash)\n  (column code int)\n  (order mode)\n  (suffix command)]\n[table label"),
+		"step,brain_mod,mode=state.mode,,mode=next,command,0", "step,brain_mod,mode=state.mode,,mode=next code=code,command,0"));
 	EXPECT_TRUE(Mentions(wider, "sets state column 'code', which clause 0 it overrides does not")) << wider;
 
-	std::string const twice = refusal(Replace(kModded, R"(        set:   {mode: next}
-        emit:  command
-      - from:  label)", R"(        set:   {mode: next}
-        emit:  command
-      - from:  brain_mod
-        overrides: 1
-        where: {mode: state.mode}
-        set:   {mode: next}
-      - from:  label)"));
+	std::string const twice = refusal(Replace(kModded, "mode=next,command,0\n",
+		"mode=next,command,0\nstep,brain_mod,mode=state.mode,,mode=next,,1\n"));
 	EXPECT_TRUE(Mentions(twice, "which is itself an override")) << twice;
 
-	std::string const emits = refusal(Replace(kModded, R"(        set:   {mode: next, steps: steps}
-        emit:  command
-)", R"(        set:   {mode: next, steps: steps}
-)"));
+	std::string const emits = refusal(Replace(kModded, "mode=next steps=steps,command,", "mode=next steps=steps,,"));
 	EXPECT_TRUE(Mentions(emits, "the clause emits, and clause 0 it overrides does not")) << emits;
 
-	std::string const direct = refusal(Replace(kModded, "        where: {mode: clause.0.next}\n",
-		"        where: {mode: clause.1.next}\n"));
+	std::string const direct = refusal(Replace(kModded, "mode=clause.0.next", "mode=clause.1.next"));
 	EXPECT_TRUE(Mentions(direct, "reads clause 1, which overrides clause 0; read clause 0")) << direct;
 }
 
@@ -728,11 +591,9 @@ TEST(OverrideClause, ItNamesAClauseThatAlwaysAnswers)
 	// A base keyed on a machine input closes nothing: a value outside its
 	// domain would hold it for want of a run, and the override would have
 	// nothing to coalesce onto.
-	std::string const yaml = Replace(Replace(kModded, "    state:\n", "    inputs:\n      - {name: kind, type: hash}\n    state:\n"),
-		R"(      - from:  brain
-        where: {mode: state.mode})", R"(      - from:  brain
-        where: {mode: input.kind})");
-	std::string const refused = RefusalOf(DocumentFromYaml(yaml, "machine.yaml"));
+	std::string const source = Replace(Replace(kModded, "(state code int (initial 0))]", "(state code int (initial 0))\n  (input kind hash)]"),
+		"step,brain,mode=state.mode,", "step,brain,mode=input.kind,");
+	std::string const refused = RefusalOf(ReadDocument(source, "machine.tabular"));
 	EXPECT_TRUE(Mentions(refused, "machine 'grazer' step clause 1 (table 'brain_mod')")) << refused;
 	EXPECT_TRUE(Mentions(refused, "whose key 'mode' of table 'brain' is read from a source that closes nothing")) << refused;
 }
@@ -750,30 +611,20 @@ namespace
 // (super, _, _), so a superstate's row for the event beats a substate's
 // row for no event.
 constexpr std::string_view kOneTable = R"(
-tables:
-  - name: rules
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-      - {name: sub,   type: hash, key: true, fallthrough: true}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: next_super, type: hash}
-      - {name: next_sub,   type: hash}
-    order_by: {columns: [super, sub, kind]}
-    suffix: command
-machines:
-  - name: creature
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: super, type: hash, members: [move, rest], initial: move}
-      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}
-    step:
-      - from:  rules
-        where: {super: state.super, kind: input.kind, sub: state.sub}
-        set:   {super: next_super, sub: next_sub}
-        emit:  command
+[table rules
+  (key super hash (domain rows))
+  (key sub hash fallthrough)
+  (key kind hash fallthrough)
+  (column next_super hash)
+  (column next_sub hash)
+  (order super sub kind)
+  (suffix command)]
+[machine creature
+  (state super hash (members move rest) (initial move))
+  (state sub hash (members walk run sit sleep) (initial walk))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+step,rules,super=state.super kind=input.kind sub=state.sub,,super=next_super sub=next_sub,command,
 )";
 
 constexpr std::string_view kOneTableRows = R"(super, kind, sub,   next_super, next_sub, command
@@ -789,45 +640,28 @@ rest,  ,     sleep, rest,       sleep,    (snore)
 )";
 
 constexpr std::string_view kTwoTables = R"(
-tables:
-  - name: super_rules
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: next_super, type: hash}
-      - {name: next_sub,   type: hash}
-    order_by: {columns: [super, kind]}
-    suffix: command
-  - name: sub_rules
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: sub,   type: hash, key: true, domain: rows}
-      - {name: next_super, type: hash}
-      - {name: next_sub,   type: hash}
-    order_by: {columns: [super, kind, sub]}
-    suffix: command
-machines:
-  - name: creature
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: super, type: hash, members: [move, rest], initial: move}
-      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}
-    step:
-      - from:  super_rules
-        where: {super: state.super, kind: input.kind}
-        set:   {super: next_super, sub: next_sub}
-        emit:  command
-      - from:  sub_rules
-        overrides: 0
-        where: {super: state.super, kind: input.kind, sub: state.sub}
-        set:   {super: next_super, sub: next_sub}
-        emit:  command
+[table super_rules
+  (key super hash (domain rows))
+  (key kind hash fallthrough)
+  (column next_super hash)
+  (column next_sub hash)
+  (order super kind)
+  (suffix command)]
+[table sub_rules
+  (key super hash (domain rows))
+  (key kind hash fallthrough)
+  (key sub hash (domain rows))
+  (column next_super hash)
+  (column next_sub hash)
+  (order super kind sub)
+  (suffix command)]
+[machine creature
+  (state super hash (members move rest) (initial move))
+  (state sub hash (members walk run sit sleep) (initial walk))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+step,super_rules,super=state.super kind=input.kind,,super=next_super sub=next_sub,command,
+step,sub_rules,super=state.super kind=input.kind sub=state.sub,,super=next_super sub=next_sub,command,0
 )";
 
 constexpr std::string_view kSuperRows = R"(super, kind, next_super, next_sub, command
@@ -949,51 +783,28 @@ namespace
 // Entry and exit tables for the superstate and the substate, appended to both
 // forms of kOneTable / kTwoTables so a mode change's leaving and entering are
 // compared too.
-constexpr std::string_view kEntryExitTables = R"(  - name: super_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-    order_by: {columns: [super]}
-    suffix: command
-  - name: sub_enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: sub, type: hash, key: true, domain: rows}
-    order_by: {columns: [sub]}
-    suffix: command
-  - name: super_leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: super, type: hash, key: true, domain: rows}
-    order_by: {columns: [super]}
-    suffix: command
-  - name: sub_leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: sub, type: hash, key: true, domain: rows}
-    order_by: {columns: [sub]}
-    suffix: command
-machines:
+constexpr std::string_view kEntryExitTables = R"([table super_enter
+  (key super hash (domain rows))
+  (order super)
+  (suffix command)]
+[table sub_enter
+  (key sub hash (domain rows))
+  (order sub)
+  (suffix command)]
+[table super_leave
+  (key super hash (domain rows))
+  (order super)
+  (suffix command)]
+[table sub_leave
+  (key sub hash (domain rows))
+  (order sub)
+  (suffix command)]
 )";
 
-constexpr std::string_view kEntryExitLists = R"(    exit:
-      - from:  super_leave
-        where: {super: state.super}
-        emit:  command
-      - from:  sub_leave
-        where: {sub: state.sub}
-        emit:  command
-    entry:
-      - from:  super_enter
-        where: {super: state.super}
-        emit:  command
-      - from:  sub_enter
-        where: {sub: state.sub}
-        emit:  command
+constexpr std::string_view kEntryExitLists = R"(exit,super_leave,super=state.super,,,command,
+exit,sub_leave,sub=state.sub,,,command,
+entry,super_enter,super=state.super,,,command,
+entry,sub_enter,sub=state.sub,,,command,
 )";
 
 constexpr std::string_view kSuperEnter = "super,command\nmove,enter-move\nrest,enter-rest\n";
@@ -1001,9 +812,9 @@ constexpr std::string_view kSubEnter   = "sub,command\nwalk,enter-walk\nrun,ente
 constexpr std::string_view kSuperLeave = "super,command\nmove,leave-move\nrest,leave-rest\n";
 constexpr std::string_view kSubLeave   = "sub,command\nwalk,leave-walk\nrun,leave-run\nsit,leave-sit\nsleep,leave-sleep\n";
 
-std::string WithEntryAndExit(std::string_view yaml)
+std::string WithEntryAndExit(std::string_view source)
 {
-	return Replace(yaml, "machines:\n", kEntryExitTables) + std::string(kEntryExitLists);
+	return Replace(source, "[machine creature", std::string(kEntryExitTables) + "[machine creature") + std::string(kEntryExitLists);
 }
 
 }
@@ -1046,50 +857,29 @@ namespace
 // command. The override keys on pose as well as mode, so the two run as one
 // group on both columns.
 constexpr std::string_view kCrouch = R"(
-tables:
-  - name: brain
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: kind, type: hash, key: true, fallthrough: true}
-      - {name: next_mode, type: hash}
-      - {name: next_pose, type: hash}
-    order_by: {columns: [mode, kind]}
-  - name: leave
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: leave_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: pose, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode, pose]}
-    suffix: command
-machines:
-  - name: walker
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: mode, type: hash, members: [idle, walk], initial: idle}
-      - {name: pose, type: hash, members: [up, down], initial: up}
-    step:
-      - from:  brain
-        where: {mode: state.mode, kind: input.kind}
-        set:   {mode: next_mode, pose: next_pose}
-    exit:
-      - from:  leave
-        where: {mode: state.mode}
-        emit:  command
-      - from:  leave_mod
-        overrides: 0
-        where: {mode: state.mode, pose: state.pose}
-        emit:  command
+[table brain
+  (key mode hash (domain rows))
+  (key kind hash fallthrough)
+  (column next_mode hash)
+  (column next_pose hash)
+  (order mode kind)]
+[table leave
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
+[table leave_mod
+  (key mode hash (domain rows))
+  (key pose hash (domain rows))
+  (order mode pose)
+  (suffix command)]
+[machine walker
+  (state mode hash (members idle walk) (initial idle))
+  (state pose hash (members up down) (initial up))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+step,brain,mode=state.mode kind=input.kind,,mode=next_mode pose=next_pose,,
+exit,leave,mode=state.mode,,,command,
+exit,leave_mod,mode=state.mode pose=state.pose,,,command,0
 )";
 
 constexpr std::string_view kCrouchRows = R"(mode, kind, next_mode, next_pose
@@ -1154,19 +944,9 @@ TEST(OverrideClause, AnOverrideThatFailsIsReportedAndItsBasesAnswerStands)
 {
 	// The mod's first row is a script condition, the second its fallback: the
 	// override answers either way, unless the script raises.
-	std::string const yaml = Replace(kModded, R"(  - name: brain_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-)", R"(  - name: brain_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-      - {name: when, type: condition}
-)");
-	machine_fixture f(yaml, {kBaseRows, "mode,when,next,command\nidle,mod_on,sleep,anim yawn\nidle,,walk,anim stroll\n",
+	std::string const source = Replace(kModded, "[table brain_mod\n  (key mode hash (domain rows))\n",
+		"[table brain_mod\n  (key mode hash (domain rows))\n  (column when condition)\n");
+	machine_fixture f(source, {kBaseRows, "mode,when,next,command\nidle,mod_on,sleep,anim yawn\nidle,,walk,anim stroll\n",
 		kLabelRows});
 	ASSERT_TRUE(f.binding) << f.refusal;
 	int reports = 0;
@@ -1201,14 +981,10 @@ TEST(OverrideClause, AHitWithNoEmitKeepsTheBasesCommand)
 {
 	// The column-subset rule: an override that sets mode but declares no emit
 	// replaces mode only, so the base's command goes out with the mod's state.
-	std::string const yaml = Replace(Replace(kModded, R"(      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: label)", R"(      - {name: next, type: hash}
-    order_by: {columns: [mode]}
-  - name: label)"), "        set:   {mode: next}\n        emit:  command\n      - from:  label",
-		"        set:   {mode: next}\n      - from:  label");
-	machine_fixture f(yaml, {kBaseRows, "mode,next\nidle,sleep\n", kLabelRows});
+	std::string const source = Replace(Replace(kModded, "  (column next hash)\n  (order mode)\n  (suffix command)]\n[table label",
+		"  (column next hash)\n  (order mode)]\n[table label"),
+		"mode=next,command,0", "mode=next,,0");
+	machine_fixture f(source, {kBaseRows, "mode,next\nidle,sleep\n", kLabelRows});
 	ASSERT_TRUE(f.binding) << f.refusal;
 	host_object host;
 	instance grazer = CreateInstance(*f.binding, 1, 1, &host);
@@ -1223,27 +999,13 @@ TEST(OverrideClause, AnOverridesOwnFallThroughFeedsTheCoalescedAnswer)
 {
 	// kTwoTables' override falls through on kind; a reader of clause 0's
 	// next_sub reads what the override answered, retry included.
-	std::string const yaml = Replace(Replace(Replace(std::string(kTwoTables), "machines:\n", R"(  - name: sub_code
-    read_only: true
-    pick: best
-    columns:
-      - {name: sub,  type: hash, key: true, domain: rows}
-      - {name: code, type: int}
-    order_by: {columns: [sub]}
-machines:
-)"), "      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}\n",
-		"      - {name: sub,   type: hash, members: [walk, run, sit, sleep], initial: walk}\n"
-		"      - {name: code,  type: int, initial: 0}\n"), R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
-        set:   {super: next_super, sub: next_sub}
-        emit:  command
-)", R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
-        set:   {super: next_super, sub: next_sub}
-        emit:  command
-      - from:  sub_code
-        where: {sub: clause.0.next_sub}
-        set:   {code: code}
-)");
-	machine_fixture f(yaml, {kSuperRows, kSubRows, "sub,code\nwalk,1\nrun,2\nsit,3\nsleep,4\n"});
+	std::string const source = Replace(Replace(Replace(std::string(kTwoTables), "[machine creature",
+		"[table sub_code\n  (key sub hash (domain rows))\n  (column code int)\n  (order sub)]\n[machine creature"),
+		"(state sub hash (members walk run sit sleep) (initial walk))",
+		"(state sub hash (members walk run sit sleep) (initial walk))\n  (state code int (initial 0))"),
+		"sub=state.sub,,super=next_super sub=next_sub,command,0\n",
+		"sub=state.sub,,super=next_super sub=next_sub,command,0\nstep,sub_code,sub=clause.0.next_sub,,code=code,,\n");
+	machine_fixture f(source, {kSuperRows, kSubRows, "sub,code\nwalk,1\nrun,2\nsit,3\nsleep,4\n"});
 	ASSERT_TRUE(f.binding) << f.refusal;
 	host_object host;
 	instance creature = CreateInstance(*f.binding, 1, 1, &host);
@@ -1263,17 +1025,17 @@ TEST(Hierarchy, ANinthFallThroughKeyIsRefused)
 {
 	auto table = [](int keys)
 	{
-		std::string yaml = "tables:\n  - name: wide\n    read_only: true\n    pick: best\n    columns:\n";
+		std::string source = "[table wide\n";
 		std::string order;
 		for (int k = 1; k <= keys; ++k)
 		{
-			yaml += "      - {name: k" + std::to_string(k) + ", type: hash, key: true, fallthrough: true}\n";
-			order += (k == 1 ? "" : ", ") + std::string("k") + std::to_string(k);
+			source += "  (key k" + std::to_string(k) + " hash fallthrough)\n";
+			order += (k == 1 ? "" : " ") + std::string("k") + std::to_string(k);
 		}
-		return yaml + "      - {name: said, type: int}\n    order_by: {columns: [" + order + "]}\n";
+		return source + "  (column said int)\n  (order " + order + ")]\n";
 	};
-	EXPECT_TRUE(SchemaFromYaml(table(8), "wide.yaml").has_value()) << RefusalOf(SchemaFromYaml(table(8), "wide.yaml"));
-	std::string const refused = RefusalOf(SchemaFromYaml(table(9), "wide.yaml"));
+	EXPECT_TRUE(ReadSchema(table(8), "wide.tabular").has_value()) << RefusalOf(ReadSchema(table(8), "wide.tabular"));
+	std::string const refused = RefusalOf(ReadSchema(table(9), "wide.tabular"));
 	EXPECT_TRUE(Mentions(refused, "is fall-through key 9")) << refused;
 	EXPECT_TRUE(Mentions(refused, "at most 8")) << refused;
 }
@@ -1284,18 +1046,9 @@ TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
 	// checks it is total over its declared domain. A mod naming only idle
 	// over members [idle, walk, sleep] is refused at load, so a partial
 	// override declares domain: rows (its domain is the keys it has).
-	std::string const yaml = Replace(kModded, R"(  - name: brain_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-)", R"(  - name: brain_mod
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: {members: [idle, walk, sleep]}}
-)");
-	auto doc = DocumentFromYaml(yaml, "machine.yaml");
+	std::string const source = Replace(kModded, "[table brain_mod\n  (key mode hash (domain rows))",
+		"[table brain_mod\n  (key mode hash (domain (members idle walk sleep)))");
+	auto doc = ReadDocument(source, "machine.tabular");
 	ASSERT_TRUE(doc.has_value()) << RefusalOf(doc);
 	relation_store store(std::move(doc->tables));
 	std::string const refused = RefusalOf(LoadCsv(store, csv_rows{1, 1, kModRows, "mod.csv"}));
@@ -1309,10 +1062,9 @@ TEST(OverrideClause, ANonTotalOverrideTableNeedsARowsDomain)
 // fall-through keys, read from the same source.
 TEST(OverrideClause, ItFallsThroughOnItsBasesFallThroughKeys)
 {
-	std::string const keyed = Replace(kTwoTables, R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: sub,   type: hash, key: true, domain: rows})", R"(      - {name: kind,  type: hash, key: true, domain: rows}
-      - {name: sub,   type: hash, key: true, domain: rows})");
-	std::string const refused = RefusalOf(DocumentFromYaml(keyed, "machine.yaml"));
+	std::string const keyed = Replace(kTwoTables, "(key kind hash fallthrough)\n  (key sub hash (domain rows))",
+		"(key kind hash (domain rows))\n  (key sub hash (domain rows))");
+	std::string const refused = RefusalOf(ReadDocument(keyed, "machine.tabular"));
 	EXPECT_TRUE(Mentions(refused, "machine 'creature' step clause 1 (table 'sub_rules')")) << refused;
 	EXPECT_TRUE(Mentions(refused, "whose fall-through key 'kind' of table 'super_rules' it does not fall through on")) << refused;
 }
@@ -1325,9 +1077,8 @@ namespace
 // gives way first, inside each level of the base's kind.
 std::string WithFallingSub()
 {
-	return Replace(kTwoTables, R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: sub,   type: hash, key: true, domain: rows})", R"(      - {name: kind,  type: hash, key: true, fallthrough: true}
-      - {name: sub,   type: hash, key: true, fallthrough: true})");
+	return Replace(kTwoTables, "(key kind hash fallthrough)\n  (key sub hash (domain rows))",
+		"(key kind hash fallthrough)\n  (key sub hash fallthrough)");
 }
 
 // The override's catch-all for each superstate, a row for wake with any
@@ -1366,10 +1117,9 @@ TEST(OverrideClause, ItsOwnFallThroughKeysGiveWayFirstInsideEachLevel)
 // fall-through keys read state.sub, so none reads the base's input.kind.
 TEST(OverrideClause, ItsTwinKeyReadsTheSameSourceAsTheBasesKey)
 {
-	std::string const crossed = Replace(WithFallingSub(), R"(        where: {super: state.super, kind: input.kind, sub: state.sub}
-        set:   {super: next_super, sub: next_sub})", R"(        where: {super: state.super, kind: state.sub, sub: state.sub}
-        set:   {super: next_super, sub: next_sub})");
-	std::string const refused = RefusalOf(DocumentFromYaml(crossed, "machine.yaml"));
+	std::string const crossed = Replace(WithFallingSub(), "super=state.super kind=input.kind sub=state.sub,,super=next_super sub=next_sub,command,0",
+		"super=state.super kind=state.sub sub=state.sub,,super=next_super sub=next_sub,command,0");
+	std::string const refused = RefusalOf(ReadDocument(crossed, "machine.tabular"));
 	EXPECT_TRUE(Mentions(refused, "whose fall-through key 'kind' of table 'super_rules' it does not fall through on")) << refused;
 }
 
@@ -1378,41 +1128,26 @@ TEST(OverrideClause, ItsTwinKeyReadsTheSameSourceAsTheBasesKey)
 // its own key order.
 TEST(OverrideClause, ItsLevelsFollowTheBasesOrderOfFallThroughKeys)
 {
-	constexpr std::string_view yaml = R"(
-tables:
-  - name: base
-    read_only: true
-    pick: best
-    columns:
-      - {name: x,    type: hash, key: true, fallthrough: true}
-      - {name: y,    type: hash, key: true, fallthrough: true}
-      - {name: next, type: hash}
-    order_by: {columns: [x, y]}
-  - name: over
-    read_only: true
-    pick: best
-    columns:
-      - {name: y,    type: hash, key: true, fallthrough: true}
-      - {name: x,    type: hash, key: true, fallthrough: true}
-      - {name: next, type: hash}
-    order_by: {columns: [y, x]}
-machines:
-  - name: twins
-    inputs:
-      - {name: kind, type: hash}
-    state:
-      - {name: mood, type: hash, members: [p, calm], initial: p}
-      - {name: last, type: hash, members: [base0, basep, baseq, over0, overq], initial: base0}
-    step:
-      - from:  base
-        where: {x: state.mood, y: input.kind}
-        set:   {last: next}
-      - from:  over
-        overrides: 0
-        where: {x: state.mood, y: input.kind}
-        set:   {last: next}
+	constexpr std::string_view source = R"(
+[table base
+  (key x hash fallthrough)
+  (key y hash fallthrough)
+  (column next hash)
+  (order x y)]
+[table over
+  (key y hash fallthrough)
+  (key x hash fallthrough)
+  (column next hash)
+  (order y x)]
+[machine twins
+  (state mood hash (members p calm) (initial p))
+  (state last hash (members base0 basep baseq over0 overq) (initial base0))
+  (input kind hash)]
+list,from,where,given,set,emit,overrides
+step,base,x=state.mood y=input.kind,,last=next,,
+step,over,x=state.mood y=input.kind,,last=next,,0
 )";
-	machine_fixture f(yaml, {"x, y, next\n , , base0\np, , basep\n , q, baseq\n", "y, x, next\n , , over0\nq, , overq\n"});
+	machine_fixture f(source, {"x, y, next\n , , base0\np, , basep\n , q, baseq\n", "y, x, next\n , , over0\nq, , overq\n"});
 	ASSERT_TRUE(f.binding) << f.refusal;
 	host_object host;
 	instance subject = CreateInstance(*f.binding, 1, 1, &host);

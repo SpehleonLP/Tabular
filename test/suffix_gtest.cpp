@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <string>
@@ -25,19 +25,15 @@ int64_t Hash(std::string_view name)
 
 // An entry table: the state keys the row, and the cells after it are its command.
 constexpr std::string_view kSchema = R"(
-tables:
-  - name: enter
-    read_only: true
-    pick: best
-    columns:
-      - {name: mode, type: hash, key: true, domain: rows}
-    order_by: {columns: [mode]}
-    suffix: command
+[table enter
+  (key mode hash (domain rows))
+  (order mode)
+  (suffix command)]
 )";
 
 relation_store Store()
 {
-	auto s = SchemaFromYaml(kSchema, "suffix.yaml");
+	auto s = ReadSchema(kSchema, "suffix.tabular");
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }
@@ -220,17 +216,15 @@ TEST(SuffixCsv, AHashInsideTheSuffixIsTextAndOnlyALineStartingWithOneIsAComment)
 TEST(SuffixCsv, ABridgeRowIsOneListOfStepsAndMessages)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: bridge
-    read_only: true
-    columns:
-      - {name: from,  type: hash}
-      - {name: phase, type: hash}
-      - {name: mode,  type: hash}
-      - {name: to,    type: hash}
-    suffix: steps
+[table bridge
+  (column from hash)
+  (column phase hash)
+  (column mode hash)
+  (column to hash)
+  (pick none)
+  (suffix steps)]
 )";
-	auto s = SchemaFromYaml(schema, "bridge.yaml");
+	auto s = ReadSchema(schema, "bridge.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1,
@@ -298,15 +292,13 @@ TEST(SuffixCsv, AHeaderNamingAnExtraColumnIsRefused)
 TEST(SuffixCsv, TheSuffixFollowsSeveralDeclaredColumnsInHeaderOrder)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: moves
-    read_only: true
-    columns:
-      - {name: id, type: int}
-      - {name: speed, type: double}
-    suffix: steps
+[table moves
+  (column id int)
+  (column speed double)
+  (pick none)
+  (suffix steps)]
 )";
-	auto s = SchemaFromYaml(schema, "moves.yaml");
+	auto s = ReadSchema(schema, "moves.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "speed, id, steps\n1.5, 7, (go, fast), (stop)\n", "moves.csv"});
@@ -319,7 +311,7 @@ tables:
 
 TEST(SuffixSchema, TheSuffixIsOneMoreCommandColumnAfterTheDeclaredOnes)
 {
-	auto s = SchemaFromYaml(kSchema, "suffix.yaml");
+	auto s = ReadSchema(kSchema, "suffix.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	table_def const& def = s->tables()[0];
 	ASSERT_EQ(def.columns.size(), 2u);
@@ -342,13 +334,12 @@ TEST(SuffixSchema, TheBuilderTakesTheSameDeclaration)
 TEST(SuffixSchema, ASuffixNamingADeclaredColumnIsRefused)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: clash
-    columns:
-      - {name: command, type: int}
-    suffix: command
+[table clash
+  (column command int)
+  (pick none)
+  (suffix command)]
 )";
-	auto s = SchemaFromYaml(schema, "clash.yaml");
+	auto s = ReadSchema(schema, "clash.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "command")) << s.error().format();
 }
@@ -356,13 +347,12 @@ tables:
 TEST(SuffixSchema, AnEmptySuffixNameIsRefused)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: blank
-    columns:
-      - {name: id, type: int}
-    suffix: ""
+[table blank
+  (column id int)
+  (pick none)
+  (suffix "")]
 )";
-	auto s = SchemaFromYaml(schema, "blank.yaml");
+	auto s = ReadSchema(schema, "blank.tabular");
 	ASSERT_FALSE(s.has_value());
 	EXPECT_TRUE(Mentions(s.error().format(), "suffix")) << s.error().format();
 }
@@ -370,33 +360,23 @@ tables:
 TEST(SuffixSchema, AGridOrAPivotedTableCannotHaveOne)
 {
 	constexpr std::string_view grid = R"(
-tables:
-  - name: array
-    grid:
-      rows: {name: r, type: int}
-      columns: {name: c, type: int}
-      cells: int
-    suffix: command
+[grid array (rows r int) (columns c int) (cells int) (suffix command)]
 )";
-	auto g = SchemaFromYaml(grid, "grid.yaml");
+	auto g = ReadSchema(grid, "grid.tabular");
 	ASSERT_FALSE(g.has_value());
 	EXPECT_TRUE(Mentions(g.error().format(), "suffix")) << g.error().format();
 
 	constexpr std::string_view pivoted = R"(
-tables:
-  - name: lookup
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
-    suffix: command
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip int)
+  (order label)
+  (pivot req clip)
+  (suffix command)]
 )";
-	auto p = SchemaFromYaml(pivoted, "pivot.yaml");
+	auto p = ReadSchema(pivoted, "pivot.tabular");
 	ASSERT_FALSE(p.has_value());
 	EXPECT_TRUE(Mentions(p.error().format(), "suffix")) << p.error().format();
 }
@@ -417,14 +397,12 @@ TEST(SuffixCsv, APivotedLoadIntoASuffixTableIsRefused)
 TEST(SuffixCsv, ADeclaredCommandColumnIsAListOfCommandsToo)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: plain
-    read_only: true
-    columns:
-      - {name: id, type: int}
-      - {name: on_spawn, type: command}
+[table plain
+  (column id int)
+  (column on_spawn command)
+  (pick none)]
 )";
-	auto s = SchemaFromYaml(schema, "plain.yaml");
+	auto s = ReadSchema(schema, "plain.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "id, on_spawn\n1, anim chew\n2, (anim chew)\n3, ()\n4, idle\n",
@@ -447,14 +425,12 @@ tables:
 TEST(SuffixCsv, ATableWithoutASuffixStillTakesACommaAsACellBoundary)
 {
 	constexpr std::string_view schema = R"(
-tables:
-  - name: plain
-    read_only: true
-    columns:
-      - {name: id, type: int}
-      - {name: on_spawn, type: command}
+[table plain
+  (column id int)
+  (column on_spawn command)
+  (pick none)]
 )";
-	auto s = SchemaFromYaml(schema, "plain.yaml");
+	auto s = ReadSchema(schema, "plain.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "id, on_spawn\n1, (a), (b)\n", "plain.csv"});

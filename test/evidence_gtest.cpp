@@ -6,7 +6,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <cmath>
@@ -131,11 +131,11 @@ struct World
 	bool                     quiet  = false;   // commands are counted instead of logged, so nothing allocates
 	size_t                   counted = 0;
 
-	explicit World(std::string_view yaml) : document(Parse(yaml)), store(std::move(document.tables)) {}
+	explicit World(std::string_view source) : document(Parse(source)), store(std::move(document.tables)) {}
 
-	static schema_document Parse(std::string_view yaml)
+	static schema_document Parse(std::string_view source)
 	{
-		auto doc = DocumentFromYaml(yaml, "evidence.yaml");
+		auto doc = ReadDocument(source, "evidence.tabular");
 		EXPECT_TRUE(doc.has_value()) << RefusalOf(doc);
 		return doc ? std::move(*doc) : schema_document{};
 	}
@@ -308,97 +308,57 @@ std::string CommandOf(TableVersion const& version, size_t row)
 // and draws the mood again.
 
 constexpr std::string_view kLife = R"(
-tables:
-  - name: brain
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-    columns:
-      - {name: mode,    type: hash, key: true, domain: rows}
-      - {name: message, type: hash, key: true, fallthrough: true}
-      - {name: energy,  type: band, input: energy}
-      - {name: near,    type: flags, input: food_near}
-      - {name: when,    type: condition}
-      - {name: next,    type: hash}
-    order_by: {columns: [mode, message]}
-  - name: leave
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true, domain: rows}
-      - {name: energy, type: band, input: energy}
-      - {name: when,   type: condition}
-      - {name: left,   type: int}
-    order_by: {columns: [mode]}
-    suffix: command
-  - name: arrive
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-    columns:
-      - {name: mode,   type: hash, key: true}
-      - {name: energy, type: band, input: energy}
-      - {name: when,   type: condition}
-      - {name: bits,   type: flags}
-    order_by: {columns: [mode]}
-  - name: settle
-    read_only: true
-    pick: best
-    columns:
-      - {name: bits, type: flags, key: true, domain: rows}
-      - {name: tone, type: int}
-    order_by: {columns: [bits]}
-  - name: mood
-    read_only: true
-    pick: weighted
-    weight: w
-    columns:
-      - {name: mode, type: hash, key: true}
-      - {name: w,    type: double}
-      - {name: mood, type: int}
-    order_by: {columns: [mode]}
-machines:
-  - name: life
-    state:
-      - {name: mode, type: hash, members: [idle, walk, eat, panic], initial: idle}
-      - {name: left, type: int, initial: 0}
-      - {name: tone, type: int, initial: 0}
-      - {name: mood, type: int, initial: 0}
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-      - {name: food_near, type: flags}
-      - {name: message, type: hash}
-    create:
-      - from: mood
-        where: {mode: state.mode}
-        set: {mood: mood}
-    step:
-      - from: brain
-        where: {mode: state.mode, message: input.message}
-        given: {energy: input.energy, food_near: input.food_near}
-        set: {mode: next}
-    exit:
-      - from: leave
-        where: {mode: state.mode}
-        given: {energy: input.energy}
-        set: {left: left}
-        emit: command
-    entry:
-      - from: arrive
-        where: {mode: state.mode}
-        given: {energy: input.energy}
-      - from: settle
-        where: {bits: clause.0.bits}
-        set: {tone: tone}
-      - from: mood
-        where: {mode: state.mode}
-        set: {mood: mood}
+[table brain
+  (input energy double 0..1)
+  (input food_near flags)
+  (key mode hash (domain rows))
+  (key message hash fallthrough)
+  (column energy band (input energy))
+  (column near flags (input food_near))
+  (column when condition)
+  (column next hash)
+  (order mode message)]
+[table leave
+  (input energy double 0..1)
+  (key mode hash (domain rows))
+  (column energy band (input energy))
+  (column when condition)
+  (column left int)
+  (order mode)
+  (suffix command)]
+[table arrive
+  (input energy double 0..1)
+  (key mode hash)
+  (column energy band (input energy))
+  (column when condition)
+  (column bits flags)
+  (pick or bits)
+  (order mode)]
+[table settle
+  (key bits flags (domain rows))
+  (column tone int)
+  (order bits)]
+[table mood
+  (key mode hash)
+  (column w double)
+  (column mood int)
+  (pick weighted w)
+  (order mode)]
+[machine life
+  (state mode hash (members idle walk eat panic) (initial idle))
+  (state left int (initial 0))
+  (state tone int (initial 0))
+  (state mood int (initial 0))
+  (input energy double 0..1)
+  (input food_near flags)
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+create,mood,mode=state.mode,,mood=mood,,
+entry,arrive,mode=state.mode,energy=input.energy,,,
+entry,settle,bits=clause.0.bits,,tone=tone,,
+entry,mood,mode=state.mode,,mood=mood,,
+step,brain,mode=state.mode message=input.message,energy=input.energy food_near=input.food_near,mode=next,,
+exit,leave,mode=state.mode,energy=input.energy,left=left,command,
 )";
 
 enum life_table : uint32_t { Brain, Leave, Arrive, Settle, Mood };
@@ -1005,29 +965,18 @@ namespace
 
 // An edge (P13) over t: its entry keeps the previous value it crossed from.
 constexpr std::string_view kZone = R"(
-tables:
-  - name: zone
-    read_only: true
-    pick: best
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: zone,  type: band, input: t, edge: true}
-      - {name: clip,  type: int}
-    order_by: {columns: [label]}
-machines:
-  - name: zoner
-    state:
-      - {name: label, type: int, initial: 1}
-      - {name: clip,  type: int, initial: 0}
-    inputs:
-      - {name: t, type: double, range: 0..1}
-    step:
-      - from: zone
-        where: {label: state.label}
-        given: {t: input.t}
-        set: {clip: clip}
+[table zone
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column zone band (input t) edge)
+  (column clip int)
+  (order label)]
+[machine zoner
+  (state label int (initial 1))
+  (state clip int (initial 0))
+  (input t double 0..1)]
+list,from,where,given,set,emit,overrides
+step,zone,label=state.label,t=input.t,clip=clip,,
 )";
 
 }

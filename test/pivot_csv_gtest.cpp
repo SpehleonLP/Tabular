@@ -2,7 +2,7 @@
 #include "tabular/pick.h"
 #include "tabular/relation.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 
 #include <string>
 #include <string_view>
@@ -19,18 +19,13 @@ namespace
 {
 
 constexpr std::string_view kLookup = R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: string}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip string)
+  (order label)
+  (pivot req clip)]
 )";
 
 // animation's bit_value lookup fixture with int labels for its cases.
@@ -43,9 +38,9 @@ constexpr std::string_view kBitValue =
 	"5,c5_none,,,c5_combo,,c5_crouchprone\n"
 	"6,c6_none,,,c6_combo,,\n";
 
-relation_store StoreFrom(std::string_view yaml)
+relation_store StoreFrom(std::string_view source)
 {
-	auto s = SchemaFromYaml(yaml, "pivot.yaml");
+	auto s = ReadSchema(source, "pivot.tabular");
 	EXPECT_TRUE(s.has_value()) << (s ? std::string() : s.error().format());
 	return relation_store(std::move(*s));
 }
@@ -144,19 +139,14 @@ TEST(PivotCsv, BadHeadersAreRefusedByName)
 TEST(PivotCsv, APhaseTableHasNoNoneColumn)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: phase
-    read_only: true
-    pick: or
-    output: bits
-    inputs:
-      - {name: t, type: double}
-    columns:
-      - {name: clip, type: int, key: true}
-      - {name: bits, type: flags}
-      - {name: window, type: band, input: t}
-    order_by: {columns: [clip]}
-    pivot: {headers: bits, cells: window}
+[table phase
+  (input t double)
+  (key clip int)
+  (column bits flags)
+  (column window band (input t))
+  (pick or bits)
+  (order clip)
+  (pivot bits window)]
 )");
 	std::vector<std::string> names;
 	csv_rows rows{0, 1, "clip,Footstep,Pivot\n1,0.0..0.4,\n2,0.0..0.3,0.4..0.5\n2,0.6..0.9,\n", "phase.csv"};
@@ -179,45 +169,32 @@ tables:
 
 TEST(PivotCsv, APivotIsDeclaredOnAShapeThatCanHoldIt)
 {
-	auto withExtra = SchemaFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: string}
-      - {name: extra, type: int}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
-)", "x.yaml");
+	auto withExtra = ReadSchema(R"(
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip string)
+  (column extra int)
+  (order label)
+  (pivot req clip)]
+)", "x.tabular");
 	ASSERT_FALSE(withExtra.has_value());
 	EXPECT_TRUE(Mentions(withExtra.error().format(), "'extra'")) << withExtra.error().format();
 
-	auto unranked = SchemaFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags}
-      - {name: clip, type: string}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
-)", "x.yaml");
+	auto unranked = ReadSchema(R"(
+[table lookup
+  (key label int (domain rows))
+  (column req flags)
+  (column clip string)
+  (order label)
+  (pivot req clip)]
+)", "x.tabular");
 	ASSERT_FALSE(unranked.has_value());
 	EXPECT_TRUE(Mentions(unranked.error().format(), "ranking column")) << unranked.error().format();
 
 	relation_store plain = StoreFrom(R"(
-tables:
-  - name: t
-    read_only: true
-    columns:
-      - {name: x, type: int}
+[table t (column x int) (pick none)]
 )");
 	csv_rows rows{0, 1, "x\n1\n", "t.csv"};
 	rows.pivoted = true;
@@ -274,18 +251,13 @@ TEST(PivotCsv, ARefusedLoadLeavesTheFlagNames)
 TEST(PivotCsv, KeysThatCollideAreRefused)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: hash, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: string}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
+[table lookup
+  (input mode flags)
+  (key label hash (domain rows))
+  (column req flags (input mode))
+  (column clip string)
+  (order label)
+  (pivot req clip)]
 )");
 	std::string error = Error(LoadPivot(store, "label,None,Injured\nn26963,a,b\nn50336,c,d\n"));
 	EXPECT_TRUE(Mentions(error, "'n26963'")) << error;
@@ -295,18 +267,13 @@ tables:
 TEST(PivotCsv, HashCellsThatCollideAreRefused)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: hash}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip hash)
+  (order label)
+  (pivot req clip)]
 )");
 	std::string error = Error(LoadPivot(store, "label,None,Injured\n1,n26963,n50336\n"));
 	EXPECT_TRUE(Mentions(error, "'n50336' has the same hash as 'n26963'")) << error;
@@ -319,19 +286,14 @@ tables:
 TEST(PivotCsv, RowsAndPivotedCsvGiveOneOutcome)
 {
 	constexpr std::string_view kBands = R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-      - {name: t, type: double, range: 0..1}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: window, type: band, input: t}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: window}
+[table lookup
+  (input mode flags)
+  (input t double 0..1)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column window band (input t))
+  (order label)
+  (pivot req window)]
 )";
 	for (bool pivoted : {false, true})
 	{
@@ -355,18 +317,13 @@ tables:
 TEST(PivotCsv, APivotedLoadFillsTheReportWithItsOrphans)
 {
 	relation_store store = StoreFrom(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: {members: [1]}}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: string}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: clip}
+[table lookup
+  (input mode flags)
+  (key label int (domain (members 1)))
+  (column req flags (input mode))
+  (column clip string)
+  (order label)
+  (pivot req clip)]
 )");
 	std::vector<run_note> report;
 	csv_rows rows{0, 1, "label,None,A\n1,c1,c1a\n2,c2,\n", "lookup.csv"};

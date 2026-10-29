@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "tabular/grid.h"
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 
 #include <algorithm>
@@ -20,33 +20,25 @@ namespace
 {
 
 constexpr std::string_view kSchema = R"(
-tables:
-  - name: spawn_points
-    read_only: true
-    columns:
-      - {name: package, type: hash, key: true}
-      - {name: section, type: int}
-      - {name: note, type: string}
-    order_by: {columns: [package, section], unique: true}
-  - name: moods
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: mood, type: string}
-    order_by: {columns: [label]}
-    pivot: {headers: req, cells: mood}
-  - name: distances
-    read_only: true
-    grid: {rows: {name: from, type: hash}, columns: {name: to, type: hash}, cells: int}
+[table spawn_points
+  (key package hash)
+  (column section int)
+  (column note string)
+  (pick none)
+  (order package section unique)]
+[table moods
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column mood string)
+  (order label)
+  (pivot req mood)]
+[grid distances (rows from hash) (columns to hash) (cells int)]
 )";
 
 relation_store Store()
 {
-	auto s = SchemaFromYaml(kSchema, "schema.yaml");
+	auto s = ReadSchema(kSchema, "schema.tabular");
 	EXPECT_TRUE(s.has_value()) << s.error().format();
 	return relation_store(std::move(*s));
 }

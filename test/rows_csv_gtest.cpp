@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "tabular/rows_csv.h"
-#include "tabular/schema_yaml.h"
+#include "tabular/document.h"
 #include "cityhash/src/city.h"
 #include "probe_closure.h"
 
@@ -20,24 +20,20 @@ namespace
 {
 
 constexpr std::string_view kSchema = R"(
-tables:
-  - name: spawn_points
-    read_only: true
-    columns:
-      - {name: package, type: hash, key: true}
-      - {name: section, type: int}
-      - {name: mask, type: flags}
-      - {name: x, type: double}
-      - {name: on_spawn, type: command}
-    order_by: {columns: [package, section], unique: true}
-  - name: rules
-    columns:
-      - {name: when, type: condition}
+[table spawn_points
+  (key package hash)
+  (column section int)
+  (column mask flags)
+  (column x double)
+  (column on_spawn command)
+  (pick none)
+  (order package section unique)]
+[table rules (column when condition) (pick none)]
 )";
 
 relation_store Store()
 {
-	auto s = SchemaFromYaml(kSchema, "schema.yaml");
+	auto s = ReadSchema(kSchema, "schema.tabular");
 	EXPECT_TRUE(s.has_value()) << s.error().format();
 	return relation_store(std::move(*s));
 }
@@ -195,17 +191,15 @@ namespace
 {
 
 constexpr std::string_view kVecSchema = R"(
-tables:
-  - name: marks
-    read_only: true
-    columns:
-      - {name: id, type: int}
-      - {name: at, type: vec2}
+[table marks
+  (column id int)
+  (column at vec2)
+  (pick none)]
 )";
 
 relation_store VecStore()
 {
-	auto s = SchemaFromYaml(kVecSchema, "marks.yaml");
+	auto s = ReadSchema(kVecSchema, "marks.tabular");
 	EXPECT_TRUE(s.has_value()) << s.error().format();
 	return relation_store(std::move(*s));
 }
@@ -249,9 +243,8 @@ TEST(RowsCsv, Vec2AcceptsSignsAndExponentsAndRefusesInnerSpaces)
 
 TEST(RowsCsv, AStringCellIsItsTrimmedText)
 {
-	auto s = SchemaFromYaml(
-		"tables:\n  - name: places\n    read_only: true\n    columns:\n"
-		"      - {name: name, type: string, key: true}\n      - {name: id, type: int}\n", "places.yaml");
+	auto s = ReadSchema(
+		"[table places (key name string) (column id int) (pick none)]\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "id,name\n1,  north meadow \n", "places.csv"});
@@ -262,8 +255,7 @@ TEST(RowsCsv, AStringCellIsItsTrimmedText)
 
 TEST(RowsCsv, AnEmptyStringCellIsRefused)
 {
-	auto s = SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
-		"      - {name: name, type: string}\n      - {name: id, type: int}\n", "places.yaml");
+	auto s = ReadSchema("[table places (column name string) (column id int) (pick none)]\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n,1\n", "places.csv"});
@@ -275,8 +267,7 @@ TEST(RowsCsv, AnEmptyStringCellIsRefused)
 // A cell of only whitespace trims to empty and is refused like an empty one.
 TEST(RowsCsv, StringCellsAreTrimmedButKeepInnerSpaces)
 {
-	auto s = SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
-		"      - {name: name, type: string, key: true}\n      - {name: id, type: int}\n", "places.yaml");
+	auto s = ReadSchema("[table places (key name string) (column id int) (pick none)]\n", "places.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "name,id\n  forest  edge \t,1\n", "places.csv"});
@@ -284,8 +275,7 @@ TEST(RowsCsv, StringCellsAreTrimmedButKeepInnerSpaces)
 	EXPECT_EQ(std::string_view(*store.StringAt(0, 0, 0)), "forest  edge");
 	EXPECT_EQ(*store.Find(0, 0, std::string_view("forest  edge")), std::vector<size_t>{0});
 
-	relation_store blank(SchemaFromYaml("tables:\n  - name: places\n    read_only: true\n    columns:\n"
-		"      - {name: name, type: string}\n      - {name: id, type: int}\n", "places.yaml").value());
+	relation_store blank(ReadSchema("[table places (column name string) (column id int) (pick none)]\n", "places.tabular").value());
 	auto refused = LoadCsv(blank, csv_rows{0, 1, "name,id\n \t ,1\n", "places.csv"});
 	std::string error = refused ? std::string() : refused.error().format();
 	EXPECT_TRUE(Mentions(error, "'name'")) << error;
@@ -296,17 +286,15 @@ namespace
 {
 
 constexpr std::string_view kRuleSchema = R"(
-tables:
-  - name: rules
-    read_only: true
-    columns:
-      - {name: priority, type: int}
-      - {name: when, type: condition}
+[table rules
+  (column priority int)
+  (column when condition)
+  (pick none)]
 )";
 
 relation_store RuleStore()
 {
-	auto s = SchemaFromYaml(kRuleSchema, "rules.yaml");
+	auto s = ReadSchema(kRuleSchema, "rules.tabular");
 	EXPECT_TRUE(s.has_value()) << s.error().format();
 	return relation_store(std::move(*s));
 }
@@ -443,14 +431,12 @@ TEST(RowsCsv, TheSameNameOnManyLinesIsNoCollision)
 
 TEST(RowsCsv, AHashCollisionAcrossColumnsIsRefused)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: links
-    read_only: true
-    columns:
-      - {name: from, type: hash}
-      - {name: to, type: hash}
-)", "links.yaml");
+	auto s = ReadSchema(R"(
+[table links
+  (column from hash)
+  (column to hash)
+  (pick none)]
+)", "links.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1, "from,to\nn26963,a\nb,n50336\n", "links.csv"});
@@ -460,19 +446,14 @@ tables:
 
 TEST(RowsCsv, ADeadRowNamesTheLineThatCoversIt)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: reaction
-    read_only: true
-    pick: best
-    inputs:
-      - {name: energy, type: double, range: 0..1}
-    columns:
-      - {name: stimulus, type: hash, key: true, domain: rows}
-      - {name: energy, type: band, input: energy}
-      - {name: reaction, type: string}
-    order_by: {columns: [stimulus]}
-)", "reaction.yaml");
+	auto s = ReadSchema(R"(
+[table reaction
+  (input energy double 0..1)
+  (key stimulus hash (domain rows))
+  (column energy band (input energy))
+  (column reaction string)
+  (order stimulus)]
+)", "reaction.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	auto loaded = LoadCsv(store, csv_rows{0, 1,
@@ -488,19 +469,14 @@ tables:
 // refusal carries the file's label and no line number that is not the author's.
 TEST(RowsCsv, AStrandedRunIsRefusedNamingTheFileAndNoLine)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    inputs:
-      - {name: mode, type: flags}
-    columns:
-      - {name: label, type: int, key: true, domain: rows}
-      - {name: req, type: flags, input: mode}
-      - {name: clip, type: string}
-    order_by: {columns: [label]}
-)", "lookup.yaml");
+	auto s = ReadSchema(R"(
+[table lookup
+  (input mode flags)
+  (key label int (domain rows))
+  (column req flags (input mode))
+  (column clip string)
+  (order label)]
+)", "lookup.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store store(std::move(*s));
 	ASSERT_TRUE(LoadCsv(store, csv_rows{0, 1, "label,req,clip\n1,0,base\n", "one.csv"}).has_value());
@@ -519,16 +495,12 @@ tables:
 
 TEST(RowsCsv, ALoadFillsTheReportWithItsOrphans)
 {
-	auto s = SchemaFromYaml(R"(
-tables:
-  - name: lookup
-    read_only: true
-    pick: best
-    columns:
-      - {name: label, type: int, key: true, domain: {members: [1]}}
-      - {name: clip, type: int}
-    order_by: {columns: [label]}
-)", "lookup.yaml");
+	auto s = ReadSchema(R"(
+[table lookup
+  (key label int (domain (members 1)))
+  (column clip int)
+  (order label)]
+)", "lookup.tabular");
 	ASSERT_TRUE(s.has_value()) << s.error().format();
 	relation_store        store(std::move(*s));
 	std::vector<run_note> report;
