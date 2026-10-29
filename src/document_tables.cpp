@@ -2,6 +2,8 @@
 #include "document_header.h"
 #include "csv_cells.h"
 
+#include <algorithm>
+#include <charconv>
 #include <deque>
 
 namespace tabular::detail
@@ -43,6 +45,22 @@ struct reference
 	bool             set  = false;
 };
 
+// What a blank cell of one header column compiles to.
+struct column_fill
+{
+	enum class kind : uint8_t
+	{
+		Blank,      // left blank: the loader decides, as for a row written out
+		Text,       // the column's default
+		Key,        // the row's own cell of a key the default names
+		Range,      // a band's input's whole range
+		Unranged,   // a band whose input has no range to stand for: refused
+	};
+	kind        what = kind::Blank;
+	std::string text;               // Text and Range
+	uint32_t    key  = UINT32_MAX;  // Key: the key's header position
+};
+
 struct table_build
 {
 	std::string_view              name;
@@ -70,6 +88,9 @@ struct table_build
 	// The header row's column names, bare, as the compiled body's header says
 	// them; a pivot's flag headers follow its keys.
 	std::vector<std::string_view> headerNames;
+	// Per header cell, what a blank cell compiles to; empty for a pivot, whose
+	// blank is a cell with no row.
+	std::vector<column_fill>      fills;
 };
 
 // Whether a body has any row. A table's first record is its header, so it needs
@@ -394,6 +415,7 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 	uint32_t const         line  = any ? body.line_of_row(0) : 0;
 	size_t const           width = any ? body.used_width(0) : 0;
 	std::vector<bool>      fallsThrough;
+	std::vector<std::optional<std::string_view>> fallbacks;
 	for (size_t h = 0; h < width; ++h)
 	{
 		std::string_view const text = body.cell(h, 0);
@@ -421,6 +443,7 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 				"' among its keys; a pivot's header row is its keys, then its flag headers");
 		}
 		build.headerNames.push_back(cell->name);
+		fallbacks.push_back(cell->fallback);
 		bool const key = cell->what == header_cell::mark::Key;
 		if (!key && *type == column_type::Command && h + 1 == width)
 		{
@@ -484,6 +507,42 @@ tl::expected<void, ErrorContext> ReadHeader(reader& in, csv_text const& body)
 			*type == column_type::Band || *type == column_type::Flags ? input : UINT32_MAX, {},
 			cell->what == header_cell::mark::Edge});
 		build.pivot = pivot_by{keys, keys + 1};
+	}
+
+	if (!build.pivoted)
+	{
+		build.fills.resize(fallbacks.size());
+		for (size_t h = 0; h < fallbacks.size(); ++h)
+		{
+			column_fill& fill = build.fills[h];
+			if (fallbacks[h])
+			{
+				// The suffix is last, so a column's header position is its index.
+				uint32_t const named = IndexOfColumn(build, *fallbacks[h]);
+				bool const     key   = named != UINT32_MAX && build.columns[named].key;
+				fill.what = key ? column_fill::kind::Key : column_fill::kind::Text;
+				fill.text = key ? std::string() : std::string(*fallbacks[h]);
+				fill.key  = key ? named : UINT32_MAX;
+				continue;
+			}
+			if (h >= build.columns.size() || build.columns[h].type != column_type::Band || build.columns[h].edge)
+			{
+				continue;
+			}
+			add_input const& input = build.inputs[build.columns[h].input];
+			if (!input.ranged)
+			{
+				fill.what = column_fill::kind::Unranged;
+				continue;
+			}
+			// Shortest round-trip text, so the loader reads back the very floats.
+			char lo[32];
+			char hi[32];
+			char* const loEnd = std::to_chars(lo, lo + sizeof(lo), input.lo).ptr;
+			char* const hiEnd = std::to_chars(hi, hi + sizeof(hi), input.hi).ptr;
+			fill.what = column_fill::kind::Range;
+			fill.text = cc(std::string(lo, loEnd), "..", std::string_view(hi, hiEnd - hi));
+		}
 	}
 
 	// A column named weight weighs the rows unless a (pick ..) says otherwise.
@@ -566,14 +625,28 @@ void AppendCell(std::string& out, std::string_view text, bool first)
 }
 
 // The one place a table's rows are rewritten into the plain CSV the loaders
-// read: the header becomes bare names, and every record keeps the file line it
-// came from.
-void CompileBody(table_build const& build, csv_text const& body, std::string& text,
-	shared_array<uint32_t>& lines)
+// read: the header becomes bare names, blank cells take their column's fill,
+// and every record keeps the file line it came from.
+tl::expected<void, ErrorContext> CompileBody(table_build const& build, csv_text const& body, std::string_view label,
+	std::string& text, shared_array<uint32_t>& lines)
 {
+	using kind = column_fill::kind;
+	// A row shorter than the header still takes the fills it has cells for.
+	size_t fillWidth = 0;
+	for (size_t h = 0; h < build.fills.size(); ++h)
+	{
+		if (build.fills[h].what != kind::Blank)
+		{
+			fillWidth = h + 1;
+		}
+	}
+	size_t const suffixAt = build.suffix.empty() ? SIZE_MAX : build.headerNames.size() - 1;
+
 	lines = shared_array<uint32_t>(body.rows());
+	std::vector<std::string_view> cells;
 	for (size_t r = 0; r < body.rows(); ++r)
 	{
+		lines[r] = body.line_of_row(r);
 		if (r == 0)
 		{
 			for (size_t h = 0; h < build.headerNames.size(); ++h)
@@ -581,18 +654,49 @@ void CompileBody(table_build const& build, csv_text const& body, std::string& te
 				text += h == 0 ? "" : ",";
 				AppendCell(text, build.headerNames[h], h == 0);
 			}
+			text += '\n';
+			continue;
 		}
-		else
+		cells.assign(std::max(body.width(r), fillWidth), std::string_view());
+		for (size_t c = 0; c < body.width(r); ++c)
 		{
-			for (size_t c = 0; c < body.width(r); ++c)
+			cells[c] = body.cell(c, r);
+		}
+		// The suffix runs to the row's end, so it is blank only if all of it is.
+		bool const suffixBlank = suffixAt < cells.size()
+			&& std::all_of(cells.begin() + suffixAt, cells.end(), [](std::string_view c) { return c.empty(); });
+		for (size_t c = 0; c < cells.size() && c < build.fills.size(); ++c)
+		{
+			column_fill const& fill = build.fills[c];
+			if (!cells[c].empty() || fill.what == kind::Blank || (c == suffixAt && !suffixBlank))
 			{
-				text += c == 0 ? "" : ",";
-				AppendCell(text, body.cell(c, r), c == 0);
+				continue;
+			}
+			switch (fill.what)
+			{
+			case kind::Text:
+			case kind::Range:
+				cells[c] = fill.text;
+				break;
+			case kind::Key:
+				cells[c] = fill.key < cells.size() ? cells[fill.key] : std::string_view();
+				break;
+			case kind::Unranged:
+				return Refuse(label, lines[r], "column '", build.headerNames[c], "' of table '", build.name,
+					"' is blank, and its input '", build.inputs[build.columns[c].input].name,
+					"' has no range for a blank band to stand for; write the band, or give the input a range");
+			case kind::Blank:
+				break;
 			}
 		}
+		for (size_t c = 0; c < cells.size(); ++c)
+		{
+			text += c == 0 ? "" : ",";
+			AppendCell(text, cells[c], c == 0);
+		}
 		text += '\n';
-		lines[r] = body.line_of_row(r);
 	}
+	return {};
 }
 
 // Options come in any order, so the names they refer to resolve after the last.
@@ -898,7 +1002,11 @@ tl::expected<schema, ErrorContext> ReadTables(std::span<section const> sections,
 			{
 				std::string&            text  = storage.compiled[rowsAt];
 				shared_array<uint32_t>& lines = storage.compiled_lines[rowsAt];
-				CompileBody(build, bodies.back(), text, lines);
+				auto compiled = CompileBody(build, bodies.back(), label, text, lines);
+				if (!compiled)
+				{
+					return tl::make_unexpected(std::move(compiled.error()));
+				}
 				storage.rows[rowsAt] = section_rows{table, text, section.body_line,
 					std::span<uint32_t const>(lines.begin(), lines.size())};
 			}

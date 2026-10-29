@@ -1352,3 +1352,81 @@ TEST(Document, TheRemovedOptionsAreUnknown)
 		EXPECT_TRUE(Mentions(refused, "t.tabular:1")) << refused;
 	}
 }
+
+namespace
+{
+
+// The row of table 0 whose key column 0 holds key.
+size_t RowOf(relation_store const& store, cell key)
+{
+	auto rows = store.Find(0, 0, key);
+	EXPECT_TRUE(rows.has_value() && rows->size() == 1u);
+	return rows.has_value() && rows->size() == 1u ? (*rows)[0] : SIZE_MAX;
+}
+
+}
+
+TEST(Document, ABlankCellTakesTheColumnDefault)
+{
+	auto d = ReadDocument("[table t (order k)]\n>k: int, status = None, n: int = 3, command = (idle)\n"
+		"1, , \n"
+		"2, Hurt, 4, (run) (stop)\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->rows()[0].text, "k,status,n,command\n1,None,3,(idle)\n2,Hurt,4,(run) (stop)\n");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	size_t const one = RowOf(store, cell::Integer(1));
+	size_t const two = RowOf(store, cell::Integer(2));
+	EXPECT_EQ(store.Value(0, one, 1)->i, Hash("None"));
+	EXPECT_EQ(store.Value(0, one, 2)->i, 3);
+	EXPECT_EQ(*store.CommandAt(0, one, 3), "((idle))");
+	EXPECT_EQ(store.Value(0, two, 1)->i, Hash("Hurt")) << "a written cell is not defaulted";
+	EXPECT_EQ(store.Value(0, two, 2)->i, 4);
+	EXPECT_EQ(*store.CommandAt(0, two, 3), "((run) (stop))");
+}
+
+TEST(Document, ADefaultNamingAKeyTakesThatRowsKey)
+{
+	auto d = ReadDocument("[table t (order mode)]\n>mode, next = mode\nidle,\nwalk, idle\neat,\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	for (auto [mode, next] : {std::pair{"idle", "idle"}, std::pair{"walk", "idle"}, std::pair{"eat", "eat"}})
+	{
+		size_t const row = RowOf(store, cell::Integer(Hash(mode)));
+		EXPECT_EQ(store.Value(0, row, 1)->i, Hash(next)) << mode;
+	}
+}
+
+TEST(Document, ABlankBandIsTheInputsWholeRange)
+{
+	constexpr std::string_view kBracket = "[table t (input hp double -100..1000) (pick all) (order k)]\n>k: int, hp: band, v: int\n";
+	auto blank   = ReadDocument(cc(std::string(kBracket), "1, , 10\n2, 0..5, 20\n3,,30\n"), "t.tabular");
+	auto written = ReadDocument(cc(std::string(kBracket), "1, -100..1000, 10\n2, 0..5, 20\n3,-100..1000,30\n"), "t.tabular");
+	ASSERT_TRUE(blank.has_value()) << blank.error().format();
+	ASSERT_TRUE(written.has_value()) << written.error().format();
+	// A store reads no band cell back, so the compiled rows are compared: the
+	// blank compiles to what the author could have written.
+	EXPECT_EQ(blank->rows()[0].text, written->rows()[0].text);
+	relation_store a(std::move(blank->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(a, *blank, 1, condition_reader())), "");
+	EXPECT_EQ(a.Value(0, RowOf(a, cell::Integer(3)), 2)->i, 30);
+}
+
+TEST(Document, ABlankBandOnAnUnrangedInputIsRefused)
+{
+	std::string const refused = RefusalOf("[table t (input hp double) (pick all)]\nk: int, hp: band\n1, 0..1\n2, \n");
+	EXPECT_TRUE(Mentions(refused, "t.tabular:4")) << refused;
+	EXPECT_TRUE(Mentions(refused, "'hp'")) << refused;
+	EXPECT_TRUE(Mentions(refused, "range")) << refused;
+}
+
+TEST(Document, ABlankEdgeIsStillNoEdge)
+{
+	auto d = ReadDocument("[table t (input x double 0..1) (pick all)]\nk: int, ^x\n1,\n", "t.tabular");
+	ASSERT_TRUE(d.has_value()) << d.error().format();
+	EXPECT_EQ(d->rows()[0].text, "k,x\n1,\n");
+	relation_store store(std::move(d->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(store, *d, 1, condition_reader())), "");
+	EXPECT_EQ(store.RowCount(0), 1u) << "the loader reads a blank edge cell as no edge";
+}
