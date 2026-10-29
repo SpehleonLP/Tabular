@@ -158,13 +158,42 @@ list,from,where,given,set,emit,overrides
 step,grazer_brain,mode=state.mode,energy=input.energy,mode=next,,
 ```
 
-A table's first body row is its **header**, and each cell declares one column: `>name` is a key, `>name?` a fall-through key, `^name` a band edge, and `name: type` a typed column (a bare name is a hash). `when` is a condition, `weight` a double, and `command` a command; a command cell that comes last is the suffix, every cell from it on read as one list of commands. A band, and a flags column that ranks, are named for the input they read. A table with a `weight` column and no `(pick ..)` is `weighted`.
+A table's first body row is its **header**, and each cell declares one column: `>name` is a key, `>name?` a fall-through key, `^name` a band edge, `name: type` a typed column (a bare name is a hash), and `name = value` a column with a default (see Shorthand). `when` is a condition, `weight` a double, and `command` a command; a command cell that comes last is the suffix, every cell from it on read as one list of commands. A band, and a flags column that ranks, are named for the input they read. A table with a `weight` column and no `(pick ..)` is `weighted`.
 
 With no `(pick ..)` a table is `best`. The bracket takes `(input name type [lo..hi] [cyclic])`, `(pick none|best|all)`, `(pick or col)` or `(pick weighted col)`, `(order cols.. [unique])`, `(domain key ..)` and `(pivot headers cells[: type])`. A pivot's header row is its keys, then its flag headers; the bracket declares its headers flags column and its cells column. A grid is `[grid g (rows r type) (columns c type) (cells type)]`. A machine's body is a CSV with the header `list,from,where,given,set,emit,overrides`; `where`, `given` and `set` cells are space-separated `name=source` pairs, and a non-blank `overrides` is the position of the clause it overrides in the same list.
 
 Column types are `hash`, `flags`, `int`, `double`, `condition`, `command`, `vec2`, `string` and `band`.
 
 A best table's key has its rows as its domain unless `(domain key a b ..)` lists its members or `(domain key table.column)` reads another table's column. A fall-through key's domain is open, so a `(domain ..)` for it is refused, and so is a fall-through key on a table that isn't `best`.
+
+#### Shorthand
+
+Shorthand is only an interface: the reader compiles it into the rows the explicit form could have written, and Tabular sees nothing else. A refusal in a compiled row names the line the author wrote.
+
+- **A default.** A blank cell takes its column's default. A default naming one of the table's keys takes that row's key, so `next = mode` holds the state:
+  ```
+  >mode, next = mode, command      compiles to   mode,next,command
+  idle, ,  (stand)                               idle,idle,(stand)
+  walk, idle, (stop)                             walk,idle,(stop)
+  ```
+  A default on the last command column applies only to a row whose command cells are all blank.
+- **A blank band** is its input's whole range; with `(input hp double -100..1000)`, a blank `hp` cell compiles to `-100..1000`. A blank band whose input has no range is refused, never filled with `0..0`. A blank edge is still no edge, and any other blank is left for the loader, as written.
+- **`*` in a key cell** copies the row once per value of that key, where it is written: the key's `(domain ..)` members, or else the values the table's rows name for it, in the order they first appear. Two `*` give the product, the first key varying slowest. Defaults apply after expansion, so `next = mode` on a copy for `walk` is `walk`. A `*` row at the top beats each key's own rows. A copy is dropped where an earlier row with the same keys and ranking flags already answers every input (no condition, no edge, every band the whole range), so a `*` row at the bottom yields to a key's own unconditional row and is the fallback of a key whose own rows are conditional. Rows written out are never dropped. A `*` on a key whose domain is another table's column is refused; list the members instead.
+  ```
+  [table t (domain mode idle walk) (order mode)]
+  >mode, next = mode               compiles to   mode,next
+  walk, idle                                     walk,idle
+  *,                                             idle,idle
+  ```
+  (walk's copy of the `*` row is dropped: walk's own row answers first.)
+- **`[fragment <table> (col v ..)..]`** adds rows to a table declared above it in the same file, after the table's own rows and earlier fragments; `*` and dropping run over that whole order. Its header names the table's columns, bare. A bracket constant `(col v)` sets a column on every row, `(col a b ..)` copies each row per value in that order, and `(key *)` copies it per key value as a `*` cell does. Columns it leaves out are blank, so the table's defaults and blank bands apply. A fragment of a grid or a pivot, of a table below it, or naming a column the table lacks is refused.
+  ```
+  [table brain (input hp double 0..1) (order mode)]
+  >mode, hp: band, command
+  [fragment brain (mode idle walk)]    compiles to   mode,hp,command
+  command                                            idle,0..1,(look)
+  (look)                                             walk,0..1,(look)
+  ```
 
 Machine sources are written as `state.<col>`, `input.<name>`, `clause.<n>.<col>` (an earlier clause in the same list) or `(literal <text>)`.
 

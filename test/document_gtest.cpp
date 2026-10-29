@@ -1614,3 +1614,74 @@ TEST(Document, AFragmentRowRefusalNamesItsOwnLine)
 	ASSERT_FALSE(loaded.has_value());
 	EXPECT_EQ(Where(loaded.error()), "t.tabular:7") << loaded.error().format();
 }
+
+TEST(Document, TheShorthandGrazerCompilesToTheExplicitRows)
+{
+	constexpr std::string_view kBracket = R"([table grazer_brain
+  (input energy double 0..1)
+  (input threat double 0..1)
+  (domain mode idle walk eat panic)
+  (order mode)]
+)";
+	// next = mode, blank bands, a top * that bolts from any mode, and a
+	// fragment's bottom * that holds a mode its own rows leave unanswered.
+	std::string const shorthand = cc(std::string(kBracket), R"(>mode, threat: band, energy: band, next = mode, command
+*,     0.8..1, ,        panic, (flee)
+idle,  ,       0..0.3,  eat,   (graze)
+walk,  ,       0.3..1,  ,      (amble)
+eat,   ,       ,        ,      (chew)
+panic, ,       ,        idle,  (calm)
+[fragment grazer_brain]
+mode, command
+*,    (hold)
+)");
+	std::string const explicitRows = cc(std::string(kBracket), R"(>mode, threat: band, energy: band, next, command
+idle,0.8..1,0..1,panic,(flee)
+walk,0.8..1,0..1,panic,(flee)
+eat,0.8..1,0..1,panic,(flee)
+panic,0.8..1,0..1,panic,(flee)
+idle,0..1,0..0.3,eat,(graze)
+walk,0..1,0.3..1,walk,(amble)
+eat,0..1,0..1,eat,(chew)
+panic,0..1,0..1,idle,(calm)
+idle,0..1,0..1,idle,(hold)
+walk,0..1,0..1,walk,(hold)
+)");
+	auto a = ReadDocument(shorthand, "shorthand.tabular");
+	auto b = ReadDocument(explicitRows, "explicit.tabular");
+	ASSERT_TRUE(a.has_value()) << a.error().format();
+	ASSERT_TRUE(b.has_value()) << b.error().format();
+	EXPECT_EQ(Describe(a->tables), Describe(b->tables));
+	ASSERT_EQ(a->rows().size(), 1u);
+	EXPECT_EQ(a->rows()[0].text, b->rows()[0].text);
+
+	relation_store sa(std::move(a->tables));
+	relation_store sb(std::move(b->tables));
+	ASSERT_EQ(Failure(LoadDocumentRows(sa, *a, 1, condition_reader())), "");
+	ASSERT_EQ(Failure(LoadDocumentRows(sb, *b, 1, condition_reader())), "");
+	size_t swept = 0;
+	for (std::string_view mode : {"idle", "walk", "eat", "panic"})
+	{
+		for (double threat : {0.0, 0.5, 0.79, 0.8, 0.99})
+		{
+			for (double energy : {0.0, 0.29, 0.3, 0.6, 0.99})
+			{
+				cell const keys[]   = {cell::Integer(Hash(mode))};
+				cell const inputs[] = {cell::Real(energy), cell::Real(threat)};
+				auto       pa       = PickBest(sa, 0, pick_query{keys, inputs});
+				auto       pb       = PickBest(sb, 0, pick_query{keys, inputs});
+				ASSERT_TRUE(pa.has_value() && pa->has_value()) << mode << " " << threat << " " << energy;
+				ASSERT_TRUE(pb.has_value() && pb->has_value()) << mode << " " << threat << " " << energy;
+				EXPECT_EQ(sa.Value(0, **pa, 3)->i, sb.Value(0, **pb, 3)->i) << mode << " " << threat << " " << energy;
+				EXPECT_EQ(*sa.CommandAt(0, **pa, 4), *sb.CommandAt(0, **pb, 4)) << mode << " " << threat << " " << energy;
+				++swept;
+			}
+		}
+	}
+	EXPECT_EQ(swept, 100u);
+	cell const walkKey[]   = {cell::Integer(Hash("walk"))};
+	cell const lowEnergy[] = {cell::Real(0.1), cell::Real(0.1)};
+	auto       held        = PickBest(sa, 0, pick_query{walkKey, lowEnergy});
+	ASSERT_TRUE(held.has_value() && held->has_value());
+	EXPECT_EQ(*sa.CommandAt(0, **held, 4), "((hold))") << "the fragment's * answers what walk's own row leaves";
+}
