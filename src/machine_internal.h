@@ -118,6 +118,29 @@ struct watched_table
 	uint64_t generation = 0;
 };
 
+// How WouldRepeat tells whether a machine input moved. exact compares the value
+// read: any use but a band's (a key, a flags rank, a cyclic table input, whose
+// wrapped cell is no interval of the value). Otherwise only the input's cell
+// matters, between the sorted, distinct edges of every band it feeds, across
+// the machine's tables, at [first, first + count) of repeat_plan::edges.
+struct input_watch
+{
+	uint32_t first = 0;
+	uint32_t count = 0;
+	bool     exact = false;
+};
+
+// What Prepare knows of whether a step can repeat. Lazy getters are the
+// binding's, so Bind adds that exclusion.
+struct repeat_plan
+{
+	// No table of the machine is weighted, has an edge band or a script
+	// condition, or is mutable.
+	bool                         repeatable = false;
+	immutable_array<input_watch> inputs;    // per machine input; empty unless repeatable
+	immutable_array<float>       edges;
+};
+
 }
 
 struct Machine::Data
@@ -125,6 +148,7 @@ struct Machine::Data
 	detail::machine_def                                              def;
 	std::array<shared_array<detail::prepared_clause>, kTriggerCount> lists;
 	immutable_array<detail::watched_table>                           watched;   // by table, distinct
+	detail::repeat_plan                                              repeat;
 };
 
 // Prepare builds a Machine and tests read one; both are outside the class.

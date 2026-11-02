@@ -104,6 +104,9 @@ struct Binding::Data
 	size_t                                             maxKeys   = 0;
 	size_t                                             maxInputs = 0;
 	size_t                                             maxAxes   = 0;
+	// The machine's repeat_plan says so and no getter is lazy: a lazy input has
+	// no value to compare until a clause reaches it.
+	bool                                               repeatable = false;
 
 	Data() = default;
 	Data(Data const&)            = delete;
@@ -142,6 +145,7 @@ struct instance_access
 	static shared_array<emitted>&       Emitted(instance& i) { return i._emitted; }
 	static size_t&                     EmittedCount(instance& i) { return i._emittedCount.n; }
 	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
+	static bool&                       Settled(instance& i) { return i._settled; }
 #if TABULAR_PROVENANCE
 	static shared_array<provenance_entry>& Ring(instance& i) { return i._provenance; }
 	static size_t&                        RingNext(instance& i) { return i._provenanceNext; }
@@ -249,6 +253,8 @@ tl::expected<counted_ptr<Binding const>, ErrorContext> Bind(counted_ptr<Machine 
 	data->answerStart[kTriggerCount] = answers;
 	data->reportBits                 = bits;
 	data->report                     = std::move(host.report);
+	data->repeatable                 = prepared.repeat.repeatable
+		&& std::none_of(staged.getters.begin(), staged.getters.end(), [](input_getter const& g) { return g.lazy; });
 	data->getters                    = staged.Adopt();
 	return binding_access::Make(std::move(data));
 }
@@ -981,11 +987,13 @@ void Emit(instance& subject, trigger list)
 }
 
 // A run's results start empty. The binding a rebind left is let go here, at
-// the next run, since its exit's commands were views into its versions.
+// the next run, since its exit's commands were views into its versions. Only a
+// step that ends settled is a no-op to repeat, so every run starts unsettled.
 void BeginResults(instance& subject)
 {
 	instance_access::EmittedCount(subject) = 0;
 	instance_access::Left(subject)         = nullptr;
+	instance_access::Settled(subject)      = false;
 }
 
 // Every buffer a step uses, sized for binding, so a step allocates nothing;
@@ -1083,6 +1091,28 @@ std::optional<cell> CarriedPrevious(detail::machine_def const& to, size_t input,
 		return previous[i];
 	}
 	return std::nullopt;
+}
+
+// Whether two reads of input land alike in every band it feeds. A step compares
+// floats, so the cell is the float's: a double just under an edge rounds onto it.
+// Not ClampedInput's value, since one input may feed tables of different ranges:
+// a clamp is monotone, so two values between the same band edges clamp between
+// them too, and the unclamped cell is at least as fine as every table's. NaN
+// lies in no band and is refused by a range, so it is a cell of its own.
+bool SameCell(detail::repeat_plan const& plan, detail::input_watch const& watch, cell before, cell now)
+{
+	if (watch.exact)
+	{
+		return before.i == now.i;
+	}
+	if (std::isnan(before.d) || std::isnan(now.d))
+	{
+		return std::isnan(before.d) && std::isnan(now.d);
+	}
+	float const* const first = plan.edges.begin() + watch.first;
+	float const* const last  = first + watch.count;
+	return std::upper_bound(first, last, static_cast<float>(before.d))
+		== std::upper_bound(first, last, static_cast<float>(now.d));
 }
 
 }
@@ -1189,7 +1219,39 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	Emit(subject, trigger::Step);
 	Emit(subject, trigger::Exit);
 	Emit(subject, trigger::Entry);
+	instance_access::Settled(subject) = binding_access::Of(subject.binding()).repeatable && !Changed(subject);
 	return subject.Emitted();
+}
+
+bool WouldRepeat(instance const& subject, void const* self)
+{
+	assert(subject._binding && "a moved-from instance is asked: caller misuse");
+	binding_access::Data const& binding = binding_access::Of(*subject._binding);
+	if (!subject._settled)
+	{
+		return false;
+	}
+	// Settled is set only for a repeatable binding, and a rebind clears it, so
+	// the settled step ran under this one, and Inputs and InputRead are its.
+	detail::repeat_plan const& plan = machine_access::Of(*binding.machine).repeat;
+	for (size_t i = 0; i < binding.getters.size(); ++i)
+	{
+		input_getter const& g = binding.getters[i];
+		// Never reported: a failure that matters is one the last step did not
+		// have, and then the step that follows reads it again and reports it.
+		ErrorContext error;
+		cell const   now      = g.read(g.data, self, &error);
+		bool const   answered = error.empty();
+		if (answered != (subject._inputRead[i] == kInputRead))
+		{
+			return false;
+		}
+		if (answered && !SameCell(plan, plan.inputs[i], subject._inputs[i], now))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool Changed(instance const& subject)

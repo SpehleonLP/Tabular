@@ -349,6 +349,7 @@ public:
 private:
 	friend struct instance_access;
 	friend bool Changed(instance const&);
+	friend bool WouldRepeat(instance const&, void const*);
 	instance() = default;
 
 	counted_ptr<Binding const> _binding;
@@ -389,6 +390,10 @@ private:
 	};
 	emitted_count              _emittedCount;
 	counted_ptr<Binding const> _left;        // the binding a rebind left, while its exit's commands are returned
+	// The last run was a step of a repeatable machine that changed no state and
+	// emitted nothing. Only a real Step sets it: Changed goes stale across a
+	// skipped step and means little after creation or a rebind.
+	bool                       _settled = false;
 #if TABULAR_PROVENANCE
 	shared_array<provenance_entry> _provenance;          // the ring, kProvenanceDepth entries
 	size_t                        _provenanceNext  = 0;  // where the next pick goes
@@ -456,6 +461,22 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 // every Step. Meant for a Step: the run swaps current with next, so the vector
 // it left in next is the start it is compared with. Reads nothing of the host.
 bool Changed(instance const& subject);
+
+// True when a Step now would change nothing and emit nothing: the last step did
+// neither, and no input it depends on left its band cell or changed value.
+// Calls each getter once, stopping at the first that moved, and reports nothing;
+// it allocates nothing of its own and writes nothing, so a skipped step leaves
+// the instance on the step that settled it, and asking again compares with that
+// step. Conservative, since a wrong yes loses behaviour silently, and a repeat of
+// a no-op on the same inputs is the same no-op only with nothing else to read:
+// never true for a machine with a weighted table (the seed differs), an edge band
+// (the previous value moves), a script condition (it reads the host, unwatched), a
+// mutable table or a lazy input (its value is unknown until a clause reaches it),
+// in any list; and never true before the first step, or after a Rebind or Close.
+// A getter that fails repeats only if it failed last step. A host asks only for a
+// step with no message of its own to dispatch: such a step is new whatever its
+// inputs say.
+bool WouldRepeat(instance const& subject, void const* self);
 
 // Moves subject onto binding (P14): a reload, which the host runs on each
 // instance once it has prepared the changed machine again and bound it. Like a

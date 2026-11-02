@@ -1687,3 +1687,496 @@ TEST(LazyInput, EagerInputsStillReadFirst)
 	Step(subject, &host, 2);
 	EXPECT_EQ(probe.reads, 3) << "once per step however many clauses use it";
 }
+
+// ---- WouldRepeat -------------------------------------------------------------------
+
+namespace
+{
+
+// idle moves to walk at 0.5; walk stays. So below 0.5 a step is a no-op.
+constexpr std::string_view kCalm = R"(
+[table calm
+  (input energy double 0..1)
+  (order mode)]
+>mode, energy: band, next
+[machine m
+  (state mode hash (members idle walk) (initial idle))
+  (input energy double 0..1)]
+list,from,where,given,set,emit,overrides
+step,calm,mode=state.mode,energy=input.energy,mode=next,,
+)";
+
+constexpr std::string_view kCalmRows = "mode, energy, next\nidle, 0..0.5, idle\nidle, 0.5..1, walk\nwalk, 0..1, walk\n";
+
+// A second table reads energy, with a boundary at 0.3 calm does not have, and
+// writes an int: data state, which enters nothing.
+constexpr std::string_view kTwoTables = R"(
+[table calm
+  (input energy double 0..1)
+  (order mode)]
+>mode, energy: band, next
+[table tally
+  (input energy double 0..1)
+  (order mode)]
+>mode, energy: band, level: int
+[machine m
+  (state mode hash (members idle walk) (initial idle))
+  (state level int (initial 0))
+  (input energy double 0..1)]
+list,from,where,given,set,emit,overrides
+step,calm,mode=state.mode,energy=input.energy,mode=next,,
+step,tally,mode=state.mode,energy=input.energy,level=level,,
+)";
+
+constexpr std::string_view kEnergyTallyRows = "mode, energy, level\nidle, 0..0.3, 1\nidle, 0.3..1, 2\nwalk, 0..1, 3\n";
+
+constexpr std::string_view kKeyed = R"(
+[table react
+  (order mode kind)]
+>mode, >kind?, next
+[machine m
+  (state mode hash (members idle walk) (initial idle))
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+step,react,mode=state.mode kind=input.message,,mode=next,,
+)";
+
+constexpr std::string_view kKeyedRows = "mode, kind, next\nidle, , idle\nidle, poke, walk\nwalk, , walk\n";
+
+// Settles subject: a step, whose result the test does not care for, then one
+// that repeats it.
+void Settle(instance& subject, host_object const& host)
+{
+	Step(subject, &host, 1);
+	Step(subject, &host, 2);
+}
+
+}
+
+TEST(WouldRepeat, SameBandCellRepeats)
+{
+	machine_fixture f(kCalm, {kCalmRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "creation is no last step: its entry list ran, and nothing says a step is idle";
+	Step(subject, &host, 1);
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "the same value";
+	host.energy = 0.45;
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "the same cell";
+	host.energy = 0.0;
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "the cell's bottom, which a band includes";
+	host.energy = 0.5;
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "the next cell's bottom: a band's top is not in it";
+	EXPECT_EQ(subject.State(0).i, Hash("idle"));
+	Step(subject, &host, 2);
+	EXPECT_EQ(subject.State(0).i, Hash("walk"));
+}
+
+TEST(WouldRepeat, CrossingAnyTablesBandDoesNot)
+{
+	machine_fixture f(kTwoTables, {kCalmRows, kEnergyTallyRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Settle(subject, host);
+	EXPECT_TRUE(WouldRepeat(subject, &host));
+	host.energy = 0.4;   // calm's band still holds; only tally's boundary is crossed
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	Step(subject, &host, 3);
+	EXPECT_EQ(subject.State(1).i, 2) << "skipping it would have lost this write";
+}
+
+TEST(WouldRepeat, ChangedKeyInputDoesNot)
+{
+	machine_fixture f(kKeyed, {kKeyedRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Step(subject, &host, 1);
+	EXPECT_TRUE(WouldRepeat(subject, &host));
+	host.message = Hash("poke");
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	host.message = 0;
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "asking compares with the last step, and left its inputs as they were";
+}
+
+TEST(WouldRepeat, LastStepThatEmittedDoesNot)
+{
+	std::string const source = Replace(Replace(kCalm, ">mode, energy: band, next", ">mode, energy: band, next, command"),
+		"mode=next,,", "mode=next,command,");
+	machine_fixture f(source, {"mode, energy, next, command\nidle, 0..0.5, idle, (Say)\nidle, 0.5..1, walk, (Say)\nwalk, 0..1, walk, (Say)\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Settle(subject, host);
+	EXPECT_EQ(subject.Emitted().size(), 1u);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "a repeat emits again";
+}
+
+TEST(WouldRepeat, LastStepThatChangedStateDoesNot)
+{
+	machine_fixture f(kTwoTables, {kCalmRows, kEnergyTallyRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Step(subject, &host, 1);
+	EXPECT_EQ(subject.State(1).i, 1);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "an int column moved: no hash, but state";
+	Step(subject, &host, 2);
+	EXPECT_TRUE(WouldRepeat(subject, &host));
+	host.energy = 0.7;
+	Step(subject, &host, 3);
+	EXPECT_EQ(subject.State(0).i, Hash("walk"));
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "the hash moved: a state was entered";
+}
+
+TEST(WouldRepeat, WeightedTableNeverRepeats)
+{
+	// One row, so the draw cannot move the state: only the exclusion says no.
+	machine_fixture f(R"(
+[table wander
+  (pick weighted w)
+  (order mode)]
+>mode, w: double, mood
+[machine m
+  (state mode hash (members idle) (initial idle))
+  (state mood hash (members calm edgy) (initial calm))]
+list,from,where,given,set,emit,overrides
+step,wander,mode=state.mode,,mood=mood,,
+)", {"mode, w, mood\nidle, 1, calm\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Settle(subject, host);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "another seed draws another row";
+}
+
+TEST(WouldRepeat, EdgeBandNeverRepeats)
+{
+	std::string const source = Replace(kCalm, ">mode, energy: band, next", ">mode, ^energy, next");
+	machine_fixture f(source, {"mode, energy, next\nidle, 0.5..1, walk\nidle, , idle\nwalk, , walk\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Settle(subject, host);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "a crossing depends on the previous value, which no cell shows";
+}
+
+TEST(WouldRepeat, MutableTableNeverRepeats)
+{
+	static add_column const columns[] = {{"mode", column_type::Hash, true, UINT32_MAX, key_domain::Rows()},
+		{"next", column_type::Hash}};
+	static uint32_t const byMode[] = {0};
+	static order_by const order{byMode, false};
+	create_table const    tables[] = {{"moves", columns, &order, false, {}, pick_policy::Best}};
+	auto schemaOf = BuildSchema(tables);
+	ASSERT_TRUE(schemaOf.has_value()) << RefusalOf(schemaOf);
+	cell const       members[] = {cell::Integer(Hash("idle"))};
+	add_state const  state[]   = {{"mode", column_type::Hash, members, members[0]}};
+	source           mode;
+	mode.kind = source_kind::State;
+	mode.name = "mode";
+	clause_bind const where[] = {{"mode", mode}};
+	set_state const   sets[]  = {{"mode", "next"}};
+	add_clause const  step[]  = {{"moves", where, {}, sets, {}}};
+	create_machine const definition{"m", state, {}, {}, {}, step, {}};
+	relation_store   store(std::move(*schemaOf));
+	cell const       row[] = {members[0], members[0]};
+	ASSERT_EQ(RefusalOf(store.Insert(insert_row{0, 1, row})), "(accepted)");
+	auto machine = Prepare(definition, store);
+	ASSERT_TRUE(machine.has_value()) << RefusalOf(machine);
+	auto binding = Bind(*machine, host_binding{});
+	ASSERT_TRUE(binding.has_value()) << RefusalOf(binding);
+	host_object host;
+	instance    subject = CreateInstance(**binding, 7, 1, &host);
+	Settle(subject, host);
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+}
+
+TEST(WouldRepeat, LazyInputNeverRepeatsAndIsNotCalled)
+{
+	input_probe     probe;
+	int             reports = 0;
+	machine_fixture f(kCalm, {kCalmRows}, ProbeHost(probe, true, reports));
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Settle(subject, host);
+	int const reads = probe.reads;
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	EXPECT_EQ(probe.reads, reads);
+}
+
+TEST(WouldRepeat, CallsEachGetterOnce)
+{
+	input_probe     probe;
+	int             reports = 0;
+	machine_fixture f(kCalm, {kCalmRows}, ProbeHost(probe, false, reports));
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Step(subject, &host, 1);
+	int const reads = probe.reads;
+	EXPECT_TRUE(WouldRepeat(subject, &host));
+	EXPECT_EQ(probe.reads, reads + 1);
+}
+
+TEST(WouldRepeat, FailedGetterRepeatsOnlyIfItFailedLastStep)
+{
+	input_probe     probe;
+	int             reports = 0;
+	machine_fixture f(kCalm, {kCalmRows}, ProbeHost(probe, false, reports));
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Step(subject, &host, 1);
+
+	probe.fails = true;
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "it read last step: its clauses now hold";
+	EXPECT_EQ(reports, 0) << "asking reports nothing: the step reports it";
+	probe.fails = false;
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "asking left the read state as it was";
+
+	probe.fails = true;
+	Step(subject, &host, 2);
+	EXPECT_EQ(reports, 1);
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "a message gauge off its message: failed, and failed last step";
+	probe.fails = false;
+	probe.value = 0.9;
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "it failed last step, and now answers";
+	Step(subject, &host, 3);
+	EXPECT_EQ(subject.State(0).i, Hash("walk"));
+	EXPECT_EQ(reports, 1);
+}
+
+// Not in the plan's list: a script condition reads the host with no input to
+// watch, so nothing about the inputs says it would answer the same.
+TEST(WouldRepeat, ScriptConditionNeverRepeats)
+{
+	machine_fixture f(R"(
+[table gate
+  (order mode)]
+>mode, when, next
+[machine m
+  (state mode hash (members idle walk) (initial idle))]
+list,from,where,given,set,emit,overrides
+step,gate,mode=state.mode,,mode=next,,
+)", {"mode, when, next\nidle, cornered, walk\nidle, , idle\nwalk, , walk\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Settle(subject, host);
+	host.cornered = true;
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	Step(subject, &host, 3);
+	EXPECT_EQ(subject.State(0).i, Hash("walk")) << "skipping it would have lost this";
+}
+
+// Not in the plan's list: a cyclic input wraps, so its cell is no interval of
+// the value read. 1.2 and 1.7 lie past every edge, and wrap to either side of 0.5.
+TEST(WouldRepeat, CyclicInputIsComparedExactly)
+{
+	machine_fixture f(R"(
+[table calm
+  (input phase double 0..1 cyclic)
+  (order mode)]
+>mode, phase: band, next
+[machine m
+  (state mode hash (members idle walk) (initial idle))
+  (input t double)]
+list,from,where,given,set,emit,overrides
+step,calm,mode=state.mode,phase=input.t,mode=next,,
+)", {"mode, phase, next\nidle, 0..0.5, idle\nidle, 0.5..1, walk\nwalk, 0..1, walk\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.t           = 1.2;
+	instance subject = f.Create(host);
+	Step(subject, &host, 1);
+	EXPECT_TRUE(WouldRepeat(subject, &host));
+	host.t = 1.7;
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	Step(subject, &host, 2);
+	EXPECT_EQ(subject.State(0).i, Hash("walk"));
+}
+
+// A NaN refuses the pick of a ranged input: it is a cell of its own, in no band.
+TEST(WouldRepeat, NaNIsACellOfItsOwn)
+{
+	machine_fixture f(kCalm, {kCalmRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Step(subject, &host, 1);
+	host.energy = std::numeric_limits<double>::quiet_NaN();
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	Step(subject, &host, 2);
+	EXPECT_EQ(subject.Answer(trigger::Step, 0).outcome, clause_outcome::Failed);
+	EXPECT_TRUE(WouldRepeat(subject, &host)) << "refused last step, and refused again";
+	host.energy = 0.2;
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+}
+
+// upper_bound puts a NaN past every edge, in the top cell, where a value above
+// the range also lands; a step answers the one and refuses the other.
+TEST(WouldRepeat, NaNSharesNoCellWithTheEnds)
+{
+	machine_fixture f(kCalm, {kCalmRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 5;
+	instance subject = f.Create(host);
+	Settle(subject, host);
+	ASSERT_TRUE(WouldRepeat(subject, &host));
+	host.energy = std::numeric_limits<double>::quiet_NaN();
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+
+	host.energy     = -1;
+	instance bottom = f.Create(host);
+	Settle(bottom, host);
+	ASSERT_TRUE(WouldRepeat(bottom, &host));
+	host.energy = std::numeric_limits<double>::quiet_NaN();
+	EXPECT_FALSE(WouldRepeat(bottom, &host));
+}
+
+// A step compares floats, so a double just under an edge rounds onto it: the
+// cell is the float's too, or the crossing is lost.
+TEST(WouldRepeat, TheCellIsTheFloatABandCompares)
+{
+	machine_fixture f(kCalm, {kCalmRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.4;
+	instance subject = f.Create(host);
+	Step(subject, &host, 1);
+	host.energy = std::nextafter(0.5, 0.0);
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+	Step(subject, &host, 2);
+	EXPECT_EQ(subject.State(0).i, Hash("walk"));
+}
+
+TEST(WouldRepeat, ReloadAndCloseForgetTheLastStep)
+{
+	machine_fixture f(kCalm, {kCalmRows});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.energy      = 0.2;
+	instance subject = f.Create(host);
+	Step(subject, &host, 1);
+	ASSERT_TRUE(WouldRepeat(subject, &host));
+	Rebind(subject, *f.binding, &host, 2);
+	EXPECT_FALSE(WouldRepeat(subject, &host)) << "a rebind's lists ran; no step has run under this binding";
+	Step(subject, &host, 3);
+	ASSERT_TRUE(WouldRepeat(subject, &host));
+	Close(subject, &host, 4);
+	EXPECT_FALSE(WouldRepeat(subject, &host));
+}
+
+TEST(WouldRepeat, AskingAllocatesNothing)
+{
+	if (!kCountsAllocations)
+	{
+		GTEST_SKIP() << kNoCounting;
+	}
+	input_probe     probe;
+	int             reports = 0;
+	machine_fixture f(kCalm, {kCalmRows}, ProbeHost(probe, false, reports));
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Step(subject, &host, 1);
+	AllocationCount count;
+	bool const      repeats = WouldRepeat(subject, &host);
+	probe.fails = true;
+	bool const      fails   = WouldRepeat(subject, &host);
+	EXPECT_EQ(count.Count(), 0u);
+	EXPECT_TRUE(repeats);
+	EXPECT_FALSE(fails);
+}
+
+// The claim itself: an instance that skips what WouldRepeat says repeats stays
+// beside one that steps every time, through an or clause, a clause reading a
+// clause, a fall-through key and data state, and a step WouldRepeat approved
+// changes nothing on the instance that took it.
+TEST(WouldRepeat, SkippingNeverDivergesFromStepping)
+{
+	machine_fixture f(R"(
+[table phase
+  (input t double 0..1)
+  (pick or bits)
+  (order mode)]
+>mode, t: band, bits: flags
+[table lookup
+  (order bits)]
+>bits: flags, next
+[table tally
+  (input energy double 0..1)
+  (order mode)]
+>mode, energy: band, level: int
+[table react
+  (order mode kind)]
+>mode, >kind?, mood: int
+[machine m
+  (state mode hash (members idle walk) (initial idle))
+  (state level int (initial 0))
+  (state mood int (initial 0))
+  (input t double 0..1)
+  (input energy double 0..1)
+  (input message hash)]
+list,from,where,given,set,emit,overrides
+step,phase,mode=state.mode,t=input.t,,,
+step,lookup,bits=clause.0.bits,,mode=next,,
+step,tally,mode=state.mode,energy=input.energy,level=level,,
+step,react,mode=state.mode kind=input.message,,mood=mood,,
+)", {"mode, t, bits\nidle, 0..0.5, 1\nidle, 0.25..1, 2\nwalk, 0..1, 1\nwalk, 0.5..1, 8\n",
+		"bits,next\n1,walk\n2,idle\n3,walk\n9,idle\n",
+		"mode, energy, level\nidle, 0..0.3, 1\nidle, 0.3..1, 2\nwalk, 0..0.6, 3\nwalk, 0.6..1, 4\n",
+		"mode, kind, mood\nidle, , 0\nidle, poke, 1\nwalk, , 0\nwalk, poke, 2\n"});
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    stepping = f.Create(host);
+	instance    skipping = f.Create(host);
+	std::mt19937 random(5);
+	std::uniform_real_distribution<double> unit(0.0, 1.0);
+	int skipped = 0;
+	int stepped = 0;
+	for (int i = 0; i < 4000; ++i)
+	{
+		if (unit(random) < 0.15)
+		{
+			host.t = unit(random);
+		}
+		if (unit(random) < 0.15)
+		{
+			host.energy = unit(random);
+		}
+		host.message = unit(random) < 0.05 ? Hash("poke") : 0;
+		bool const repeats = WouldRepeat(skipping, &host);
+		if (repeats)
+		{
+			++skipped;
+		}
+		else
+		{
+			++stepped;
+			Step(skipping, &host, uint64_t(i));
+		}
+		Step(stepping, &host, uint64_t(i));
+		if (repeats)
+		{
+			EXPECT_FALSE(Changed(stepping)) << "step " << i;
+		}
+		for (size_t s = 0; s < stepping.StateCount(); ++s)
+		{
+			ASSERT_EQ(skipping.State(s).i, stepping.State(s).i) << "step " << i << " column " << s;
+		}
+	}
+	EXPECT_GT(skipped, 1000) << "or the test proves nothing";
+	EXPECT_GT(stepped, 100);
+}

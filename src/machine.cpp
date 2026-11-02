@@ -1155,6 +1155,106 @@ tl::expected<detail::prepared_clause, ErrorContext> ProveClause(machine_def cons
 	return out;
 }
 
+// What a step depends on beyond state, inputs and proved rows, or a value that
+// differs on a repeat: a draw (the seed), a crossing (the previous value), a
+// script (the host, unwatched), or rows a store can change. Every list counts,
+// so an exclusion needs no argument about which lists a repeat runs.
+bool RepeatsItsNoOp(table_def const& table)
+{
+	if (table.pick == pick_policy::Weighted || table.edges || !table.read_only)
+	{
+		return false;
+	}
+	return std::none_of(table.columns.begin(), table.columns.end(),
+		[](column_def const& column) { return column.type == column_type::Condition; });
+}
+
+detail::repeat_plan PlanRepeat(machine_access::Data const& machine, schema const& tables)
+{
+	detail::repeat_plan      plan;
+	detail::machine_def const& def = machine.def;
+	// Watched is wider than the clauses' tables: a domain read from a mutable table.
+	for (detail::watched_table const& watched : machine.watched)
+	{
+		if (!RepeatsItsNoOp(tables.tables()[watched.table]))
+		{
+			return plan;
+		}
+	}
+
+	std::vector<std::vector<float>> edges(def.inputs.size());
+	std::vector<uint8_t>            exact(def.inputs.size());
+	for (size_t i = 0; i < def.inputs.size(); ++i)
+	{
+		exact[i] = def.inputs[i].type != column_type::Double;
+	}
+	for (size_t list = 0; list < kTriggerCount; ++list)
+	{
+		for (uint32_t c = 0; c < def.lists[list].size(); ++c)
+		{
+			resolved_clause const& clause  = def.lists[list][c];
+			TableVersion const&    version = *machine.lists[list][c].version;
+			table_def const&       table   = version_access::Def(version);
+			table_rows const&      rows    = version_access::Rows(version);
+			for (resolved_source const& key : clause.keys)
+			{
+				if (key.kind == source_kind::Input)
+				{
+					exact[key.index] = 1;
+				}
+			}
+			for (uint32_t in = 0; in < clause.inputs.size(); ++in)
+			{
+				resolved_source const& from = clause.inputs[in];
+				// A state, an earlier clause's answer or a literal moves only with
+				// what is already compared.
+				if (from.kind != source_kind::Input)
+				{
+					continue;
+				}
+				if (table.inputs[in].type != column_type::Double || table.inputs[in].cyclic)
+				{
+					exact[from.index] = 1;
+					continue;
+				}
+				for (uint32_t col = 0; col < table.columns.size(); ++col)
+				{
+					if (table.columns[col].type != column_type::Band || table.columns[col].input != in)
+					{
+						continue;
+					}
+					for (size_t r = 0; r < rows.RowCount(); ++r)
+					{
+						cell const band = rows.cells[r * rows.valueCount + rows.slot[col]];
+						edges[from.index].push_back(band.v[0]);
+						edges[from.index].push_back(band.v[1]);
+					}
+				}
+			}
+		}
+	}
+
+	shared_array<detail::input_watch> watches(def.inputs.size());
+	std::vector<float>                flat;
+	for (size_t i = 0; i < def.inputs.size(); ++i)
+	{
+		std::vector<float>& own = edges[i];
+		std::sort(own.begin(), own.end());
+		own.erase(std::unique(own.begin(), own.end()), own.end());
+		watches[i].exact = exact[i] != 0;
+		watches[i].first = static_cast<uint32_t>(flat.size());
+		if (exact[i] == 0)
+		{
+			watches[i].count = static_cast<uint32_t>(own.size());
+			flat.insert(flat.end(), own.begin(), own.end());
+		}
+	}
+	plan.repeatable = true;
+	plan.inputs     = immutable_array<detail::input_watch>::FromArray(watches.data(), watches.size());
+	plan.edges      = immutable_array<float>::FromArray(flat.data(), flat.size());
+	return plan;
+}
+
 }
 
 tl::expected<void, ErrorContext> CheckMachine(create_machine const& definition, schema const& tables)
@@ -1246,6 +1346,7 @@ tl::expected<counted_ptr<Machine const>, ErrorContext> Prepare(create_machine co
 		}
 	}
 	data->watched = immutable_array<detail::watched_table>::FromArray(watch.tables.data(), watch.tables.size());
+	data->repeat  = PlanRepeat(*data, tables);
 	return machine_access::Make(std::move(data));
 }
 
