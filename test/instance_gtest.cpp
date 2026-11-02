@@ -174,7 +174,7 @@ struct machine_fixture
 	counted_ptr<Machine const>      machine;
 	counted_ptr<Binding const>      binding;
 
-	machine_fixture(std::string_view source, std::vector<std::string_view> const& rows)
+	machine_fixture(std::string_view source, std::vector<std::string_view> const& rows, host_binding host = HostGetters())
 		: document(Parse(source)), store(std::move(document.tables))
 	{
 		// A refused document already failed the test; a run on it would crash it.
@@ -199,7 +199,7 @@ struct machine_fixture
 			return;
 		}
 		machine = *prepared;
-		auto bound = Bind(machine, HostGetters());
+		auto bound = Bind(machine, std::move(host));
 		EXPECT_TRUE(bound.has_value()) << RefusalOf(bound);
 		if (bound)
 		{
@@ -1488,4 +1488,202 @@ TEST(MachineStep, AStepThatHoldsOrDrawsAllocatesNothing)
 	EXPECT_EQ(CountedSteps(subject, host, 60, varyPhase, clauses, chainSeen), 0u);
 	EXPECT_GT(chainSeen[size_t(clause_outcome::Failed)], 0) << "the or clause's condition raised";
 	EXPECT_GT(chainSeen[size_t(clause_outcome::Answered)], 100) << "the draws among them";
+}
+
+// ---- Lazy inputs ----------------------------------------------------------------------
+
+namespace
+{
+
+// What a probe getter answers and how often it was asked.
+struct input_probe
+{
+	int    reads = 0;
+	double value = 0.1;
+	bool   fails = false;
+};
+
+cell ReadProbe(void* data, void const*, ErrorContext* error_out)
+{
+	input_probe& probe = *static_cast<input_probe*>(data);
+	++probe.reads;
+	if (probe.fails)
+	{
+		*error_out = ErrorContext("no target");
+	}
+	return cell::Real(probe.value);
+}
+
+// Every name resolves to the probe; reports counts what the host was told.
+host_binding ProbeHost(input_probe& probe, bool lazy, int& reports)
+{
+	host_binding host;
+	host.resolve = [&probe, lazy](std::string_view) -> tl::expected<input_getter, ErrorContext>
+	{
+		return input_getter{&ReadProbe, &probe, nullptr, lazy};
+	};
+	host.report = [&reports](uint64_t, uint32_t, size_t, ErrorContext const&)
+	{
+		++reports;
+	};
+	return host;
+}
+
+// gate answers unless the host is broken (its scripted row then fails), and
+// holds back both readers of `slow` behind it.
+constexpr std::string_view kOpenTables = R"(
+[table gate
+  (order mode)]
+>mode, when, open
+)";
+
+constexpr std::string_view kOpenRows = "mode, when, open\na, cornered, yes\na, , no\nb, cornered, yes\nb, , no\n";
+
+constexpr std::string_view kReadersSource = R"(
+[table watch
+  (input slow double 0..1)
+  (order open)]
+>open, slow: band, next
+[table tally
+  (input slow double 0..1)
+  (order open)]
+>open, slow: band, count: int
+[machine lazy
+  (state mode hash (members a b) (initial a))
+  (state count int (initial 0))
+  (input slow double 0..1)]
+list,from,where,given,set,emit,overrides
+step,gate,mode=state.mode,,,,
+step,watch,open=clause.0.open,slow=input.slow,mode=next,,
+step,tally,open=clause.0.open,slow=input.slow,count=count,,
+)";
+
+constexpr std::string_view kLookRows = "open, slow, next\nyes, 0..1, a\nno, 0..1, a\n";
+constexpr std::string_view kCountRows = "open, slow, count\nyes, 0..1, 1\nno, 0..1, 2\n";
+
+constexpr std::string_view kRiseSource = R"(
+[table watch
+  (input rise double 0..1)
+  (order open)]
+>open, ^rise, next
+[machine lazy
+  (state mode hash (members a b) (initial a))
+  (input threat double 0..1)]
+list,from,where,given,set,emit,overrides
+step,gate,mode=state.mode,,,,
+step,watch,open=clause.0.open,rise=input.threat,mode=next,,
+)";
+
+constexpr std::string_view kRiseRows = "open, rise, next\nyes, 0.5..1, b\nyes, , a\nno, , a\n";
+
+machine_fixture TwoReaders(input_probe& probe, bool lazy, int& reports)
+{
+	return machine_fixture(std::string(kOpenTables) + std::string(kReadersSource), {kOpenRows, kLookRows, kCountRows},
+		ProbeHost(probe, lazy, reports));
+}
+
+machine_fixture EdgeReader(input_probe& probe, int& reports)
+{
+	return machine_fixture(std::string(kOpenTables) + std::string(kRiseSource), {kOpenRows, kRiseRows},
+		ProbeHost(probe, true, reports));
+}
+
+}
+
+TEST(LazyInput, ReadOnlyWhenAClauseReachesIt)
+{
+	input_probe probe;
+	int         reports = 0;
+	machine_fixture f   = TwoReaders(probe, true, reports);
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	EXPECT_EQ(probe.reads, 0) << "creation runs only the create and entry lists, which read nothing";
+	host.broken = true;   // gate's scripted row fails, so neither reader is reached
+	Step(subject, &host, 1);
+	EXPECT_EQ(probe.reads, 0);
+	host.broken = false;
+	Step(subject, &host, 2);
+	EXPECT_EQ(probe.reads, 1);
+}
+
+TEST(LazyInput, ReadOncePerStep)
+{
+	input_probe probe;
+	int         reports = 0;
+	machine_fixture f   = TwoReaders(probe, true, reports);
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	Step(subject, &host, 1);
+	EXPECT_EQ(probe.reads, 1) << "watch and tally both use slow";
+	EXPECT_EQ(subject.State(1).i, 2) << "tally ran, on the value watch's read gave it";
+	Step(subject, &host, 2);
+	EXPECT_EQ(probe.reads, 2);
+}
+
+TEST(LazyInput, FailureHoldsItsClausesAndReportsOnce)
+{
+	input_probe probe;
+	probe.fails = true;
+	int         reports = 0;
+	machine_fixture f   = TwoReaders(probe, true, reports);
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	for (int i = 0; i < 3; ++i)
+	{
+		Step(subject, &host, uint64_t(i));
+		EXPECT_EQ(subject.Answer(trigger::Step, 1).outcome, clause_outcome::SourceHeld);
+		EXPECT_EQ(subject.Answer(trigger::Step, 2).outcome, clause_outcome::SourceHeld);
+		EXPECT_EQ(probe.reads, i + 1) << "a failed read is not retried by the second reader";
+	}
+	EXPECT_EQ(subject.State(1).i, 0) << "the held tally wrote nothing";
+	EXPECT_EQ(reports, 1);
+}
+
+TEST(LazyInput, UnreadKeepsThePreviousValueForAnEdge)
+{
+	input_probe probe;
+	int         reports = 0;
+	machine_fixture f   = EdgeReader(probe, reports);
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	host.cornered = true;   // gate opens the edge row's key
+	instance    subject = f.Create(host);
+	probe.value = 0.1;
+	Step(subject, &host, 1);   // reached: previous becomes 0.1
+	EXPECT_EQ(subject.State(0).i, Hash("a"));
+	host.broken = true;
+	probe.value = 0.9;
+	Step(subject, &host, 2);   // skipped: 0.9 is never read
+	EXPECT_EQ(probe.reads, 1);
+	host.broken = false;
+	Step(subject, &host, 3);   // reached: 0.1 -> 0.9 crosses into 0.5..1
+	EXPECT_EQ(subject.State(0).i, Hash("b"));
+
+	// An input never read has no previous value, so its first reach crosses nothing.
+	instance fresh = f.Create(host);
+	host.broken = true;
+	Step(fresh, &host, 1);
+	host.broken = false;
+	Step(fresh, &host, 2);
+	EXPECT_EQ(fresh.State(0).i, Hash("a"));
+}
+
+TEST(LazyInput, EagerInputsStillReadFirst)
+{
+	input_probe probe;
+	int         reports = 0;
+	machine_fixture f   = TwoReaders(probe, false, reports);
+	ASSERT_TRUE(f.binding);
+	host_object host;
+	instance    subject = f.Create(host);
+	EXPECT_EQ(probe.reads, 1) << "creation reads an ordinary input";
+	host.broken = true;
+	Step(subject, &host, 1);
+	EXPECT_EQ(probe.reads, 2) << "read although no clause reached it";
+	host.broken = false;
+	Step(subject, &host, 2);
+	EXPECT_EQ(probe.reads, 3) << "once per step however many clauses use it";
 }

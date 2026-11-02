@@ -308,7 +308,7 @@ Creation crosses no edges.
 
 **`Step(instance, self, seed)`** does the following:
 
-1. Reads every input once, from its getter.
+1. Reads every eager input once, from its getter. A lazy getter (`input_getter::lazy`) is skipped here; it is read at most once per step, the first time a running clause uses its input, and a step whose clauses all hold before reaching it never calls it. A lazy failure holds and reports as any getter's does.
 2. Copies `current` into `next`, so a column no clause writes keeps its value.
 3. Runs `step` in order. Clauses read state from `next`, so they see earlier writes, and a later write wins.
 4. If any hash state column changed (A → B → A counts as no change), runs `exit` and then `entry`, only the clauses entered on a changed column. `exit` reads the state being left and `entry` reads the new state. Entry's writes land last.
@@ -327,7 +327,7 @@ A clause that cannot answer **holds**: it writes nothing and emits nothing. `Ans
 
 `clause_answer::fellThrough` says whether the clause's own keys had no run and a retry with fall-through keys blanked answered.
 
-**Edges** compare against each input's *previous value*. That is the last real value read, ignoring failed reads and NaN. A crossing is spent even if the clause reading it held, and a fast input that jumps across a short band still counts as crossing it.
+**Edges** compare against each input's *previous value*. That is the last real value read, ignoring failed reads, NaN and steps on which a lazy input went unread. A crossing is spent even if the clause reading it held, and a fast input that jumps across a short band still counts as crossing it.
 
 **`Rebind(instance, newBinding, self, seed)`** is hot reload:
 

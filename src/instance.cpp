@@ -260,6 +260,12 @@ using detail::prepared_clause;
 using detail::resolved_clause;
 using detail::resolved_source;
 
+// An input's InputRead state. A failed read is 0 so the fast path stays one
+// byte test; a lazy input is kUnread until a clause first uses it.
+constexpr uint8_t kInputFailed = 0;
+constexpr uint8_t kInputRead   = 1;
+constexpr uint8_t kInputUnread = 2;
+
 // One run of a list over an instance: the buffers it reads and writes, laid
 // out by CreateInstance so nothing here allocates.
 struct list_run
@@ -268,8 +274,8 @@ struct list_run
 	machine_access::Data const&        machine;
 	shared_array<cell>&                 next;
 	shared_array<cell> const&           state;     // what a State source reads: next, or current for exit
-	shared_array<cell> const&           inputs;
-	shared_array<uint8_t> const&        inputRead;
+	shared_array<cell>&                 inputs;
+	shared_array<uint8_t>&              inputRead;
 	shared_array<cell> const&           previous;   // per machine input, for edges
 	std::span<clause_answer>           answers;   // this list's
 	shared_array<uint64_t>&             reported;
@@ -300,6 +306,39 @@ cell AnswerValue(prepared_clause const& clause, clause_answer const& answer, uin
 	return CellAt(*clause.version, answer.row, column);
 }
 
+// The report-once memory: whether failure bit has been reported by this
+// instance, marking it if not. Only the first occurrence reaches the host, so
+// only it builds an error.
+bool FirstReport(shared_array<uint64_t>& reported, size_t bit)
+{
+	uint64_t&      word = reported[bit / 64];
+	uint64_t const mask = uint64_t(1) << (bit % 64);
+	if ((word & mask) != 0)
+	{
+		return false;
+	}
+	word |= mask;
+	return true;
+}
+
+// Reads input i with its getter, records whether it answered, and reports a
+// failure once per instance. The one place a getter is called, so a step's
+// eager read and a lazy input's first use report alike.
+bool ReadInput(binding_access::Data const& binding, detail::machine_def const& def, shared_array<cell>& inputs,
+	shared_array<uint8_t>& read, shared_array<uint64_t>& reported, uint64_t id, void const* self, size_t i)
+{
+	input_getter const& g = binding.getters[i];
+	ErrorContext        error;
+	inputs[i] = g.read(g.data, self, &error);
+	bool const answered = error.empty();
+	read[i]             = answered ? kInputRead : kInputFailed;
+	if (!answered && FirstReport(reported, i) && binding.report)
+	{
+		binding.report(id, kNoTable, kNoRow, std::move(error).with("machine '", def.name, "' input '", def.inputs[i].name, "'"));
+	}
+	return answered;
+}
+
 // Reads sources into out; false when one has no value this step (an input
 // whose getter failed, or an earlier clause that did not answer).
 bool ReadSources(list_run const& run, std::span<resolved_source const> sources, shared_array<cell>& out)
@@ -313,7 +352,12 @@ bool ReadSources(list_run const& run, std::span<resolved_source const> sources, 
 			out[s] = run.state[from.index];
 			break;
 		case source_kind::Input:
-			if (!run.inputRead[from.index])
+			// An eager input is already read; a lazy one is read the first time a clause
+			// reaches it, and then answers from its state like any other.
+			if (run.inputRead[from.index] != kInputRead
+				&& !(run.inputRead[from.index] == kInputUnread
+					&& ReadInput(run.binding, run.machine.def, run.inputs, run.inputRead, run.reported, run.id, run.self,
+						from.index)))
 			{
 				return false;
 			}
@@ -492,21 +536,6 @@ laid_pick PickLaid(prepared_clause const& clause, size_t tuple, std::span<cell c
 		return laid_pick{};
 	}
 	return TryGroup(version, layout, fallback, point, given, before, self, error);
-}
-
-// The report-once memory: whether failure bit has been reported by this
-// instance, marking it if not. Only the first occurrence reaches the host, so
-// only it builds an error.
-bool FirstReport(shared_array<uint64_t>& reported, size_t bit)
-{
-	uint64_t&      word = reported[bit / 64];
-	uint64_t const mask = uint64_t(1) << (bit % 64);
-	if ((word & mask) != 0)
-	{
-		return false;
-	}
-	word |= mask;
-	return true;
 }
 
 // The one place a clause's hold reaches the host: once per bit, the error
@@ -863,9 +892,10 @@ void MarkNotRun(instance& subject, trigger list)
 		clause_answer{});
 }
 
-// Every input once per step, so every clause of the step reads one value of
-// it, from its getter. A getter that fails is reported once; the
-// clauses reading it then hold without reporting again.
+// Every eager input once per step, so every clause of the step reads one value
+// of it, from its getter. A lazy input is left kUnread for the clause that
+// first uses it. A getter that fails is reported once; the clauses reading it
+// then hold without reporting again.
 void ReadInputs(instance& subject, void const* self)
 {
 	binding_access::Data const&  binding = binding_access::Of(*instance_access::BindingOf(subject));
@@ -874,21 +904,19 @@ void ReadInputs(instance& subject, void const* self)
 	shared_array<uint8_t>& read    = instance_access::InputRead(subject);
 	for (size_t i = 0; i < binding.getters.size(); ++i)
 	{
-		input_getter const& g = binding.getters[i];
-		ErrorContext        error;
-		inputs[i] = g.read(g.data, self, &error);
-		read[i]   = error.empty() ? 1 : 0;
-		if (!read[i] && FirstReport(instance_access::Reported(subject), i) && binding.report)
+		if (binding.getters[i].lazy)
 		{
-			binding.report(subject.id(), kNoTable, kNoRow,
-				std::move(error).with("machine '", def.name, "' input '", def.inputs[i].name, "'"));
+			read[i] = kInputUnread;
+			continue;
 		}
+		ReadInput(binding, def, inputs, read, instance_access::Reported(subject), subject.id(), self, i);
 	}
 }
 
 // The values this step read become the previous values the next step's edges
-// cross from. A getter that failed, or a NaN, is no value read: the previous
-// value stays the last one that was, so a crossing is not lost across it.
+// cross from. A getter that failed, a NaN, or a lazy input no clause reached is
+// no value read: the previous value stays the last one that was, so a crossing
+// is not lost across it.
 void AdvancePrevious(instance& subject)
 {
 	shared_array<cell> const&    inputs   = instance_access::Inputs(subject);
@@ -898,7 +926,7 @@ void AdvancePrevious(instance& subject)
 	for (size_t i = 0; i < inputs.size(); ++i)
 	{
 		bool const nan = def.inputs[i].type == column_type::Double && std::isnan(inputs[i].d);
-		if (read[i] && !nan)
+		if (read[i] == kInputRead && !nan)
 		{
 			previous[i] = inputs[i];
 		}
@@ -1117,6 +1145,8 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 	shared_array<cell> const& next = instance_access::Next(out);
 	RunList(out, trigger::Create, next, self, seed);
 	RunList(out, trigger::Entry, next, self, seed);
+	// A lazy input these lists reached is a value read, as an eager one is.
+	AdvancePrevious(out);
 	instance_access::Current(out).swap(instance_access::Next(out));
 	Emit(out, trigger::Create);
 	Emit(out, trigger::Entry);
@@ -1211,6 +1241,7 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 	// Entering again, under the new binding.
 	ReadStill(subject, self);
 	RunList(subject, trigger::Entry, next, self, seed);
+	AdvancePrevious(subject);
 	current.swap(next);
 	shared_array<cell>& previous = instance_access::Previous(subject);
 	for (size_t i = 0; i < carried.size(); ++i)

@@ -35,11 +35,18 @@ enum class trigger : uint8_t;
 // condition's, except the first time it reports one (see host_binding), so a
 // repeated failure allocates only what the host's message does: one past the
 // small-string size allocates on the host's side, not Tabular's.
+//
+// lazy: an ordinary getter is read for every step, before any clause runs. A
+// lazy getter is read at most once per step, on the step's thread, the first
+// time a running clause uses its input, so a step whose clauses all hold
+// before reaching it never pays for it. self and the failure report are as
+// for any getter. An unread lazy input keeps its previous value for edges.
 struct input_getter
 {
 	cell (*read)(void* data, void const* self, ErrorContext* error_out) = nullptr;
 	void* data                                                          = nullptr;
 	void (*release)(void* data)                                         = nullptr;
+	bool lazy                                                           = false;
 };
 
 // What the host supplies to bind a machine.
