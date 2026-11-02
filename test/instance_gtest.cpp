@@ -1925,6 +1925,8 @@ TEST(WouldRepeat, CallsEachGetterOnce)
 	int const reads = probe.reads;
 	EXPECT_TRUE(WouldRepeat(subject, &host));
 	EXPECT_EQ(probe.reads, reads + 1);
+	EXPECT_TRUE(SkipIfRepeats(subject, &host));
+	EXPECT_EQ(probe.reads, reads + 2);
 }
 
 TEST(WouldRepeat, FailedGetterRepeatsOnlyIfItFailedLastStep)
@@ -2023,6 +2025,119 @@ TEST(WouldRepeat, NaNIsACellOfItsOwn)
 	EXPECT_FALSE(WouldRepeat(subject, &host));
 }
 
+namespace
+{
+
+constexpr std::string_view kOneBandRows = "mode, energy, next\nidle, 0..1, idle\nwalk, 0..1, walk\n";
+constexpr std::string_view kEdgeRows    = "mode, energy, next\nidle, 0.5..1, walk\nidle, , idle\nwalk, , walk\n";
+
+std::string EdgeSource()
+{
+	return Replace(kCalm, ">mode, energy: band, next", ">mode, ^energy, next");
+}
+
+}
+
+// A skip stands in for a step, so a Rebind after it must carry the history a
+// step would have left, into a machine that reads it.
+TEST(WouldRepeat, SkipThenRebindMatchesAlwaysStepping)
+{
+	machine_fixture plain(kCalm, {kOneBandRows});
+	machine_fixture edged(EdgeSource(), {kEdgeRows});
+	ASSERT_TRUE(plain.binding);
+	ASSERT_TRUE(edged.binding);
+
+	struct walk_through
+	{
+		double settled;
+		double skippedTo;
+		double stepped;
+		char const* expected;
+	};
+	// Up: the twin read 0.9, so 0.9 crosses nothing. Down: the twin read 0.1, so 0.7 crosses.
+	for (walk_through const& walk : {walk_through{0.1, 0.9, 0.9, "idle"}, walk_through{0.9, 0.1, 0.7, "walk"}})
+	{
+		host_object host;
+		host.energy       = walk.settled;
+		instance skipping = plain.Create(host);
+		instance stepping = plain.Create(host);
+		Step(skipping, &host, 1);
+		Step(stepping, &host, 1);
+		host.energy = walk.skippedTo;
+		ASSERT_TRUE(SkipIfRepeats(skipping, &host));
+		Step(stepping, &host, 2);
+		Rebind(skipping, *edged.binding, &host, 3);
+		Rebind(stepping, *edged.binding, &host, 3);
+		host.energy = walk.stepped;
+		Step(skipping, &host, 4);
+		Step(stepping, &host, 4);
+		EXPECT_EQ(stepping.State(0).i, Hash(walk.expected)) << "the twin, or the case proves nothing";
+		EXPECT_EQ(skipping.State(0).i, stepping.State(0).i) << walk.settled << " -> " << walk.skippedTo;
+	}
+}
+
+TEST(WouldRepeat, ASkipKeepsTheLastRealValueAcrossANaN)
+{
+	machine_fixture plain(kCalm, {kOneBandRows});
+	machine_fixture edged(EdgeSource(), {kEdgeRows});
+	ASSERT_TRUE(plain.binding);
+	ASSERT_TRUE(edged.binding);
+	host_object host;
+	host.energy      = 0.9;
+	instance subject = plain.Create(host);
+	Step(subject, &host, 1);
+	host.energy = std::numeric_limits<double>::quiet_NaN();
+	Step(subject, &host, 2);
+	ASSERT_TRUE(SkipIfRepeats(subject, &host));
+	host.energy = 0.1;
+	Rebind(subject, *edged.binding, &host, 3);
+	host.energy = 0.7;
+	Step(subject, &host, 4);
+	EXPECT_EQ(subject.State(0).i, Hash("idle")) << "0.9 is still the last value: 0.7 crossed nothing";
+}
+
+TEST(WouldRepeat, ASkipKeepsTheLastRealValueAcrossAFailedGetter)
+{
+	input_probe     probe;
+	int             reports = 0;
+	machine_fixture plain(kCalm, {kOneBandRows}, ProbeHost(probe, false, reports));
+	machine_fixture edged(EdgeSource(), {kEdgeRows}, ProbeHost(probe, false, reports));
+	ASSERT_TRUE(plain.binding);
+	ASSERT_TRUE(edged.binding);
+	host_object host;
+	probe.value      = 0.9;
+	instance subject = plain.Create(host);
+	Step(subject, &host, 1);
+	probe.fails = true;
+	probe.value = 0.1;   // what the failed getter returns, which is no value read
+	Step(subject, &host, 2);
+	ASSERT_TRUE(SkipIfRepeats(subject, &host));
+	probe.fails = false;
+	Rebind(subject, *edged.binding, &host, 3);
+	probe.value = 0.7;
+	Step(subject, &host, 4);
+	EXPECT_EQ(subject.State(0).i, Hash("idle")) << "0.9 is still the last value: 0.7 crossed nothing";
+}
+
+// A no leaves nothing behind, even when earlier inputs compared equal: the host
+// may yet not step.
+TEST(WouldRepeat, ANoFromSkipIfRepeatsAdvancesNothing)
+{
+	machine_fixture plain(kCalm, {kCalmRows});
+	machine_fixture edged(EdgeSource(), {kEdgeRows});
+	ASSERT_TRUE(plain.binding);
+	ASSERT_TRUE(edged.binding);
+	host_object host;
+	host.energy      = 0.1;
+	instance subject = plain.Create(host);
+	Step(subject, &host, 1);
+	host.energy = 0.9;
+	ASSERT_FALSE(SkipIfRepeats(subject, &host));
+	Rebind(subject, *edged.binding, &host, 2);
+	Step(subject, &host, 3);
+	EXPECT_EQ(subject.State(0).i, Hash("walk")) << "still crossing from 0.1";
+}
+
 // upper_bound puts a NaN past every edge, in the top cell, where a value above
 // the range also lands; a step answers the one and refuses the other.
 TEST(WouldRepeat, NaNSharesNoCellWithTheEnds)
@@ -2093,11 +2208,15 @@ TEST(WouldRepeat, AskingAllocatesNothing)
 	Step(subject, &host, 1);
 	AllocationCount count;
 	bool const      repeats = WouldRepeat(subject, &host);
+	bool const      skips   = SkipIfRepeats(subject, &host);
 	probe.fails = true;
-	bool const      fails   = WouldRepeat(subject, &host);
+	bool const      fails     = WouldRepeat(subject, &host);
+	bool const      failSkips = SkipIfRepeats(subject, &host);
 	EXPECT_EQ(count.Count(), 0u);
 	EXPECT_TRUE(repeats);
+	EXPECT_TRUE(skips);
 	EXPECT_FALSE(fails);
+	EXPECT_FALSE(failSkips);
 }
 
 // The claim itself: an instance that skips what WouldRepeat says repeats stays
@@ -2157,7 +2276,7 @@ step,react,mode=state.mode kind=input.message,,mood=mood,,
 			host.energy = unit(random);
 		}
 		host.message = unit(random) < 0.05 ? Hash("poke") : 0;
-		bool const repeats = WouldRepeat(skipping, &host);
+		bool const repeats = SkipIfRepeats(skipping, &host);
 		if (repeats)
 		{
 			++skipped;

@@ -146,6 +146,11 @@ struct instance_access
 	static size_t&                     EmittedCount(instance& i) { return i._emittedCount.n; }
 	static counted_ptr<Binding const>& Left(instance& i) { return i._left; }
 	static bool&                       Settled(instance& i) { return i._settled; }
+	// Whether a Step now would repeat the settled one: the one comparison
+	// WouldRepeat and SkipIfRepeats share. seen(i, answered, value) receives each
+	// input as it is read.
+	template<typename Seen>
+	static bool Repeats(instance const& i, void const* self, Seen const& seen);
 #if TABULAR_PROVENANCE
 	static shared_array<provenance_entry>& Ring(instance& i) { return i._provenance; }
 	static size_t&                        RingNext(instance& i) { return i._provenanceNext; }
@@ -923,6 +928,11 @@ void ReadInputs(instance& subject, void const* self)
 // cross from. A getter that failed, a NaN, or a lazy input no clause reached is
 // no value read: the previous value stays the last one that was, so a crossing
 // is not lost across it.
+bool IsValueRead(input_def const& in, cell value)
+{
+	return !(in.type == column_type::Double && std::isnan(value.d));
+}
+
 void AdvancePrevious(instance& subject)
 {
 	shared_array<cell> const&    inputs   = instance_access::Inputs(subject);
@@ -931,8 +941,7 @@ void AdvancePrevious(instance& subject)
 	detail::machine_def const&  def      = machine_access::Of(*binding_access::Of(subject.binding()).machine).def;
 	for (size_t i = 0; i < inputs.size(); ++i)
 	{
-		bool const nan = def.inputs[i].type == column_type::Double && std::isnan(inputs[i].d);
-		if (read[i] == kInputRead && !nan)
+		if (read[i] == kInputRead && IsValueRead(def.inputs[i], inputs[i]))
 		{
 			previous[i] = inputs[i];
 		}
@@ -1006,7 +1015,9 @@ void SizeFor(instance& subject, binding_access::Data const& data)
 	instance_access::Answers(subject)     = shared_array<clause_answer>(data.answerStart[kTriggerCount], clause_answer{});
 	instance_access::Reported(subject)    = shared_array<uint64_t>((data.reportBits + 63) / 64);
 	instance_access::Keys(subject)        = shared_array<cell>(data.maxKeys, cell::Integer(0));
-	instance_access::Given(subject)       = shared_array<cell>(data.maxInputs, cell::Integer(0));
+	// Scratch between runs too: SkipIfRepeats stages a machine input per getter here.
+	instance_access::Given(subject)       = shared_array<cell>(
+		data.repeatable ? std::max(data.maxInputs, size_t(data.getters.size())) : data.maxInputs, cell::Integer(0));
 	instance_access::GivenBefore(subject) = shared_array<cell>(data.maxInputs, cell::Integer(0));
 	instance_access::Previous(subject)    = shared_array<cell>(data.getters.size(), cell::Real(std::numeric_limits<double>::quiet_NaN()));
 	instance_access::Axes(subject)        = shared_array<float>(data.maxAxes, 0.f);
@@ -1223,7 +1234,8 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	return subject.Emitted();
 }
 
-bool WouldRepeat(instance const& subject, void const* self)
+template<typename Seen>
+bool instance_access::Repeats(instance const& subject, void const* self, Seen const& seen)
 {
 	assert(subject._binding && "a moved-from instance is asked: caller misuse");
 	binding_access::Data const& binding = binding_access::Of(*subject._binding);
@@ -1250,8 +1262,34 @@ bool WouldRepeat(instance const& subject, void const* self)
 		{
 			return false;
 		}
+		seen(i, answered, now);
 	}
 	return true;
+}
+
+bool WouldRepeat(instance const& subject, void const* self)
+{
+	return instance_access::Repeats(subject, self, [](size_t, bool, cell) {});
+}
+
+bool SkipIfRepeats(instance& subject, void const* self)
+{
+	// A later input can still say no, and a getter is read only once, so what a
+	// step would leave is staged until every input has been compared.
+	shared_array<cell>&         staged   = instance_access::Given(subject);
+	shared_array<cell> const&   previous = instance_access::Previous(subject);
+	detail::machine_def const&  def      = machine_access::Of(*binding_access::Of(subject.binding()).machine).def;
+	bool const repeats = instance_access::Repeats(subject, self, [&](size_t i, bool answered, cell value)
+	{
+		staged[i] = answered && IsValueRead(def.inputs[i], value) ? value : previous[i];
+	});
+	if (repeats)
+	{
+		// Inputs stay: they are what the next ask compares with. No edge reads
+		// these in a repeatable machine; a Rebind carries them into one that has.
+		std::copy(staged.begin(), staged.begin() + previous.size(), instance_access::Previous(subject).begin());
+	}
+	return repeats;
 }
 
 bool Changed(instance const& subject)

@@ -349,7 +349,6 @@ public:
 private:
 	friend struct instance_access;
 	friend bool Changed(instance const&);
-	friend bool WouldRepeat(instance const&, void const*);
 	instance() = default;
 
 	counted_ptr<Binding const> _binding;
@@ -475,8 +474,17 @@ bool Changed(instance const& subject);
 // in any list; and never true before the first step, or after a Rebind or Close.
 // A getter that fails repeats only if it failed last step. A host asks only for a
 // step with no message of its own to dispatch: such a step is new whatever its
-// inputs say.
+// inputs say. Leaves the edge history where it was: a host that then leaves the
+// step out calls SkipIfRepeats, not this.
 bool WouldRepeat(instance const& subject, void const* self);
+
+// WouldRepeat, and on true takes the step's place: the previous values advance
+// to what a Step would have left (a failed read or a NaN keeps the last real
+// value), so a later Rebind carries the same edge history into a machine with
+// edges as if every step had run. Inputs stay on the settled step, which the next
+// ask compares with. Same getter calls as WouldRepeat, allocates nothing, and on
+// false changes nothing.
+bool SkipIfRepeats(instance& subject, void const* self);
 
 // Moves subject onto binding (P14): a reload, which the host runs on each
 // instance once it has prepared the changed machine again and bound it. Like a
