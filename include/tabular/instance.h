@@ -348,6 +348,7 @@ public:
 
 private:
 	friend struct instance_access;
+	friend bool Changed(instance const&);
 	instance() = default;
 
 	counted_ptr<Binding const> _binding;
@@ -448,6 +449,13 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 // except a report's first occurrence (see input_getter for a host's own
 // failure message).
 std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed);
+
+// Whether subject's last run changed anything: it emitted a command, or a state
+// column (hash, int or double alike) differs from where the run began. Costs a
+// compare of the state vectors and allocates nothing, so a host may ask after
+// every Step. Meant for a Step: the run swaps current with next, so the vector
+// it left in next is the start it is compared with. Reads nothing of the host.
+bool Changed(instance const& subject);
 
 // Moves subject onto binding (P14): a reload, which the host runs on each
 // instance once it has prepared the changed machine again and bound it. Like a

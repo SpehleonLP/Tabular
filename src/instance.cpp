@@ -1192,6 +1192,31 @@ std::span<emitted const> Step(instance& subject, void const* self, uint64_t seed
 	return subject.Emitted();
 }
 
+bool Changed(instance const& subject)
+{
+	assert(subject._binding && "a moved-from instance is asked: caller misuse");
+	if (subject._emittedCount.n != 0)
+	{
+		return true;
+	}
+	// A step swaps current with next, so next holds the state the run began
+	// from. Every column compared by its bits: a hash, an int and a double are
+	// all state, and an unwritten column is the same bits on both sides. A
+	// rebind resizes the vectors, which is a change.
+	if (subject._current.size() != subject._next.size())
+	{
+		return true;
+	}
+	for (size_t s = 0; s < subject._current.size(); ++s)
+	{
+		if (subject._current[s].i != subject._next[s].i)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 std::span<emitted const> Rebind(instance& subject, Binding const& binding, void const* self, uint64_t seed)
 {
 	assert(instance_access::BindingOf(subject) && "a moved-from instance is rebound: caller misuse");
