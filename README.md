@@ -249,7 +249,7 @@ Tabular has no message concept. The host dispatches a message to a **handler mac
 
 Two host rules follow:
 
-- A payload getter returns a neutral value when no message is in flight, and never fails then. Creation, `Rebind` and `Close` read every input too, and a failure there would spend the input's once-per-instance report.
+- A payload getter returns a neutral value when no message is in flight, and never fails then. Creation, `Rebind` and `Close` read every eager input too (a lazy input only when a clause reaches it), and a failure there would spend the input's once-per-instance report.
 - The host resets a handler's payload and event inputs after the dispatch step. Tabular doesn't; an event left set fires its run again on every step.
 
 An instance's own messages never come back into its own machine; the host routes a command's messages through the Mailbox.
@@ -298,7 +298,7 @@ An `instance` is composited into the host object (it is never `new`ed) and is mo
 
 **`CreateInstance(binding, id, seed, self)`** does the following:
 
-1. Sets the initial state and reads every input once.
+1. Sets the initial state and reads every eager input once; a lazy input is read only when a running clause reaches it.
 2. Runs `create` and then `entry`.
 3. Leaves the commands from `create` and then from `entry` in `instance.Emitted()`.
 

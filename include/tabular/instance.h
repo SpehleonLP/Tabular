@@ -403,7 +403,8 @@ private:
 };
 
 // A new instance of binding with the given id, its state at each column's
-// initial value. It reads every input once, then runs the
+// initial value. It reads every eager input once (a lazy input is read only if a
+// clause reaches it), then runs the
 // create list and the entry list (creation enters the initial state; no exit
 // runs) against the next vector, as a step runs its lists, makes the result
 // current, and returns in Emitted() what the create, then the entry clauses
@@ -417,7 +418,8 @@ instance CreateInstance(Binding const& binding, uint64_t id, uint64_t seed, void
 
 // One step.
 //
-// 1. Reads every input once, from its getter.
+// 1. Reads every eager input once, from its getter. A lazy input is read only when a
+//    running clause first reaches it, and at most once.
 // 2. Copies current into next, so a column no clause writes holds.
 // 3. Runs the step list in order, each clause reading state from next (so it
 //    sees what earlier clauses wrote this step) and an earlier clause's answer
@@ -490,7 +492,8 @@ bool SkipIfRepeats(instance& subject, void const* self);
 // instance once it has prepared the changed machine again and bound it. Like a
 // step that enters a state, with migration where the step list would be:
 //
-// 1. Leaving, under the old binding: every input is read once with its getter,
+// 1. Leaving, under the old binding: every eager input is read once with its getter
+//    (a lazy one is read only if the exit list reaches it),
 //    next is set to a copy of current, the old exit list runs
 //    against current, and next becomes current. What exit emitted comes
 //    first in the result, so the host hears the abort of what a state started
@@ -503,7 +506,7 @@ bool SkipIfRepeats(instance& subject, void const* self);
 //    longer declared is dropped. Every buffer is sized for the new binding,
 //    the report-once memory is cleared (a new binding is a new set of clauses
 //    and rows) and every clause answers NotRun.
-// 3. Entering again, under the new binding: every input is read once with the
+// 3. Entering again, under the new binding: every eager input is read once with the
 //    new getters, the new entry list runs against the migrated state, next
 //    becomes current, and what entry emitted follows exit's in the result.
 //    The create list does not run: the instance is not new.
@@ -529,8 +532,8 @@ std::span<emitted const> Rebind(instance& subject, Binding const& binding, void 
 
 // Ends subject's run, as the host does when the object leaves (from any
 // state: closing is not a transition, so no exit row is needed per state).
-// Runs the leaving half of a rebind under subject's own binding: every input
-// read once with its getter, crossing no edge, next set to a copy of current,
+// Runs the leaving half of a rebind under subject's own binding: every eager input
+// read once with its getter (a lazy one only if the exit list reaches it), crossing no edge, next set to a copy of current,
 // the exit list run against current (the state being left), and next made
 // current. Returns what exit emitted (the same span as Emitted()), so the
 // host hears the aborts of what the state started; the host then runs them

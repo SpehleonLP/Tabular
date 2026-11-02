@@ -1029,8 +1029,8 @@ void SizeFor(instance& subject, binding_access::Data const& data)
 	results = std::move(resized);
 }
 
-// Reads every input once and makes the values read the
-// previous ones, so the lists run next cross no edge, as at creation. An
+// Reads every eager input once (a lazy one is read only when a clause reaches it) and
+// makes the values read the previous ones, so the lists run next cross no edge, as at creation. An
 // input whose read failed, or a NaN, has no previous value.
 void ReadStill(instance& subject, void const* self)
 {
@@ -1067,7 +1067,7 @@ cell Migrated(detail::state_column const& to, std::span<detail::state_column con
 }
 
 // Leaves the current state for good, as a rebind's first half and Close do:
-// every input read once, crossing no edge, the exit list run against current
+// every eager input read once, crossing no edge, the exit list run against current
 // (the state being left) writing next, which becomes current, and its
 // commands added to the run's results.
 void Leave(instance& subject, void const* self, uint64_t seed)

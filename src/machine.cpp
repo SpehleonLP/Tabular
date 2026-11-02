@@ -1182,8 +1182,8 @@ detail::repeat_plan PlanRepeat(machine_access::Data const& machine, schema const
 		}
 	}
 
-	std::vector<std::vector<float>> edges(def.inputs.size());
-	std::vector<uint8_t>            exact(def.inputs.size());
+	shared_array<std::vector<float>> edges(def.inputs.size());
+	shared_array<uint8_t>            exact(def.inputs.size(), uint8_t(0));
 	for (size_t i = 0; i < def.inputs.size(); ++i)
 	{
 		exact[i] = def.inputs[i].type != column_type::Double;
